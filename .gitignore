@@ -1,0 +1,13 @@
+node_modules
+dist
+.DS_Store
+*.local
+.vite
+*.log
+# 部署脚本（内含服务器凭据，勿提交）
+deploy/
+# WorkBuddy 内部工作记录（含服务器 IP 等内部信息）
+.workbuddy/
+# 临时校验文件 / Vite 临时配置
+*_delete.txt
+*.timestamp-*.mjs

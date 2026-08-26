@@ -1,0 +1,12 @@
+{
+  "app.title": "多维表格表单设计插件",
+  "app.loading": "初始化中…",
+  "config.save": "保存配置",
+  "config.cancel": "取消",
+  "config.mainTable": "主表",
+  "config.subTable": "子表",
+  "config.rules": "条件显示规则",
+  "form.submit": "提交",
+  "form.submitSuccess": "提交成功",
+  "env.tip": "未检测到飞书多维表格环境，数据读写功能不可用。"
+}

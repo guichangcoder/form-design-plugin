@@ -1,0 +1,491 @@
+/* ============================================================
+   多维联填表单 — 全局样式（品牌设计系统）
+   主题：专业深蓝 + 浅灰底 + 白色卡片
+   ============================================================ */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  min-height: 100%;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei',
+    'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  font-size: 14px;
+  color: #1f2937;
+  background: #f3f5f9;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---------- 品牌色变量（覆盖 Semi 主题） ---------- */
+:root {
+  --brand: #1d4ed8;
+  --brand-hover: #1e40af;
+  --brand-deep: #1e3a8a;
+  --brand-soft: #eff6ff;
+  --brand-line: #bfdbfe;
+  --ink: #1f2937;
+  --muted: #6b7280;
+  --line: #e5e7eb;
+  --bg: #f3f5f9;
+  --card: #ffffff;
+  --danger: #dc2626;
+  --ok: #16a34a;
+
+  --semi-color-primary: #1d4ed8;
+  --semi-color-primary-hover: #1e40af;
+  --semi-color-primary-active: #1e3a8a;
+  --semi-color-primary-light: #eff6ff;
+  --semi-color-primary-light-hover: #dbeafe;
+  --semi-color-primary-light-active: #bfdbfe;
+  --semi-color-primary-border: #bfdbfe;
+  --semi-color-danger: #dc2626;
+  --semi-color-warning: #d97706;
+  --semi-color-success: #16a34a;
+  --semi-color-border: #e5e7eb;
+  --semi-color-bg-0: #ffffff;
+  --semi-color-bg-1: #f8fafc;
+  --semi-color-fill-0: #f1f5f9;
+  --semi-color-text-0: #1f2937;
+  --semi-color-text-1: #374151;
+  --semi-color-text-2: #6b7280;
+  --semi-color-text-3: #9ca3af;
+  --semi-radius-small: 6px;
+  --semi-radius-default: 8px;
+  --semi-radius-large: 12px;
+}
+
+button {
+  font-family: inherit;
+}
+
+/* ---------- 品牌顶栏 ---------- */
+.plugin-header {
+  background: linear-gradient(120deg, var(--brand-deep) 0%, var(--brand) 60%, var(--brand-hover) 100%);
+  color: #fff;
+  padding: 12px 16px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  box-shadow: 0 2px 8px rgba(30, 58, 138, 0.25);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.plugin-header .logo {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.18);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  flex: 0 0 auto;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+}
+
+.plugin-header .title-box {
+  flex: 1;
+  min-width: 0;
+}
+
+.plugin-header .title-box h1 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  line-height: 1.3;
+}
+
+.plugin-header .title-box .sub {
+  font-size: 11px;
+  opacity: 0.75;
+  line-height: 1.4;
+}
+
+.plugin-header .mode-badge {
+  flex: 0 0 auto;
+  font-size: 11px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.18);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  white-space: nowrap;
+}
+
+.plugin-header .mode-badge.mode-fill {
+  background: rgba(22, 163, 74, 0.35);
+  border-color: rgba(255, 255, 255, 0.4);
+}
+
+/* ---------- 内容区与分区卡片 ---------- */
+.plugin-content {
+  padding: 14px;
+  max-width: 720px;
+  margin: 0 auto;
+}
+
+.section-card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  margin-bottom: 14px;
+  overflow: hidden;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+}
+
+.section-card .sec-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--line);
+  background: linear-gradient(180deg, #fbfcfe, #f6f8fc);
+}
+
+.section-card .sec-head .sec-num {
+  width: 22px;
+  height: 22px;
+  border-radius: 7px;
+  background: var(--brand);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+}
+
+.section-card .sec-head .sec-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.section-card .sec-head .sec-desc {
+  font-size: 12px;
+  color: var(--muted);
+  margin-left: auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.section-card .sec-body {
+  padding: 14px;
+}
+
+/* ---------- 表单字段行（填写模式） ---------- */
+.field-row {
+  margin-bottom: 14px;
+}
+
+.field-row .field-label {
+  display: block;
+  margin-bottom: 5px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #374151;
+}
+
+.field-row .required-star {
+  color: var(--danger);
+  margin-right: 4px;
+  font-weight: 700;
+}
+
+/* ---------- 子表多行卡片 ---------- */
+.sub-row {
+  background: #fafbfd;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin-bottom: 10px;
+  position: relative;
+}
+
+.sub-row .sub-row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.sub-row .row-num {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--brand);
+  background: var(--brand-soft);
+  border: 1px solid var(--brand-line);
+  border-radius: 999px;
+  padding: 2px 10px;
+}
+
+.sub-row .row-del {
+  color: var(--muted);
+}
+
+.sub-row .row-del:hover {
+  color: var(--danger);
+}
+
+.add-row-btn {
+  width: 100%;
+  border: 1px dashed #c7d2e3 !important;
+  border-radius: 8px !important;
+  color: var(--brand) !important;
+  background: #f8fafc !important;
+  height: 34px;
+}
+
+.add-row-btn:hover {
+  border-color: var(--brand) !important;
+  background: var(--brand-soft) !important;
+}
+
+/* ---------- 提交按钮 ---------- */
+.submit-btn {
+  width: 100%;
+  height: 46px !important;
+  font-size: 15px !important;
+  font-weight: 600;
+  border-radius: 10px !important;
+  border: none !important;
+  background: linear-gradient(120deg, var(--brand), var(--brand-hover)) !important;
+  box-shadow: 0 4px 14px rgba(29, 78, 216, 0.35);
+  letter-spacing: 2px;
+}
+
+.submit-btn:hover {
+  background: linear-gradient(120deg, var(--brand-hover), var(--brand-deep)) !important;
+}
+
+/* ---------- 保存配置按钮 ---------- */
+.save-config-btn {
+  height: 40px !important;
+  font-size: 14px;
+  font-weight: 600;
+  border-radius: 8px !important;
+  padding: 0 24px !important;
+  letter-spacing: 1px;
+}
+
+/* ---------- 字段配置列表（配置模式） ---------- */
+.cfg-field-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 4px;
+  border-bottom: 1px solid #f1f5f9;
+  transition: background 0.15s;
+}
+
+.cfg-field-row:hover {
+  background: #f8fafc;
+}
+
+.cfg-field-row:last-child {
+  border-bottom: none;
+}
+
+.cfg-field-row.hidden {
+  opacity: 0.5;
+}
+
+.cfg-field-row .f-name {
+  flex: 0 0 128px;
+  font-size: 13px;
+  font-weight: 500;
+  color: #374151;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cfg-field-row .f-type {
+  flex: 0 0 66px;
+  font-size: 11px;
+  color: #64748b;
+  background: #f1f5f9;
+  border-radius: 4px;
+  padding: 2px 6px;
+  text-align: center;
+}
+
+.cfg-field-row .f-label-input {
+  flex: 1;
+}
+
+.cfg-field-row .f-toggle {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: #64748b;
+}
+
+/* ---------- 规则编辑器 ---------- */
+.rule-box {
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 12px;
+  margin-bottom: 10px;
+  background: #fcfdfe;
+}
+
+.rule-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.rule-keyword {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--brand);
+  background: var(--brand-soft);
+  border-radius: 6px;
+  padding: 2px 8px;
+  line-height: 1.6;
+}
+
+/* ---------- 子表配置盒 ---------- */
+.subcfg-box {
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 12px;
+  margin-bottom: 12px;
+  background: #fcfdfe;
+}
+
+.subcfg-box .subcfg-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.subcfg-box .subcfg-tag {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--brand-deep);
+  background: var(--brand-soft);
+  border: 1px solid var(--brand-line);
+  border-radius: 999px;
+  padding: 2px 10px;
+}
+
+.subcfg-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.subcfg-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  color: #374151;
+}
+
+/* ---------- 主题颜色选择器 ---------- */
+.theme-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.theme-picker .theme-swatch {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 2px solid #fff;
+  box-shadow: 0 0 0 1px #d7dfe9;
+  cursor: pointer;
+  padding: 0;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+  position: relative;
+}
+
+.theme-picker .theme-swatch:hover {
+  transform: scale(1.15);
+}
+
+.theme-picker .theme-swatch.active {
+  transform: scale(1.15);
+  box-shadow: 0 0 0 2px #fff, 0 0 0 4px #334155;
+}
+
+.theme-picker .theme-swatch.custom {
+  overflow: hidden;
+}
+
+.theme-picker .theme-swatch.custom input[type='color'] {
+  position: absolute;
+  inset: -8px;
+  width: 44px;
+  height: 44px;
+  opacity: 0;
+  cursor: pointer;
+  border: none;
+}
+
+.theme-current {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* ---------- 空态提示 ---------- */
+.empty-tip {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.8;
+  background: #f8fafc;
+  border: 1px dashed #d7dfe9;
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+
+/* ---------- 加载态 ---------- */
+.page-loading {
+  min-height: 60vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  font-size: 14px;
+  gap: 8px;
+}
+
+/* ---------- 滚动条（侧边栏窄窗口友好） ---------- */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
