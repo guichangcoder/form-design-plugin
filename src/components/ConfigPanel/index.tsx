@@ -1,8 +1,8 @@
 import React, { useEffect, useState } from 'react';
-import { FormPluginConfig, CONFIG_VERSION } from '../../types';
+import { FormPluginConfig, CONFIG_VERSION, genId } from '../../types';
 import { useTableMeta } from '../../hooks/useTableMeta';
 import { useFieldMeta } from '../../hooks/useFieldMeta';
-import { metaToFieldConfig } from '../../services/baseService';
+import { getLinkTargetTableId, metaToFieldConfig } from '../../services/baseService';
 import { Input, TextArea, Select, Button, Typography } from '@douyinfe/semi-ui';
 import { IconPlus } from '@douyinfe/semi-icons';
 import { FieldConfigList } from './FieldConfigList';
@@ -19,11 +19,12 @@ interface Props {
 
 function defaultConfig(): FormPluginConfig {
   return {
+    id: genId(),
     version: CONFIG_VERSION,
     formTitle: '新建表单',
     formDescription: '',
     themeColor: DEFAULT_THEME,
-    mainTable: { tableId: '', tableName: '', fields: [] },
+    mainTable: { tableId: '', tableName: '', sectionName: '', fields: [] },
     subTables: [],
     conditionalRules: [],
   };
@@ -65,13 +66,25 @@ export function ConfigPanel({ initialConfig, onSave, onCancel }: Props) {
 
   const updateMainTable = (tableId: any) => {
     const t = tables.find((x) => x.id === tableId);
-    setDraft((d) => ({
-      ...d,
-      mainTable: { tableId, tableName: t?.name ?? '', fields: [] },
-    }));
+    const newName = t?.name ?? '';
+    setDraft((d) => {
+      if (d.mainTable.tableId === tableId) return d;
+      const prevSection = d.mainTable.sectionName ?? '';
+      const prevName = d.mainTable.tableName;
+      // 区块名称：未自定义（为空 或 仍等于旧表名）时，跟随新表名自动填充；
+      // 已手动改过则保留用户的文字。
+      const newSection = !prevSection || prevSection === prevName ? newName : prevSection;
+      return {
+        ...d,
+        mainTable: { ...d.mainTable, tableId, tableName: newName, sectionName: newSection, fields: [] },
+        // 主表变化后，旧子表关联和规则可能指向另一张主表，必须重新配置。
+        subTables: [],
+        conditionalRules: [],
+      };
+    });
   };
 
-  const save = () => {
+  const save = async () => {
     if (!draft.mainTable.tableId) {
       toast('请先选择主表', 'warning');
       return;
@@ -89,6 +102,22 @@ export function ConfigPanel({ initialConfig, onSave, onCancel }: Props) {
         toast(`子表「${sub.tableName}」未选择指向主表的关联字段`, 'warning');
         return;
       }
+    }
+    // 保存前用宿主元数据校验一次，避免旧配置/表结构变更后仍能进入填写态。
+    const invalidLinks: string[] = [];
+    for (const sub of draft.subTables) {
+      try {
+        const target = await getLinkTargetTableId(sub.tableId, sub.linkFieldId);
+        if (target !== draft.mainTable.tableId) {
+          invalidLinks.push(sub.tableName || sub.tableId);
+        }
+      } catch {
+        invalidLinks.push(sub.tableName || sub.tableId);
+      }
+    }
+    if (invalidLinks.length) {
+      toast(`请重新选择关联字段：${invalidLinks.join('、')} 未指向主表`, 'error');
+      return;
     }
     console.log('[ConfigPanel] 校验通过，准备 onSave', draft);
     Promise.resolve()
@@ -178,6 +207,14 @@ export function ConfigPanel({ initialConfig, onSave, onCancel }: Props) {
       <div className="section-card">
         <SectionHead num="02" title="主表" desc="必填 · 表单的主记录" />
         <div className="sec-body">
+          <div className="field-row">
+            <label className="field-label">区块名称</label>
+            <Input
+              value={draft.mainTable.sectionName ?? ''}
+              placeholder="默认与表格名称一致，可手动修改"
+              onChange={(v: string) => setDraft((d) => ({ ...d, mainTable: { ...d.mainTable, sectionName: v } }))}
+            />
+          </div>
           <Select
             style={{ width: '100%' }}
             placeholder="选择主表"
@@ -199,12 +236,13 @@ export function ConfigPanel({ initialConfig, onSave, onCancel }: Props) {
         <SectionHead num="03" title="子表" desc="可选 · 关联主表的明细" />
         <div className="sec-body">
           {draft.subTables.map((sub, i) => (
-            <SubTableConfig
-              key={i}
-              index={i}
-              sub={sub}
-              tables={tables}
-              onChange={(s) =>
+          <SubTableConfig
+            key={i}
+            index={i}
+            sub={sub}
+            tables={tables}
+            mainTableId={draft.mainTable.tableId}
+            onChange={(s) =>
                 setDraft((d) => ({
                   ...d,
                   subTables: d.subTables.map((x, idx) => (idx === i ? s : x)),
@@ -228,7 +266,7 @@ export function ConfigPanel({ initialConfig, onSave, onCancel }: Props) {
                 ...d,
                 subTables: [
                   ...d.subTables,
-                  { tableId: '', tableName: '', linkFieldId: '', fields: [], allowMultiple: true },
+                  { tableId: '', tableName: '', sectionName: '', linkFieldId: '', fields: [], allowMultiple: true },
                 ],
               }))
             }

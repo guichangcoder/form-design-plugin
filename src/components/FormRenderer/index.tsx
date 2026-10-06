@@ -15,19 +15,34 @@ interface Props {
   onBackToConfig: () => void;
 }
 
+function initialValues(fields: FormPluginConfig['mainTable']['fields']): FormValues {
+  return fields.reduce<FormValues>((values, field) => {
+    if (field.defaultValue !== undefined) {
+      values[field.fieldId] = Array.isArray(field.defaultValue)
+        ? [...field.defaultValue]
+        : field.defaultValue;
+    }
+    return values;
+  }, {});
+}
+
+function initMainValues(config: FormPluginConfig): FormValues {
+  return initialValues(config.mainTable.fields);
+}
+
 function initSubValues(config: FormPluginConfig): Record<string, FormValues[]> {
   const o: Record<string, FormValues[]> = {};
   config.subTables.forEach((s) => {
-    o[s.tableId] = [{}];
+    o[s.tableId] = [initialValues(s.fields)];
   });
   return o;
 }
 
-/** 分区卡片头 */
-function SectionHead({ num, title, desc }: { num: string; title: string; desc?: string }) {
+/** 分区卡片头（填写态不传 num/desc，只显示区块名称） */
+function SectionHead({ num, title, desc }: { num?: string; title: string; desc?: string }) {
   return (
     <div className="sec-head">
-      <span className="sec-num">{num}</span>
+      {num ? <span className="sec-num">{num}</span> : null}
       <span className="sec-title">{title}</span>
       {desc && <span className="sec-desc">{desc}</span>}
     </div>
@@ -35,7 +50,7 @@ function SectionHead({ num, title, desc }: { num: string; title: string; desc?: 
 }
 
 export function FormRenderer({ config, onBackToConfig }: Props) {
-  const [mainValues, setMainValues] = useState<FormValues>({});
+  const [mainValues, setMainValues] = useState<FormValues>(() => initMainValues(config));
   const [subValues, setSubValues] = useState<Record<string, FormValues[]>>(() =>
     initSubValues(config)
   );
@@ -58,7 +73,7 @@ export function FormRenderer({ config, onBackToConfig }: Props) {
     setSubmitting(false);
     if (r.success) {
       toast('提交成功', 'success');
-      setMainValues({});
+      setMainValues(initMainValues(config));
       setSubValues(initSubValues(config));
     } else {
       toast(`提交失败：${r.error ?? '未知错误'}`, 'error');
@@ -66,27 +81,19 @@ export function FormRenderer({ config, onBackToConfig }: Props) {
   };
 
   return (
-    <div>
-      {/* 表单标题区 */}
-      <div className="section-card">
-        <div className="sec-head">
-          <span className="sec-num">📝</span>
-          <span className="sec-title">{config.formTitle || '未命名表单'}</span>
-          {config.formDescription && <span className="sec-desc">{config.formDescription}</span>}
-        </div>
-        <div className="sec-body" style={{ padding: '10px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <Typography.Text type="tertiary" style={{ fontSize: 12 }}>
-            <span style={{ color: '#dc2626' }}>*</span> 为必填项 · 带条件规则时按实际情况显隐
-          </Typography.Text>
-          <Button theme="borderless" size="small" onClick={onBackToConfig}>
-            ⚙ 配置
-          </Button>
-        </div>
+    <div className="fill-form">
+      {/* 表单标题区：网页表单风格，居中标题 + 描述，右上角保留配置入口 */}
+      <div className="fill-head">
+        <div className="fill-title">{config.formTitle || '未命名表单'}</div>
+        {config.formDescription && <div className="fill-desc">{config.formDescription}</div>}
+        <Button theme="borderless" size="small" className="fill-config-btn" onClick={onBackToConfig}>
+          ⚙ 配置
+        </Button>
       </div>
 
       {/* 主表 */}
       <div className="section-card">
-        <SectionHead num="01" title="主表信息" desc="必填" />
+        <SectionHead title={config.mainTable.sectionName || config.mainTable.tableName || '主表信息'} />
         <div className="sec-body">
           <MainForm config={config} values={mainValues} onChange={setMainValues} cond={cond} />
         </div>
@@ -95,7 +102,7 @@ export function FormRenderer({ config, onBackToConfig }: Props) {
       {/* 子表 */}
       {config.subTables.map((sub, i) => (
         <div className="section-card" key={sub.tableId}>
-          <SectionHead num={String(i + 2).padStart(2, '0')} title={sub.tableName} desc={sub.allowMultiple ? '可多条' : '单条'} />
+          <SectionHead title={sub.sectionName || sub.tableName || `子表${i + 1}`} />
           <div className="sec-body">
             <SubForm
               sub={sub}

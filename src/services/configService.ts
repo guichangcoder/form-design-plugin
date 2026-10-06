@@ -1,7 +1,126 @@
-import { bitable } from '@lark-base-open/js-sdk';
-import { CONFIG_STORAGE_KEY, FormPluginConfig } from '../types';
+import { bitable, dashboard, DashboardState } from '@lark-base-open/js-sdk';
+import { CONFIG_STORAGE_KEY, FormPluginConfig, PluginData } from '../types';
+import {
+  serializeConfig,
+  hydrateConfig,
+  estimateConfigBytes,
+} from './configSize';
 
-/** 配置形态校验：必须有 mainTable 对象、subTables/conditionalRules 数组 */
+/** dev 模式下宿主 widget 配置可能在 F5 后丢失；用飞书 base 做一份持久化备份，
+ *  刷新后即使宿主读不到配置，也能从 base 捞回并重新写回宿主。base 不受页面刷新影响。 */
+const BACKUP_KEY = 'form_design_plugin_backup_v1';
+
+/**
+ * 宿主上下文探测：
+ * - 'dashboard'：运行在应用模式的「仪表盘页面」宿主里（即飞书里那些"像其他插件一样"的页面组件）。
+ *   此时用 dashboard 模块（`state` / `getConfig` / `saveConfig` / `setRendered`）。
+ * - 'bridge'：运行在普通多维表格侧边栏/扩展脚本里，用 bitable.bridge 存储。
+ *
+ * 说明：dashboard 模块是 SDK 始终导出的对象，但只有身处仪表盘页面宿主时，
+ * 其 `state` 才是合法的 DashboardState 值；否则为 undefined。据此区分两种宿主。
+ */
+export type HostContext = 'dashboard' | 'bridge';
+
+/**
+ * dashboard 宿主下 state 的合法枚举值（不区分大小写匹配）。
+ * 仅当 dashboard.state 是这些合法值之一时，才判定为 dashboard 宿主，
+ * 避免纯浏览器（state=undefined）或其他非页面宿主被误判，导致逻辑错乱。
+ */
+const DASHBOARD_STATES = ['create', 'config', 'view', 'fullscreen'];
+
+/** 将 SDK/宿主可能返回的大小写不同的 state 统一成 SDK 枚举值。 */
+export function normalizeDashboardState(value: unknown): DashboardState | undefined {
+  const state = String(value ?? '').trim().toLowerCase();
+  switch (state) {
+    case 'create':
+      return DashboardState.Create;
+    case 'config':
+      return DashboardState.Config;
+    case 'view':
+      return DashboardState.View;
+    case 'fullscreen':
+      return DashboardState.FullScreen;
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * 是否为仪表盘页面宿主（运行在飞书应用模式仪表盘里）。
+ * 必须同时满足：dashboard 模块存在且 saveConfig/getConfig 可用，且 state 为合法枚举。
+ * 注意：dev 本地（localhost）下 dashboard.state 会返回 'view'（URL 无 isCreate/isConfig），
+ * 因此也会被判定为 dashboard —— 这是预期的，saveConfig 分支会按 dev 降级到本地存储。
+ */
+export function isDashboardHost(): boolean {
+  try {
+    const d = dashboard as any;
+    if (
+      d &&
+      typeof d.saveConfig === 'function' &&
+      typeof d.getConfig === 'function'
+    ) {
+      const s = d.state;
+      return typeof s === 'string' && DASHBOARD_STATES.includes(s.toLowerCase());
+    }
+  } catch {
+    /* 非 dashboard 宿主，忽略 */
+  }
+  return false;
+}
+
+export function getHostContext(): HostContext {
+  return isDashboardHost() ? 'dashboard' : 'bridge';
+}
+
+/**
+ * 插件当前是否处于「配置态」（Create / Config）。
+ *
+ * 对齐官方 Count-Down 插件的双保险做法：
+ *   const isConfig = dashboard.state === DashboardState.Config
+ *     || !!url.searchParams.get('isConfig');
+ *
+ * 原因（SDK 源码实证）：dashboard.state 的参数解析函数只取
+ * `new URL(href).hash.slice(hash.indexOf("?"))` —— 即**仅解析 hash 里 ? 之后的参数**。
+ * 若宿主把 isConfig / isCreate 放在查询串（search）而非 hash 中，state 会错误地回落为 View，
+ * 插件就会渲染成「填写态」而不是「配置面板」，用户看不到配置 UI。
+ * 因此这里在 state 之外，再兜底检查一次 URL searchParams。
+ */
+export function isHostConfigState(): boolean {
+  try {
+    const s = normalizeDashboardState((dashboard as any).state);
+    if (s === DashboardState.Config || s === DashboardState.Create) return true;
+  } catch {
+    /* 非 dashboard 宿主，继续走 URL 兜底 */
+  }
+  try {
+    const q = new URL(window.location.href).searchParams;
+    if (q.get('isConfig') === '1' || q.get('isCreate') === '1') return true;
+  } catch {
+    /* URL 解析失败则忽略 */
+  }
+  return false;
+}
+
+/** 宿主诊断信息：用于在飞书内加载后快速定位"为什么不进画布" */
+export function diagnoseHost(): Record<string, unknown> {
+  try {
+    const d = dashboard as any;
+    const hasDash = !!d;
+    const state = hasDash ? d.state : 'n/a';
+    return {
+      hasDashboardObj: hasDash,
+      hasGetConfig: hasDash && typeof d.getConfig === 'function',
+      hasSaveConfig: hasDash && typeof d.saveConfig === 'function',
+      hasSetRendered: hasDash && typeof d.setRendered === 'function',
+      state,
+      resolvedContext: getHostContext(),
+    };
+  } catch (e) {
+    return { diagnoseError: String(e) };
+  }
+}
+
+/** 单份表单配置形态校验 */
 function isValidConfig(d: unknown): d is FormPluginConfig {
   if (!d || typeof d !== 'object') return false;
   const c = d as Record<string, unknown>;
@@ -11,6 +130,33 @@ function isValidConfig(d: unknown): d is FormPluginConfig {
     Array.isArray(c.subTables) &&
     Array.isArray(c.conditionalRules)
   );
+}
+
+/** 多表单数据形态校验 */
+function isValidData(d: unknown): d is PluginData {
+  if (!d || typeof d !== 'object') return false;
+  const c = d as Record<string, unknown>;
+  return Array.isArray(c.forms) && (c.forms as unknown[]).every((f) => isValidConfig(f));
+}
+
+/**
+ * 解析存储值为 PluginData；兼容宿主把 customConfig 返回为 JSON 字符串，
+ * 以及旧版单份配置（自动包成 forms[0]）。
+ */
+function asData(value: unknown): PluginData | null {
+  let d = value;
+  // dashboard.getConfig 在不同宿主版本中可能返回对象或 JSON 字符串。
+  // 最多解析两层，兼容历史上被重复 JSON.stringify 的配置，同时避免无限递归。
+  for (let i = 0; i < 2 && typeof d === 'string'; i += 1) {
+    try {
+      d = JSON.parse(d);
+    } catch {
+      return null;
+    }
+  }
+  if (isValidData(d)) return d as PluginData;
+  if (isValidConfig(d)) return { forms: [d as FormPluginConfig] };
+  return null;
 }
 
 /** localStorage 是否可用（部分 webview 沙箱可能禁用） */
@@ -27,18 +173,50 @@ const LS_OK = lsAvailable();
 
 /** 保存结果：标识实际写入位置（用于 UI 提示） */
 export interface SaveResult {
-  storage: 'bridge' | 'local';
+  storage: 'dashboard' | 'bridge' | 'local';
   warning?: string;
 }
 
 /**
- * 读取插件配置
- * - 优先 `bitable.bridge.getData`（正式发布后可用）
- * - 失败/无数据时回退到 localStorage（dev 模式 localhost URL 加载时，bridge.setData 不可用，
- *   我们用 localStorage 兜底，保证开发期能正常保存和恢复）
+ * 读取插件数据（多表单）。
+ * 优先级：dashboard（若在仪表盘页面宿主）→ bridge → localStorage。
+ * 兼容旧版单份配置自动升级。
+ * 读到的数据会经过 hydrateConfig：用 base 元信息补回字段的 fieldName/fieldType/options/linkTableId
+ * （持久化层已剥离这些冗余元数据以避免触发飞书 widget addonConfig 10240 字节上限）。
  */
-export async function loadConfig(): Promise<FormPluginConfig | null> {
-  // 1) 尝试 bridge
+export async function loadConfig(): Promise<PluginData | null> {
+  const startedAt = performance.now();
+  let source: 'dashboard' | 'bridge' | 'local' | null = null;
+  if (getHostContext() === 'dashboard') {
+    try {
+      const cfg = await (dashboard as any).getConfig();
+      const data = cfg && cfg.customConfig;
+      const parsed = asData(data);
+      if (parsed) {
+        source = 'dashboard';
+        const result = await hydrateConfig(parsed);
+        console.log(`[config] loadConfig 完成（${source}），耗时 ${Math.round(performance.now() - startedAt)}ms`);
+        return result;
+      }
+      // ★ dev 模式宿主配置可能在 F5 后丢失（getConfig 返回空）。从 base 备份捞回并写回宿主，
+      //   否则宿主会一直弹「配置数据发生变更，请重新配置」。
+      console.warn('[config] dashboard.getConfig 返回空，尝试从 base 备份恢复');
+      const restored = await tryRestoreFromBaseBackup();
+      if (restored) {
+        source = 'dashboard';
+        console.log(`[config] loadConfig 完成（${source}·base备份恢复），耗时 ${Math.round(performance.now() - startedAt)}ms`);
+        return restored;
+      }
+    } catch (e) {
+      console.warn('[config] dashboard.getConfig 失败，回退 bridge/localStorage:', e);
+      const restored = await tryRestoreFromBaseBackup();
+      if (restored) {
+        source = 'dashboard';
+        return restored;
+      }
+    }
+  }
+
   try {
     let data: unknown = await bitable.bridge.getData(CONFIG_STORAGE_KEY);
     if (typeof data === 'string') {
@@ -48,18 +226,28 @@ export async function loadConfig(): Promise<FormPluginConfig | null> {
         data = undefined;
       }
     }
-    if (data && isValidConfig(data)) return data;
+    const parsed = asData(data);
+    if (parsed) {
+      source = 'bridge';
+      const result = await hydrateConfig(parsed);
+      console.log(`[config] loadConfig 完成（${source}），耗时 ${Math.round(performance.now() - startedAt)}ms`);
+      return result;
+    }
   } catch (e) {
     console.warn('[config] bridge.getData 失败，将回退到本地存储:', e);
   }
 
-  // 2) 回退到 localStorage
   if (LS_OK) {
     try {
       const raw = localStorage.getItem(CONFIG_STORAGE_KEY);
       if (raw) {
-        const d = JSON.parse(raw);
-        if (isValidConfig(d)) return d;
+        const parsed = asData(JSON.parse(raw));
+        if (parsed) {
+          source = 'local';
+          const result = await hydrateConfig(parsed);
+          console.log(`[config] loadConfig 完成（${source}），耗时 ${Math.round(performance.now() - startedAt)}ms`);
+          return result;
+        }
       }
     } catch (e) {
       console.warn('[config] localStorage 读取失败:', e);
@@ -69,38 +257,289 @@ export async function loadConfig(): Promise<FormPluginConfig | null> {
 }
 
 /**
- * 保存插件配置
- * - 优先 `bitable.bridge.setData`
- * - 失败时回退到 localStorage（dev 模式 block entity 不可用时）
+ * 保存插件数据（多表单）。
+ * - 仪表盘页面宿主：dashboard.saveConfig({ customConfig })（页面实例级）。
+ *   这是通知飞书宿主「配置已保存」的唯一方式 —— 宿主收到后会：① 关闭配置弹窗
+ *   ② 将插件以 View 状态插入仪表盘画布。saveConfig 必须 resolve，弹窗才会关闭；
+ *   若抛错则弹窗不关闭，因此真实宿主下必须向上抛出错误，绝不能静默回退到 bridge/localStorage。
+ * - 否则（侧边栏扩展 / dev 本地）：优先 bridge，失败回退 localStorage。
+ *
+ * dataConditions 是应用插件实例声明的数据源列表。表单会直接引用主表和各子表，
+ * 因此必须把配置中实际引用的所有表都声明出来；customConfig 中也必须保留这些表 ID。
+ * 只声明主表会让宿主在 View 态发现子表引用不在数据源列表中，随后显示
+ * 「配置数据发生变更，请重新配置」。
  */
-export async function saveConfig(config: FormPluginConfig): Promise<SaveResult> {
-  // 1) 尝试 bridge
+export async function saveConfig(data: PluginData): Promise<SaveResult> {
+  // 估算"完整"形态字节数，用于诊断条展示压缩效果
+  const fullBytes = estimateConfigBytes(data);
+  if (isDashboardHost()) {
+    // ⚠️ 飞书仪表盘 widget 的 addonConfig 字段总上限 10240 字节；
+    // 完整 PluginData 经常超（fields.name/type/options 是大头），会触发
+    //   [page-service] create widget failed: addonConfig exceeded maximum length limit [10240]
+    // 把运行时可重取的元数据（fieldName/fieldType/options/linkTableId/tableName/linkFieldName）
+    // 全部剥离，只保存用户的"决策字段"（visible/required/label/placeholder/defaultValue/readonly）。
+    const thin = serializeConfig(data);
+    const thinBytes = estimateConfigBytes(thin) || -1;
+    try {
+      // ★ dataConditions = 「主表 + 所有子表」完整声明集。
+      //   宿主 View 态校验：customConfig 引用的每张表都必须在 dataConditions 里，
+      //   缺哪张就报「配置数据发生变更，请重新配置」（2026-10-06 实测：
+      //   只声明主表 + 剥离子表 tableId 仍失败 → 校验的是声明集，不是字符串扫描）。
+      //   历史踩坑记录（留档，均已实测）：
+      //   - 传 0 个（SDK 兜底取 base 第一张表）→ 与用户主表不一致 → 配置变更报错
+      //   - 只传 1 个主表 → 纯主表表单可用，但带子表必失败
+      //   - 早年「传 N 个 → create widget failed」的结论疑似被当时的 10KB 超限
+      //     问题污染（两种错在宿主侧同报 create widget failed），体积受控后需重测。
+      //   每个条目用 SDK genDefaultConfig() 同款结构：{tableId, dataRange:{type:'ALL'}}，
+      //   宿主保存时会自动补全 groups/series。
+      const firstForm = data?.forms?.find((f) => f?.mainTable?.tableId);
+      const mainTableId = firstForm?.mainTable?.tableId;
+      const subTableIds = (firstForm?.subTables ?? [])
+        .map((s) => s?.tableId)
+        .filter((id): id is string => !!id);
+      const allTableIds = Array.from(new Set([mainTableId, ...subTableIds].filter(Boolean)));
+      const dataConditions = allTableIds.map((tableId) => ({
+        tableId,
+        dataRange: { type: 'ALL' },
+      }));
+      const payload: Record<string, unknown> = {
+        customConfig: thin,
+        dataConditions,
+      };
+      const payloadLog = {
+        customConfigLength: JSON.stringify(thin).length,
+        dataConditions,
+        declaredTables: allTableIds,
+      };
+      // 把本次保存 payload 写到 localStorage：配置态若保存成功但 View 态失败，
+      // 用户刷新回配置态后仍能看到上一次保存的真实参数，便于排查。
+      try {
+        localStorage.setItem(
+          '__plugin_last_save_payload__',
+          JSON.stringify({
+            schemaVersion: 1,
+            time: new Date().toISOString(),
+            // 保留完整 thin payload；dev 模式宿主丢配置时可在 View 态重放
+            payload: payloadLog,
+            customConfig: thin,
+            fullBytes,
+            thinBytes,
+            // ★ 关键：保存时把主表 ID 和表单 ID 一起存，View 态自动修复时要用
+            mainTableId,
+            formId: data?.forms?.find((f) => f?.mainTable?.tableId)?.id ?? null,
+          })
+        );
+      } catch {
+        /* ignore */
+      }
+      console.log(
+        '[config] 调用 dashboard.saveConfig，thin字节数:',
+        thinBytes,
+        '（完整形态原本:',
+        fullBytes,
+        'B）payload:',
+        JSON.stringify(payloadLog)
+      );
+      const success = await (dashboard as any).saveConfig(payload);
+      console.log('[config] dashboard.saveConfig 返回:', success);
+
+      // ★ base 持久化备份：dev 模式下宿主 widget 配置不保证跨 F5 持久化，
+      //   把 thin + dataConditions 备份到飞书 base（setData 按 base 维度持久化，
+      //   不受页面刷新影响）。刷新后 loadConfig 会自动从这里捞回并写回宿主。
+      try {
+        await bitable.bridge.setData(
+          BACKUP_KEY,
+          JSON.stringify({
+            time: new Date().toISOString(),
+            customConfig: thin,
+            dataConditions,
+          })
+        );
+        console.log('[config] base 备份写入成功');
+      } catch (be) {
+        console.warn('[config] base 备份写入失败（可忽略，非致命）:', be);
+      }
+
+      // ★ 关键诊断：保存后立即读回 getConfig，看宿主真正存进去的是什么。
+      // 注意：Create 态 getConfig 会被宿主禁用（抛 'creation status'）。
+      let readback: { ok: boolean; ccLen: number; dataConditions: unknown; err?: string } = {
+        ok: false,
+        ccLen: 0,
+        dataConditions: null,
+      };
+      try {
+        const cfg: any = await (dashboard as any).getConfig();
+        const cc = cfg?.customConfig;
+        readback = {
+          ok: true,
+          ccLen: typeof cc === 'string' ? cc.length : cc ? JSON.stringify(cc).length : 0,
+          dataConditions: cfg?.dataConditions ?? null,
+        };
+        console.log('[config] 读回 getConfig:', readback);
+      } catch (e) {
+        const msg = String((e as Error)?.message ?? e);
+        readback.err = msg;
+        if (!/creation status|unable to invoke|create/i.test(msg)) {
+          console.warn('[config] 保存后读回 getConfig 失败（非常态）:', msg);
+        } else {
+          console.log('[config] 保存后 getConfig 被宿主禁用（Create 态正常）');
+        }
+      }
+      try {
+        localStorage.setItem(
+          '__plugin_last_save_readback__',
+          JSON.stringify({ time: new Date().toISOString(), success, readback })
+        );
+      } catch {
+        /* ignore */
+      }
+      if (success === false) {
+        throw new Error('dashboard.saveConfig 返回 false（宿主拒绝保存）');
+      }
+      return { storage: 'dashboard', warning: thinBytes >= 0 ? `序列化后 ${thinBytes} B` : undefined };
+    } catch (e) {
+      const errMsg = (e as Error)?.message ?? String(e);
+      console.error('[config] dashboard.saveConfig 失败，完整错误:', e);
+      // 不根据 import.meta.env.DEV 静默回退 —— 用户可能通过 dev server 地址
+      // 加载到真实仪表盘宿主中（此时 DEV=true 但确实有真实宿主）。
+      // 统一抛出错误，由 UI 层展示给用户；仅在明确无宿主 API 时才降级。
+      const isNoHostError =
+        errMsg.includes('not available') ||
+        errMsg.includes('not a function') ||
+        errMsg.includes('undefined');
+      if (isNoHostError) {
+        console.warn('[config] 宿主 API 不可用（非真实仪表盘环境），降级到 bridge/localStorage');
+      } else {
+        // 真实宿主但 saveConfig 调用失败（参数错/权限/网络等），必须向上抛出
+        throw new Error(`dashboard.saveConfig 失败：${errMsg}`);
+      }
+    }
+  }
+
   try {
-    await bitable.bridge.setData(CONFIG_STORAGE_KEY, config);
+    // bridge 没有 10240 字节限制，但为保持持久化层一致，也用瘦身形态写入
+    await bitable.bridge.setData(CONFIG_STORAGE_KEY, serializeConfig(data));
     return { storage: 'bridge' };
   } catch (e) {
     console.warn('[config] bridge.setData 失败，回退到本地存储:', e);
   }
-  // 2) 回退到 localStorage
+
   if (LS_OK) {
     try {
-      localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(config));
+      // localStorage 直接存完整 data（dev 调试用，不考虑大小），方便人肉 inspect
+      localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(data));
       return {
         storage: 'local',
         warning: '开发模式：bridge.setData 不可用，已保存到本地存储（iframe localStorage）。正式发布后会自动使用云端存储。',
       };
     } catch (e) {
       console.error('[config] localStorage 写入失败:', e);
-      throw new Error(
-        `保存失败：bridge 与本地存储均不可用 (${(e as Error)?.message ?? String(e)})`
-      );
+      throw new Error(`保存失败：bridge 与本地存储均不可用 (${(e as Error)?.message ?? String(e)})`);
     }
   }
   throw new Error('保存失败：bridge 不可用且当前环境不支持 localStorage');
 }
 
-/** 清空配置（bridge + localStorage 都清） */
+/**
+ * dev 模式修复：飞书 dev 插件的 dashboard 配置有时只在会话层生效，
+ * 刷新/重新进入 View 后宿主读不到稳定持久化数据，于是显示
+ * 「配置数据发生变更」。这里用最近一次真实保存的 thin payload 做一次重放。
+ *
+ * 只允许 localhost 触发，并且只在宿主 dataConditions/customConfig 与上次保存
+ * 不一致时才写；避免影响生产环境或覆盖用户在宿主侧主动调整的数据源。
+ */
+export async function repairDashboardConfigFromLastSave(
+  maxAttempts = 3
+): Promise<{ repaired: boolean; reason: string; detail?: Record<string, unknown> }> {
+  const hostname = window.location.hostname;
+  const isLocalDev = ['localhost', '127.0.0.1', '[::1]'].includes(hostname);
+  if (!isLocalDev) return { repaired: false, reason: 'not-local-dev' };
+  if (!isDashboardHost()) return { repaired: false, reason: 'not-dashboard' };
+
+  const saved = await loadSavedPayload();
+  const dataConditions = saved?.payload?.dataConditions ?? saved?.dataConditions;
+  const customConfig = saved?.customConfig;
+  if (!dataConditions || !customConfig) {
+    return { repaired: false, reason: 'no-replay-payload' };
+  }
+
+  // ★ 关键改动：不再先调 getConfig 判断"是否一致"。错误态下 getConfig 可能抛错/返回空，
+  // 反而让重放分支走不到。直接把上次成功保存的 payload 原样重放（幂等），带重试应对时序抖动。
+  let lastErr = '';
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const success = await (dashboard as any).saveConfig({ dataConditions, customConfig });
+      if (success !== false) {
+        return { repaired: true, reason: `replayed-attempt-${attempt}`, detail: { dataConditions } };
+      }
+      lastErr = 'saveConfig returned false';
+    } catch (e) {
+      lastErr = String((e as Error)?.message ?? e);
+    }
+    await new Promise((r) => setTimeout(r, 400));
+  }
+  return { repaired: false, reason: 'repair-failed-after-retries', detail: { lastErr } };
+}
+
+/** 读取最近一次保存的 payload：先 localStorage，再 base 备份 */
+async function loadSavedPayload(): Promise<any> {
+  try {
+    const raw = localStorage.getItem('__plugin_last_save_payload__');
+    if (raw) {
+      const o = JSON.parse(raw);
+      if (o?.customConfig) return o;
+    }
+  } catch {
+    /* ignore */
+  }
+  try {
+    const b = await bitable.bridge.getData(BACKUP_KEY);
+    if (b) {
+      const obj = typeof b === 'string' ? JSON.parse(b) : b;
+      if (obj?.customConfig) {
+        return { customConfig: obj.customConfig, payload: { dataConditions: obj.dataConditions } };
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+/** dev 模式宿主配置丢失时，从 base 备份捞回并写回宿主 */
+async function tryRestoreFromBaseBackup(): Promise<PluginData | null> {
+  try {
+    const b = await bitable.bridge.getData(BACKUP_KEY);
+    if (!b) return null;
+    const obj = typeof b === 'string' ? JSON.parse(b) : b;
+    if (!obj?.customConfig) return null;
+    const reparsed = asData(obj.customConfig);
+    if (!reparsed) return null;
+    // 写回宿主，触发宿主重新校验（这次配置是从上次成功保存完整保留的）
+    try {
+      await (dashboard as any).saveConfig({
+        dataConditions: obj.dataConditions,
+        customConfig: obj.customConfig,
+      });
+    } catch (e) {
+      console.warn('[config] 从 base 恢复时写回宿主失败（继续尝试返回数据）:', e);
+    }
+    return await hydrateConfig(reparsed);
+  } catch {
+    return null;
+  }
+}
+
+/** 清空配置（dashboard + bridge + localStorage 都清） */
 export async function clearConfig(): Promise<void> {
+  if (isDashboardHost()) {
+    try {
+      // 同样只传 customConfig，dataConditions 交给 SDK 兜底
+      await (dashboard as any).saveConfig({ dataConditions: [], customConfig: { forms: [] } });
+    } catch {
+      /* ignore */
+    }
+  }
   try {
     await bitable.bridge.setData(CONFIG_STORAGE_KEY, null);
   } catch {

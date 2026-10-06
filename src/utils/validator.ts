@@ -1,3 +1,4 @@
+import { FieldType } from '@lark-base-open/js-sdk';
 import {
   FormPluginConfig,
   FormValues,
@@ -25,6 +26,10 @@ export function isFieldRequired(
   tableId: string,
   cond: ConditionalState
 ): boolean {
+  // 关联字段由提交逻辑自动注入主表 recordId，不应要求用户填写。
+  if (field.fieldType === FieldType.SingleLink || field.fieldType === FieldType.DuplexLink) {
+    return false;
+  }
   if (cond.forcedUnrequired[tableId]?.has(field.fieldId)) return false;
   if (cond.forcedRequired[tableId]?.has(field.fieldId)) return true;
   return field.required;
@@ -58,10 +63,13 @@ export function validateForm(
   // 2. 校验子表（每条记录）
   for (const sub of config.subTables) {
     const rows = subValues[sub.tableId] ?? [];
-    if (rows.length === 0) continue;
-    rows.forEach((row, rowIndex) => {
-      validateSubRow(sub, row, rowIndex, cond, errors);
-    });
+    // 子表初始会展示一行空白占位；用户未填写任何字段时，不创建空子表记录，
+    // 也不应因为子表必填字段而阻止只填写主表。
+    rows
+      .filter((row) => sub.fields.some((field) => !isEmptyValue(row[field.fieldId])))
+      .forEach((row, rowIndex) => {
+        validateSubRow(sub, row, rowIndex, cond, errors);
+      });
   }
 
   return { valid: errors.length === 0, errors };

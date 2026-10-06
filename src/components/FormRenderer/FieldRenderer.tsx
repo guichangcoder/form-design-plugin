@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useRef } from 'react';
 import { FieldType } from '@lark-base-open/js-sdk';
 import { FieldConfig } from '../../types';
 import { bitable } from '@lark-base-open/js-sdk';
@@ -31,6 +31,26 @@ const fullWidth: React.CSSProperties = { width: '100%' };
  */
 export function FieldRenderer({ field, value, onChange, disabled }: Props) {
   const options = (field.options ?? []).map((o) => ({ value: o.name, label: o.name }));
+  const attachmentQueue = useRef(Promise.resolve());
+  const latestAttachmentValue = useRef<string[]>(Array.isArray(value) ? (value as string[]) : []);
+
+  useEffect(() => {
+    if (Array.isArray(value)) latestAttachmentValue.current = value as string[];
+  }, [value]);
+
+  const uploadAttachment = (file: File) => {
+    const task = attachmentQueue.current.then(async () => {
+      const tokens = await bitable.base.batchUploadFile([file]);
+      const next = [...latestAttachmentValue.current, ...tokens];
+      latestAttachmentValue.current = next;
+      onChange(next);
+    });
+    attachmentQueue.current = task.then(
+      () => undefined,
+      () => undefined
+    );
+    void task.catch(() => toast('附件上传失败', 'error'));
+  };
 
   switch (field.fieldType) {
     case FieldType.Text:
@@ -141,16 +161,13 @@ export function FieldRenderer({ field, value, onChange, disabled }: Props) {
           multiple
           disabled={disabled}
           beforeUpload={(obj: any) => {
-            const file = obj as File;
-            void (async () => {
-              try {
-                const tokens = await bitable.base.batchUploadFile([file]);
-                const prev = Array.isArray(value) ? (value as string[]) : [];
-                onChange([...prev, ...(tokens as string[])]);
-              } catch {
-                toast('附件上传失败', 'error');
-              }
-            })();
+            // Semi 传入的是 { file: FileItem }，真实 File 位于 file.fileInstance。
+            const file = obj?.file?.fileInstance as File | undefined;
+            if (!file) {
+              toast('无法读取待上传附件', 'error');
+              return false;
+            }
+            uploadAttachment(file);
             return false; // 阻止默认上传行为，使用 batchUploadFile
           }}
         />

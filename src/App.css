@@ -1,5 +1,5 @@
 /* ============================================================
-   多维联填表单 — 全局样式（品牌设计系统）
+   多表联填 — 全局样式（品牌设计系统）
    主题：专业深蓝 + 浅灰底 + 白色卡片
    ============================================================ */
 
@@ -12,7 +12,7 @@ body,
 #root {
   margin: 0;
   padding: 0;
-  min-height: 100%;
+  height: 100%;
 }
 
 body {
@@ -125,6 +125,16 @@ button {
 .plugin-header .mode-badge.mode-fill {
   background: rgba(22, 163, 74, 0.35);
   border-color: rgba(255, 255, 255, 0.4);
+}
+
+/* 顶栏「添加到应用」按钮 */
+.header-add-app-btn {
+  flex: 0 0 auto;
+  background: #fff !important;
+  color: var(--brand) !important;
+  border: none !important;
+  font-weight: 600;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
 }
 
 /* ---------- 内容区与分区卡片 ---------- */
@@ -488,4 +498,301 @@ button {
 
 ::-webkit-scrollbar-thumb:hover {
   background: #94a3b8;
+}
+
+/* ============================================================
+   添加到应用模式 · 引导卡
+   ============================================================ */
+.add-to-app-hint {
+  background: linear-gradient(180deg, #f0f7ff, #ffffff);
+  border: 1px solid var(--brand-line);
+  border-radius: 12px;
+  padding: 14px 16px;
+  margin-bottom: 14px;
+  box-shadow: 0 2px 10px rgba(29, 78, 216, 0.08);
+}
+
+.add-to-app-hint .aah-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.add-to-app-hint .aah-badge {
+  font-size: 12px;
+  font-weight: 700;
+  color: #fff;
+  background: var(--ok);
+  border-radius: 999px;
+  padding: 3px 10px;
+  white-space: nowrap;
+}
+
+.add-to-app-hint .aah-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--brand-deep);
+}
+
+.add-to-app-hint .aah-desc {
+  margin: 8px 0 10px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: #475569;
+}
+
+.add-to-app-hint .aah-url-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.add-to-app-hint .aah-url {
+  flex: 1;
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: #0f172a;
+  background: #f1f5f9;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.add-to-app-hint .aah-warn {
+  margin-top: 10px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: #92400e;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.add-to-app-hint .aah-steps {
+  margin: 12px 0 6px;
+  padding-left: 20px;
+  font-size: 13px;
+  line-height: 1.9;
+  color: #334155;
+}
+
+.add-to-app-hint .aah-steps li {
+  margin-bottom: 4px;
+}
+
+.add-to-app-hint .aah-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+
+/* ============================================================
+   表单管理（配置态）/ 表单选择（使用态）
+   ============================================================ */
+.fm-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.fm-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: #fff;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.fm-item.is-default {
+  border-color: #86efac;
+  background: #f0fdf4;
+}
+
+.fm-item .fm-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.fm-item .fm-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+  display: flex;
+  align-items: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fm-item .fm-meta {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+.fm-item .fm-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.fp-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.fp-item {
+  text-align: left;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: #fff;
+  cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s, transform 0.1s;
+  font: inherit;
+  color: inherit;
+}
+
+.fp-item:hover {
+  border-color: var(--brand);
+  box-shadow: 0 2px 10px rgba(29, 78, 216, 0.12);
+  transform: translateY(-1px);
+}
+
+.fp-item .fp-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.fp-item .fp-desc {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 3px;
+  line-height: 1.6;
+}
+
+.fp-item .fp-meta {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 6px;
+}
+
+/* ---------- 开发期宿主诊断条（仅 DEV 显示，用于定位"不进画布"） ---------- */
+.diag-bar {
+  margin-top: 12px;
+  padding: 8px 10px;
+  font-size: 11px;
+  line-height: 1.7;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: #475569;
+  background: #f1f5f9;
+  border: 1px dashed #cbd5e1;
+  border-radius: 8px;
+  word-break: break-all;
+}
+.diag-bar b {
+  color: #0f766e;
+}
+
+/* ============================================================
+   填写态（View）· 网页表单风格
+   参考 Web 系统录入页：居中标题、轻量分区、留白舒适
+   ============================================================ */
+.fill-form .fill-head {
+  position: relative;
+  text-align: center;
+  padding: 20px 48px 8px;
+}
+
+.fill-form .fill-title {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--ink);
+  letter-spacing: 0.3px;
+}
+
+.fill-form .fill-desc {
+  margin-top: 6px;
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.fill-form .fill-config-btn {
+  position: absolute;
+  right: 4px;
+  top: 18px;
+  color: var(--muted) !important;
+}
+
+.fill-form .fill-config-btn:hover {
+  color: var(--brand) !important;
+  background: var(--brand-soft) !important;
+}
+
+/* 分区卡片：去掉重底色表头，改为轻量「品牌竖条 + 标题」 */
+.fill-form .section-card {
+  border: none;
+  box-shadow: 0 1px 3px rgba(16, 24, 40, 0.07);
+}
+
+.fill-form .section-card .sec-head {
+  background: #fff;
+  border-bottom: none;
+  padding: 16px 16px 4px;
+}
+
+.fill-form .section-card .sec-head .sec-title {
+  font-size: 15px;
+  font-weight: 700;
+  position: relative;
+  padding-left: 10px;
+}
+
+.fill-form .section-card .sec-head .sec-title::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 13px;
+  background: var(--brand);
+  border-radius: 2px;
+}
+
+.fill-form .section-card .sec-head .sec-desc {
+  display: none;
+}
+
+.fill-form .section-card .sec-body {
+  padding: 10px 16px 18px;
+}
+
+/* 字段行：网页表单标准的「标签在上 + 输入在下」节奏 */
+.fill-form .field-row {
+  margin-bottom: 16px;
+}
+
+.fill-form .field-row .field-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink);
+  margin-bottom: 6px;
 }

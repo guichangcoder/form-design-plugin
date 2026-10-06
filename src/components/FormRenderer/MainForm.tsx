@@ -1,4 +1,5 @@
 import React from 'react';
+import { FieldType } from '@lark-base-open/js-sdk';
 import { FormPluginConfig, FormValues, ConditionalState } from '../../types';
 import { isFieldRequired } from '../../utils/validator';
 import { FieldRenderer } from './FieldRenderer';
@@ -14,6 +15,11 @@ function isHiddenField(tableId: string, fieldId: string, cond: ConditionalState)
   return !!cond.hiddenFields[tableId]?.has(fieldId);
 }
 
+/** 关联字段由提交逻辑自动维护（提交时自动关联主表），录入表单不显示 */
+function isAutoLink(fieldType?: FieldType): boolean {
+  return fieldType === FieldType.SingleLink || fieldType === FieldType.DuplexLink;
+}
+
 export function MainForm({ config, values, onChange, cond }: Props) {
   const setField = (fieldId: string, v: unknown) => onChange({ ...values, [fieldId]: v });
   const tableId = config.mainTable.tableId;
@@ -21,7 +27,7 @@ export function MainForm({ config, values, onChange, cond }: Props) {
   return (
     <div>
       {config.mainTable.fields
-        .filter((f) => f.visible && !isHiddenField(tableId, f.fieldId, cond))
+        .filter((f) => f.visible && !isAutoLink(f.fieldType) && !isHiddenField(tableId, f.fieldId, cond))
         .map((f) => (
           <div key={f.fieldId} className="field-row">
             <label className="field-label">
@@ -34,6 +40,7 @@ export function MainForm({ config, values, onChange, cond }: Props) {
               field={f}
               value={values[f.fieldId]}
               onChange={(v) => setField(f.fieldId, v)}
+              disabled={f.readonly}
             />
           </div>
         ))}

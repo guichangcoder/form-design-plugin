@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { bitable } from '@lark-base-open/js-sdk';
+import { bitable, dashboard } from '@lark-base-open/js-sdk';
 
 interface Props {
   children: React.ReactNode;
@@ -17,13 +17,52 @@ export function LoadApp({ children }: Props) {
 
   useEffect(() => {
     let alive = true;
+
+    // ★ 修复：仪表盘宿主直接放行，不等 bridge.getLanguage()。
+    //   历史背景：之前 LoadApp 阻塞式等 bridge.getLanguage()，但仪表盘 widget 在
+    //   View 态下 bridge.getLanguage() 会挂起（仪表盘走 dashboard 模块而非 bridge），
+    //   导致 App 永远没 mount，宿主等不到 setRendered → 显示永远的"加载中"。
+    //   旁证：本插件 JSON 诊断包显示 dashboard.getConfig()=OK 但 bridge 不通。
+    try {
+      const d = dashboard as any;
+      if (d && typeof d.getConfig === 'function' && typeof d.state === 'string') {
+        if (alive) setEnv('ok');
+        return;
+      }
+    } catch {
+      /* ignore */
+    }
+
+    // 超时兜底：8s 内 getLanguage 无响应也尝试渲染，避免某些宿主下该调用行为异常导致一直转圈
+    const timer = setTimeout(() => {
+      if (alive) setEnv('ok');
+    }, 8000);
+
+    const ok = () => {
+      if (alive) setEnv('ok');
+    };
+    const fail = () => {
+      // getLanguage 失败时，再判断是否为 dashboard 宿主（飞书页面组件环境，bitable.bridge 可能受限但 dashboard 可用）
+      try {
+        const d = dashboard as any;
+        if (d && typeof d.getConfig === 'function' && typeof d.state === 'string') {
+          ok();
+          return;
+        }
+      } catch {
+        /* ignore */
+      }
+      if (alive) setEnv('bad');
+    };
+
     // 可选链保护：无论 bitable/bridge 是否存在都不抛错
     bitable?.bridge
       ?.getLanguage()
-      .then(() => alive && setEnv('ok'))
-      .catch(() => alive && setEnv('bad'));
+      .then(ok)
+      .catch(fail);
     return () => {
       alive = false;
+      clearTimeout(timer);
     };
   }, []);
 
@@ -61,7 +100,7 @@ export function LoadApp({ children }: Props) {
         <div style={{ textAlign: 'center', maxWidth: 420 }}>
           <div style={{ fontSize: 40, marginBottom: 12 }}>📋</div>
           <div style={{ fontSize: 18, fontWeight: 600, marginBottom: 6, color: '#333' }}>
-            多维联填表单
+            多表联填
           </div>
           <div style={{ fontSize: 14, fontWeight: 500, marginBottom: 12, color: '#555' }}>
             请在飞书多维表格中打开本插件

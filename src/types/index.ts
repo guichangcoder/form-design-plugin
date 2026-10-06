@@ -39,6 +39,8 @@ export interface FieldConfig {
 export interface SubTableConfig {
   tableId: string;
   tableName: string;
+  /** 子表区块在表单中的展示名称（默认取子表名或「子表 N」） */
+  sectionName?: string;
   /** 子表中指向主表的关联字段 ID（SingleLink / DuplexLink） */
   linkFieldId: string;
   linkFieldName?: string;
@@ -68,8 +70,10 @@ export interface ConditionalRule {
   }[];
 }
 
-/** 插件完整配置（持久化到 bridge） */
+/** 插件完整配置（持久化到 bridge / dashboard） */
 export interface FormPluginConfig {
+  /** 表单唯一 ID（多表单场景下用于区分与关联） */
+  id: string;
   version: string;
   formTitle: string;
   formDescription?: string;
@@ -78,6 +82,8 @@ export interface FormPluginConfig {
   mainTable: {
     tableId: string;
     tableName: string;
+    /** 主表区块在表单中的展示名称（默认「主表信息」） */
+    sectionName?: string;
     fields: FieldConfig[];
   };
   subTables: SubTableConfig[];
@@ -101,6 +107,31 @@ export interface ConditionalState {
 export interface ValidationResult {
   valid: boolean;
   errors: string[];
+}
+
+/**
+ * 插件数据（页面资产模型）：承载多个相互独立的表单。
+ * - dashboard 宿主：整个对象存进 dashboard.saveConfig({ dataConditions, customConfig })，
+ *   其中 dataConditions 由配置引用的主表/子表真实 ID 自动构造（见 configService）。
+ * - bridge 宿主：整个对象存进 bitable.bridge.setData
+ * 因此「多表单相互独立、互不干扰」，且配置按页面/实例持久化，多人共享同一批表单。
+ */
+export interface PluginData {
+  forms: FormPluginConfig[];
+  /** 使用态默认展示的表单 ID */
+  defaultFormId?: string;
+}
+
+/** 生成唯一 ID（优先 crypto.randomUUID，回退时间戳+随机） */
+export function genId(): string {
+  try {
+    if (typeof crypto !== 'undefined' && typeof (crypto as any).randomUUID === 'function') {
+      return (crypto as any).randomUUID();
+    }
+  } catch {
+    /* ignore */
+  }
+  return 'f_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
 
 export const CONFIG_STORAGE_KEY = 'formDesignPluginConfig';

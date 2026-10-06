@@ -9,17 +9,32 @@ import { isEmptyValue } from './validator';
 export function convertCellValue(
   type: FieldType,
   raw: unknown,
-  _field?: FieldConfig
+  field?: FieldConfig
 ): unknown {
   switch (type) {
-    case FieldType.DateTime:
-      return typeof raw === 'number' ? raw : Number(new Date(String(raw)).getTime());
+    case FieldType.DateTime: {
+      if (typeof raw === 'number') return raw;
+      if (raw instanceof Date) return raw.getTime();
+      const timestamp = new Date(String(raw)).getTime();
+      return Number.isFinite(timestamp) ? timestamp : raw;
+    }
     case FieldType.Attachment:
       // 附件值：batchUploadFile 返回的 fileToken 数组，需包裹为 {text, val}
       return Array.isArray(raw) ? { text: '', val: raw as string[] } : raw;
+    case FieldType.SingleSelect:
+      return toSelectCellValue(raw, field);
+    case FieldType.MultiSelect:
+      return Array.isArray(raw) ? raw.map((v) => toSelectCellValue(v, field)) : raw;
     default:
       return raw;
   }
+}
+
+function toSelectCellValue(raw: unknown, field?: FieldConfig): unknown {
+  if (raw && typeof raw === 'object') return raw;
+  const value = String(raw ?? '');
+  const option = field?.options?.find((o) => o.id === value || o.name === value);
+  return { id: option?.id ?? value, text: option?.name ?? value };
 }
 
 /**

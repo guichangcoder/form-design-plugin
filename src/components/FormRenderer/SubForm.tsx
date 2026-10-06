@@ -1,4 +1,5 @@
 import React from 'react';
+import { FieldType } from '@lark-base-open/js-sdk';
 import { SubTableConfig, FormValues, ConditionalState } from '../../types';
 import { isFieldRequired } from '../../utils/validator';
 import { toast } from '../../utils/toast';
@@ -22,13 +23,25 @@ export function SubForm({ sub, rows, onChange, cond }: Props) {
       toast(`最多添加 ${sub.maxRows} 条`, 'warning');
       return;
     }
-    onChange([...rows, {}]);
+    const defaults = sub.fields.reduce<FormValues>((values, field) => {
+      if (field.defaultValue !== undefined) {
+        values[field.fieldId] = Array.isArray(field.defaultValue)
+          ? [...field.defaultValue]
+          : field.defaultValue;
+      }
+      return values;
+    }, {});
+    onChange([...rows, defaults]);
   };
 
   const removeRow = (idx: number) => onChange(rows.filter((_, i) => i !== idx));
 
+  // 关联字段（含指向主表的关联字段）由提交逻辑自动维护，录入表单不显示
   const visible = (f: SubTableConfig['fields'][number]) =>
-    f.visible && !cond.hiddenFields[sub.tableId]?.has(f.fieldId);
+    f.visible &&
+    f.fieldType !== FieldType.SingleLink &&
+    f.fieldType !== FieldType.DuplexLink &&
+    !cond.hiddenFields[sub.tableId]?.has(f.fieldId);
 
   return (
     <div>
@@ -61,6 +74,7 @@ export function SubForm({ sub, rows, onChange, cond }: Props) {
                 field={f}
                 value={row[f.fieldId]}
                 onChange={(v) => updateRow(idx, f.fieldId, v)}
+                disabled={f.readonly}
               />
             </div>
           ))}
