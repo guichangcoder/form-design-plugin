@@ -117,13 +117,13 @@ export function FieldRenderer({ field, value, onChange, disabled }: Props) {
 
     case FieldType.DateTime:
       return (
-        <DatePicker
-          style={fullWidth}
-          type="dateTime"
-          value={(value as Date) ?? undefined}
-          disabled={disabled}
-          onChange={(v: any) => onChange(v)}
-        />
+        <div style={fullWidth}>
+          <DatePicker
+            value={(value as Date) ?? undefined}
+            disabled={disabled}
+            onChange={(v: any) => onChange(v)}
+          />
+        </div>
       );
 
     case FieldType.Checkbox:

@@ -112,9 +112,15 @@ export default function App() {
       if (!raw) return '';
       const o = JSON.parse(raw);
       const rb = o.readback ?? {};
-      if (rb.err) return `上次读回失败：${rb.err}`;
-      if (!rb.ok) return '上次读回：未拿到（可能 Create 态）';
-      return `上次读回 OK ｜ 宿主存 cc=${rb.ccLen}B ｜ 宿主存 dataConditions=${JSON.stringify(rb.dataConditions)}`;
+      const extra: string[] = [];
+      if (o.phaseInfo) extra.push(`阶段=${o.phaseInfo}`);
+      if (typeof o.reSaved === 'number' && o.reSaved > 0) extra.push(`补存${o.reSaved}次`);
+      if (o.saveState) extra.push(`state:${o.saveState}→${o.finalState ?? '?'}`);
+      if (typeof o.expectedTables === 'number') extra.push(`声明${o.expectedTables}表`);
+      const extraStr = extra.length > 0 ? ` ｜ ${extra.join(' · ')}` : '';
+      if (rb.err) return `上次读回失败：${rb.err}${extraStr}`;
+      if (!rb.ok) return `上次读回：未拿到（可能 Create 态）${extraStr}`;
+      return `上次读回 OK ｜ 宿主存 cc=${rb.ccLen}B ｜ 宿主存 dataConditions=${JSON.stringify(rb.dataConditions)}${extraStr}`;
     } catch {
       return '';
     }
@@ -332,9 +338,15 @@ export default function App() {
         if (rawRb) {
           const o = JSON.parse(rawRb);
           const rb = o.readback ?? {};
-          if (rb.err) setLastReadback(`上次读回失败：${rb.err}`);
-          else if (!rb.ok) setLastReadback('上次读回：未拿到（可能 Create 态）');
-          else setLastReadback(`上次读回 OK ｜ 宿主存 cc=${rb.ccLen}B ｜ 宿主存 dataConditions=${JSON.stringify(rb.dataConditions)}`);
+          const extra: string[] = [];
+          if (o.phaseInfo) extra.push(`阶段=${o.phaseInfo}`);
+          if (typeof o.reSaved === 'number' && o.reSaved > 0) extra.push(`补存${o.reSaved}次`);
+          if (o.saveState) extra.push(`state:${o.saveState}→${o.finalState ?? '?'}`);
+          if (typeof o.expectedTables === 'number') extra.push(`声明${o.expectedTables}表`);
+          const extraStr = extra.length > 0 ? ` ｜ ${extra.join(' · ')}` : '';
+          if (rb.err) setLastReadback(`上次读回失败：${rb.err}${extraStr}`);
+          else if (!rb.ok) setLastReadback(`上次读回：未拿到（可能 Create 态）${extraStr}`);
+          else setLastReadback(`上次读回 OK ｜ 宿主存 cc=${rb.ccLen}B ｜ 宿主存 dataConditions=${JSON.stringify(rb.dataConditions)}${extraStr}`);
         }
       } catch {
         /* ignore */

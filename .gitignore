@@ -11,3 +11,4 @@ deploy/
 # 临时校验文件 / Vite 临时配置
 *_delete.txt
 *.timestamp-*.mjs
+.npm-cache/

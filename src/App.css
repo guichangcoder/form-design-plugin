@@ -298,6 +298,7 @@ button {
   padding: 8px 4px;
   border-bottom: 1px solid #f1f5f9;
   transition: background 0.15s;
+  cursor: default;
 }
 
 .cfg-field-row:hover {
@@ -310,6 +311,49 @@ button {
 
 .cfg-field-row.hidden {
   opacity: 0.5;
+}
+
+/* 拖拽样式 */
+.cfg-field-row.dragging {
+  opacity: 0.4;
+  background: #e0f2fe;
+}
+
+.cfg-field-row.drag-over {
+  border-top: 2px solid #3b82f6;
+  padding-top: 6px; /* 抵消 border 增加的高度 */
+}
+
+.cfg-field-row .drag-handle {
+  flex: 0 0 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #cbd5e1;
+  cursor: grab;
+  font-size: 16px;
+  user-select: none;
+}
+
+.cfg-field-row .drag-handle:hover {
+  color: #64748b;
+}
+
+.cfg-field-row .drag-handle:active {
+  cursor: grabbing;
+}
+
+.cfg-field-row .drag-dots {
+  width: 12px;
+  height: 16px;
+  background-image: radial-gradient(#94a3b8 1.5px, transparent 1.5px);
+  background-size: 6px 6px;
+  background-position: 0 0;
+  opacity: 0.6;
+}
+
+.cfg-field-row:hover .drag-dots {
+  opacity: 1;
 }
 
 .cfg-field-row .f-name {

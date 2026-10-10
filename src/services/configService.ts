@@ -298,18 +298,32 @@ export async function saveConfig(data: PluginData): Promise<SaveResult> {
         .map((s) => s?.tableId)
         .filter((id): id is string => !!id);
       const allTableIds = Array.from(new Set([mainTableId, ...subTableIds].filter(Boolean)));
-      const dataConditions = allTableIds.map((tableId) => ({
+      // ★ dataConditions 格式：每项 tableId + dataRange + groups + series
+      //   宿主 dataConditions 是类图表数据配置格式，缺 groups/series 会被过滤。
+      const buildDataConditions = (tableIds: string[]) => tableIds.map((tableId) => ({
         tableId,
         dataRange: { type: 'ALL' },
+        groups: [],
+        series: 'COUNTA',
       }));
-      const payload: Record<string, unknown> = {
+      const fullDataConditions = buildDataConditions(allTableIds);
+
+      // 先探测当前宿主状态（Create / Config）
+      let saveState = 'unknown';
+      try {
+        saveState = String((dashboard as any).state ?? 'unknown');
+      } catch { /* ignore */ }
+      console.log('[config] 保存前 dashboard.state =', saveState, '，声明表数 =', allTableIds.length);
+
+      const fullPayload: Record<string, unknown> = {
         customConfig: thin,
-        dataConditions,
+        dataConditions: fullDataConditions,
       };
       const payloadLog = {
         customConfigLength: JSON.stringify(thin).length,
-        dataConditions,
+        dataConditions: fullDataConditions,
         declaredTables: allTableIds,
+        saveState,
       };
       // 把本次保存 payload 写到 localStorage：配置态若保存成功但 View 态失败，
       // 用户刷新回配置态后仍能看到上一次保存的真实参数，便于排查。
@@ -340,8 +354,112 @@ export async function saveConfig(data: PluginData): Promise<SaveResult> {
         'B）payload:',
         JSON.stringify(payloadLog)
       );
-      const success = await (dashboard as any).saveConfig(payload);
-      console.log('[config] dashboard.saveConfig 返回:', success);
+
+      // ★ 两阶段保存策略（解决 Create 态多表 dataConditions 丢失问题）
+      //
+      // 背景：飞书仪表盘页面插件在 Create 态首次 saveConfig 创建 widget 时，
+      // dataConditions 的多表声明可能不被完整接受，导致 View 态校验失败
+      // （customConfig 引用的表不在 dataConditions 中 → 「配置数据发生变更」）。
+      // 而 Config 态下保存，dataConditions 能被完整接受。
+      //
+      // 策略：
+      // 1. Create 态 + 多表：先存主表创建 widget → 等状态切 Config → 再存全表
+      // 2. Config 态 + 多表：直接存全表（Config 态能正确接受多表）
+      // 3. 单表：直接存（无此问题）
+      //
+      // 验证：getConfig 不可靠（永远只返回主数据源），改用 dashboard.state 判断
+      // 阶段切换是否完成。最终用一次 getConfig 做记录（不做成败判断）。
+      let reSaved = 0;
+      let phaseInfo = '';
+      let finalState = saveState;
+
+      const hasMultipleTables = allTableIds.length > 1;
+
+      // ★ 保存策略（2024-10-09 调整：基于用户反馈"再存一次就好"）
+      //
+      // 背景：飞书仪表盘页面插件 Create 态首次保存时，多表 dataConditions 可能
+      // 不被完整接受，导致 View 态显示「配置数据发生变更」。第二次在 Config 态
+      // 保存就能正常显示。
+      //
+      // 策略：
+      // 1. 先探测 dashboard.state 的实际值（做诊断用）
+      // 2. 直接保存完整配置（不再分两阶段，避免主表-only配置的中间状态）
+      // 3. 多表情况下，连续补存 2 次，每次间隔 800ms，模拟"再存一次就好"的效果
+      // 4. 等待宿主状态稳定（从 Create 切走）后再补存一次做最终保险
+      phaseInfo = hasMultipleTables ? '多次补存策略' : '单阶段(单表)';
+
+      // 先探测初始 state
+      let stateBefore = 'unknown';
+      try {
+        stateBefore = String((dashboard as any).state ?? 'unknown');
+      } catch { /* ignore */ }
+      saveState = stateBefore;
+      console.log('[config] 保存前 dashboard.state =', stateBefore, '，声明表数 =', allTableIds.length);
+
+      // —— 第一次保存（完整配置）——
+      console.log('[config] 第1次保存（完整配置）…');
+      const firstSuccess = await (dashboard as any).saveConfig(fullPayload);
+      console.log('[config] 第1次 saveConfig 返回:', firstSuccess);
+      if (firstSuccess === false) {
+        throw new Error('首次保存失败：dashboard.saveConfig 返回 false');
+      }
+
+      // —— 多表情况下连续补存 ——
+      if (hasMultipleTables) {
+        // 第 1 次补存（模拟"再存一次就好"）
+        await new Promise((r) => setTimeout(r, 800));
+        try {
+          const s2 = await (dashboard as any).saveConfig(fullPayload);
+          reSaved += 1;
+          console.log('[config] 第2次 saveConfig 返回:', s2);
+        } catch (e2) {
+          console.warn('[config] 第2次 saveConfig 失败:', e2);
+        }
+
+        // 等状态从 Create 切走后，再补存第 3 次（Config 态下的补存）
+        let waited = 0;
+        let curState = stateBefore;
+        const maxWait = 4000;
+        const pollInterval = 200;
+        while (waited < maxWait) {
+          await new Promise((r) => setTimeout(r, pollInterval));
+          waited += pollInterval;
+          try {
+            curState = String((dashboard as any).state ?? 'unknown');
+          } catch { /* ignore */ }
+          if (!/create/i.test(curState)) break;
+        }
+        finalState = curState;
+        console.log(`[config] 状态等待 ${waited}ms 后 state = ${curState}`);
+
+        // 状态切走了（到 Config 或 View），再补存一次
+        if (!/create/i.test(curState)) {
+          await new Promise((r) => setTimeout(r, 300));
+          try {
+            const s3 = await (dashboard as any).saveConfig(fullPayload);
+            reSaved += 1;
+            console.log('[config] 第3次 saveConfig（状态切走后）返回:', s3);
+            phaseInfo = '状态切换后补存成功';
+          } catch (e3) {
+            console.warn('[config] 第3次 saveConfig（状态切走后）失败:', e3);
+            phaseInfo = '状态切换后补存失败';
+          }
+        } else {
+          console.warn('[config] 等待超时，状态仍为 Create');
+          phaseInfo = '状态未切换(超时)';
+        }
+      } else {
+        // 单表：保存后也读一下 state
+        await new Promise((r) => setTimeout(r, 300));
+        try {
+          finalState = String((dashboard as any).state ?? 'unknown');
+        } catch { /* ignore */ }
+      }
+
+      // 更新 finalState
+      try {
+        finalState = String((dashboard as any).state ?? finalState);
+      } catch { /* ignore */ }
 
       // ★ base 持久化备份：dev 模式下宿主 widget 配置不保证跨 F5 持久化，
       //   把 thin + dataConditions 备份到飞书 base（setData 按 base 维度持久化，
@@ -352,7 +470,7 @@ export async function saveConfig(data: PluginData): Promise<SaveResult> {
           JSON.stringify({
             time: new Date().toISOString(),
             customConfig: thin,
-            dataConditions,
+            dataConditions: fullDataConditions,
           })
         );
         console.log('[config] base 备份写入成功');
@@ -360,9 +478,10 @@ export async function saveConfig(data: PluginData): Promise<SaveResult> {
         console.warn('[config] base 备份写入失败（可忽略，非致命）:', be);
       }
 
-      // ★ 关键诊断：保存后立即读回 getConfig，看宿主真正存进去的是什么。
-      // 注意：Create 态 getConfig 会被宿主禁用（抛 'creation status'）。
-      let readback: { ok: boolean; ccLen: number; dataConditions: unknown; err?: string } = {
+      // ★ 最终读回 getConfig（仅做诊断记录，不做成败判断）
+      // getConfig 可能只返回主数据源，不能真实反映多表是否保存成功。
+      // 这里只把结果存下来供诊断条展示，判断是否成功用 dashboard.state 切换。
+      let finalReadback: { ok: boolean; ccLen: number; dataConditions: unknown; err?: string } = {
         ok: false,
         ccLen: 0,
         dataConditions: null,
@@ -370,33 +489,41 @@ export async function saveConfig(data: PluginData): Promise<SaveResult> {
       try {
         const cfg: any = await (dashboard as any).getConfig();
         const cc = cfg?.customConfig;
-        readback = {
+        const dc: any[] = cfg?.dataConditions ?? [];
+        finalReadback = {
           ok: true,
           ccLen: typeof cc === 'string' ? cc.length : cc ? JSON.stringify(cc).length : 0,
-          dataConditions: cfg?.dataConditions ?? null,
+          dataConditions: dc,
         };
-        console.log('[config] 读回 getConfig:', readback);
+        console.log('[config] 最终读回 getConfig:', finalReadback);
       } catch (e) {
         const msg = String((e as Error)?.message ?? e);
-        readback.err = msg;
-        if (!/creation status|unable to invoke|create/i.test(msg)) {
-          console.warn('[config] 保存后读回 getConfig 失败（非常态）:', msg);
-        } else {
-          console.log('[config] 保存后 getConfig 被宿主禁用（Create 态正常）');
-        }
+        finalReadback = { ok: false, ccLen: 0, dataConditions: null, err: msg };
+        console.log('[config] 最终读回 getConfig 失败:', msg);
       }
       try {
         localStorage.setItem(
           '__plugin_last_save_readback__',
-          JSON.stringify({ time: new Date().toISOString(), success, readback })
+          JSON.stringify({
+            time: new Date().toISOString(),
+            readback: finalReadback,
+            reSaved,
+            phaseInfo,
+            saveState,
+            finalState,
+            expectedTables: allTableIds.length,
+          })
         );
       } catch {
         /* ignore */
       }
-      if (success === false) {
-        throw new Error('dashboard.saveConfig 返回 false（宿主拒绝保存）');
-      }
-      return { storage: 'dashboard', warning: thinBytes >= 0 ? `序列化后 ${thinBytes} B` : undefined };
+
+      const parts: string[] = [];
+      if (thinBytes >= 0) parts.push(`序列化后 ${thinBytes} B`);
+      if (phaseInfo) parts.push(phaseInfo);
+      if (reSaved > 0) parts.push(`补存${reSaved}次`);
+      parts.push(`state:${saveState}→${finalState}`);
+      return { storage: 'dashboard', warning: parts.join(' · ') };
     } catch (e) {
       const errMsg = (e as Error)?.message ?? String(e);
       console.error('[config] dashboard.saveConfig 失败，完整错误:', e);

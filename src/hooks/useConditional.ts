@@ -1,6 +1,28 @@
 import { useMemo } from 'react';
 import { FormPluginConfig, FormValues, ConditionalState } from '../types';
 
+/** 将值转为可比较的字符串形式（解决类型不一致问题：输入框出来的永远是 string，但表单值可能是 number/boolean） */
+function toComparable(v: unknown): string {
+  if (v === undefined || v === null) return '';
+  if (typeof v === 'boolean') return v ? 'true' : 'false';
+  if (typeof v === 'number') return String(v);
+  if (typeof v === 'string') return v;
+  if (Array.isArray(v)) return v.join(',');
+  try {
+    return JSON.stringify(v);
+  } catch {
+    return String(v);
+  }
+}
+
+/** 判断值是否为"空"：undefined / null / 空字符串 / 空数组 */
+function isEmptyValue(v: unknown): boolean {
+  if (v === undefined || v === null) return true;
+  if (typeof v === 'string') return v === '';
+  if (Array.isArray(v)) return v.length === 0;
+  return false;
+}
+
 /** 判断条件是否命中 */
 export function evaluateCondition(
   operator: 'equals' | 'notEquals' | 'contains' | 'isEmpty' | 'isNotEmpty',
@@ -9,15 +31,25 @@ export function evaluateCondition(
 ): boolean {
   switch (operator) {
     case 'equals':
-      return actual === expected;
+      // 用 toComparable 做宽松比较：数字 10 等于字符串 "10"，布尔 true 等于 "true"
+      return toComparable(actual) === toComparable(expected);
     case 'notEquals':
-      return actual !== expected;
+      return toComparable(actual) !== toComparable(expected);
     case 'contains':
-      return Array.isArray(actual) && actual.includes(expected);
+      // 数组：检查是否包含元素（多选字段）
+      if (Array.isArray(actual)) {
+        return actual.some((item) => toComparable(item) === toComparable(expected));
+      }
+      // 字符串：检查子串包含（文本字段）
+      if (typeof actual === 'string' && typeof expected === 'string') {
+        return actual.includes(expected);
+      }
+      // 其他类型：退化为相等判断
+      return toComparable(actual) === toComparable(expected);
     case 'isEmpty':
-      return actual === undefined || actual === null || actual === '';
+      return isEmptyValue(actual);
     case 'isNotEmpty':
-      return !(actual === undefined || actual === null || actual === '');
+      return !isEmptyValue(actual);
     default:
       return false;
   }
