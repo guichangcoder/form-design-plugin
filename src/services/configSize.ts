@@ -180,6 +180,8 @@ export async function hydrateConfig(thin: PluginData): Promise<PluginData & { __
     const out: any = {
       forms: hydrated,
       defaultFormId: thin.defaultFormId,
+      // ★ 保留 base 归属标记（loadConfig 的跨 base 校验依赖它；组件侧无感知）
+      ...(thin.baseId ? { baseId: thin.baseId } : {}),
     };
     // 健康度检查：所有表单的主表字段是否能从 base 拿到任何字段（type/name）
     const anyMatched = hydrated.some(

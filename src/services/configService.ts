@@ -171,6 +171,53 @@ function lsAvailable(): boolean {
 }
 const LS_OK = lsAvailable();
 
+/**
+ * 当前多维表格的 baseId（结果缓存）。
+ * 用于给配置打上「所属 base」标记：同一插件被部署到多个多维表格时，
+ * localStorage / 宿主 KV 等存储是跨 base 共享的（云端部署下所有 base 的 widget
+ * 加载同一 origin），不隔离会互相串配置 → 新 widget 预填别的表的配置、
+ * dataConditions 指向别的 base 的表 → 宿主校验失败「配置数据发生变更」。
+ */
+let baseIdCache: Promise<string> | null = null;
+export function getBaseId(): Promise<string> {
+  if (!baseIdCache) {
+    baseIdCache = (async () => {
+      try {
+        const b = bitable.base as any;
+        if (b && typeof b.getBaseId === 'function') {
+          return String((await b.getBaseId()) ?? '');
+        }
+      } catch {
+        /* 非 base 宿主或接口不可用 */
+      }
+      return '';
+    })();
+  }
+  return baseIdCache;
+}
+
+/** 是否本地开发环境（localhost）。所有「备份恢复 / 配置重放」只允许在 dev 生效。 */
+function isLocalDevHost(): boolean {
+  try {
+    return ['localhost', '127.0.0.1', '[::1]'].includes(window.location.hostname);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 校验配置是否属于另一个多维表格（跨 base 脏配置）。
+ * 规则：配置没写 baseId（旧版）→ 放行兼容；当前环境拿不到 baseId → 放行；
+ * 否则 baseId 不一致即视为脏配置，调用方应丢弃（返回 null），绝不写回宿主。
+ */
+async function isForeignConfig(parsed: PluginData | null): Promise<boolean> {
+  if (!parsed) return false;
+  const stored = (parsed as any).baseId as string | undefined;
+  if (!stored) return false;
+  const current = await getBaseId();
+  return !!current && stored !== current;
+}
+
 /** 保存结果：标识实际写入位置（用于 UI 提示） */
 export interface SaveResult {
   storage: 'dashboard' | 'bridge' | 'local';
@@ -193,6 +240,13 @@ export async function loadConfig(): Promise<PluginData | null> {
       const data = cfg && cfg.customConfig;
       const parsed = asData(data);
       if (parsed) {
+        // ★ 跨 base 防污染：宿主 KV / localStorage 在云端部署下跨多维表格共享，
+        //   读到别的 base 的配置必须丢弃（否则配置面板预填别的表的表单、
+        //   dataConditions 指向别的 base → 宿主校验失败「配置数据发生变更」）。
+        if (await isForeignConfig(parsed)) {
+          console.warn('[config] getConfig 返回的是其他多维表格的配置（baseId 不匹配），已丢弃');
+          return null;
+        }
         source = 'dashboard';
         const result = await hydrateConfig(parsed);
         console.log(`[config] loadConfig 完成（${source}），耗时 ${Math.round(performance.now() - startedAt)}ms`);
@@ -228,10 +282,14 @@ export async function loadConfig(): Promise<PluginData | null> {
     }
     const parsed = asData(data);
     if (parsed) {
-      source = 'bridge';
-      const result = await hydrateConfig(parsed);
-      console.log(`[config] loadConfig 完成（${source}），耗时 ${Math.round(performance.now() - startedAt)}ms`);
-      return result;
+      if (await isForeignConfig(parsed)) {
+        console.warn('[config] bridge 存的是其他多维表格的配置（baseId 不匹配），已忽略');
+      } else {
+        source = 'bridge';
+        const result = await hydrateConfig(parsed);
+        console.log(`[config] loadConfig 完成（${source}），耗时 ${Math.round(performance.now() - startedAt)}ms`);
+        return result;
+      }
     }
   } catch (e) {
     console.warn('[config] bridge.getData 失败，将回退到本地存储:', e);
@@ -243,10 +301,14 @@ export async function loadConfig(): Promise<PluginData | null> {
       if (raw) {
         const parsed = asData(JSON.parse(raw));
         if (parsed) {
-          source = 'local';
-          const result = await hydrateConfig(parsed);
-          console.log(`[config] loadConfig 完成（${source}），耗时 ${Math.round(performance.now() - startedAt)}ms`);
-          return result;
+          if (await isForeignConfig(parsed)) {
+            console.warn('[config] localStorage 存的是其他多维表格的配置（baseId 不匹配），已忽略');
+          } else {
+            source = 'local';
+            const result = await hydrateConfig(parsed);
+            console.log(`[config] loadConfig 完成（${source}），耗时 ${Math.round(performance.now() - startedAt)}ms`);
+            return result;
+          }
         }
       }
     } catch (e) {
@@ -278,7 +340,16 @@ export async function saveConfig(data: PluginData): Promise<SaveResult> {
     //   [page-service] create widget failed: addonConfig exceeded maximum length limit [10240]
     // 把运行时可重取的元数据（fieldName/fieldType/options/linkTableId/tableName/linkFieldName）
     // 全部剥离，只保存用户的"决策字段"（visible/required/label/placeholder/defaultValue/readonly）。
-    const thin = serializeConfig(data);
+    const thinBase: any = serializeConfig(data);
+    // ★ 配置打上「所属 base」标记：读取侧（loadConfig）据此识别并丢弃
+    //   其他多维表格串进来的配置（跨 base 污染防线，见 isForeignConfig）。
+    try {
+      const baseId = await getBaseId();
+      if (baseId) thinBase.baseId = baseId;
+    } catch {
+      /* 拿不到 baseId 则不写标记（读取侧对无标记配置放行兼容） */
+    }
+    const thin = thinBase;
     const thinBytes = estimateConfigBytes(thin) || -1;
     try {
       // ★ dataConditions = 「主表 + 所有子表」完整声明集。
@@ -297,7 +368,9 @@ export async function saveConfig(data: PluginData): Promise<SaveResult> {
       const subTableIds = (firstForm?.subTables ?? [])
         .map((s) => s?.tableId)
         .filter((id): id is string => !!id);
-      const allTableIds = Array.from(new Set([mainTableId, ...subTableIds].filter(Boolean)));
+      const allTableIds = Array.from(
+        new Set([mainTableId, ...subTableIds].filter((id): id is string => !!id))
+      );
       // ★ dataConditions 格式：每项 tableId + dataRange + groups + series
       //   宿主 dataConditions 是类图表数据配置格式，缺 groups/series 会被过滤。
       const buildDataConditions = (tableIds: string[]) => tableIds.map((tableId) => ({
@@ -328,6 +401,7 @@ export async function saveConfig(data: PluginData): Promise<SaveResult> {
       // 把本次保存 payload 写到 localStorage：配置态若保存成功但 View 态失败，
       // 用户刷新回配置态后仍能看到上一次保存的真实参数，便于排查。
       try {
+        const payloadBaseId = await getBaseId();
         localStorage.setItem(
           '__plugin_last_save_payload__',
           JSON.stringify({
@@ -341,6 +415,9 @@ export async function saveConfig(data: PluginData): Promise<SaveResult> {
             // ★ 关键：保存时把主表 ID 和表单 ID 一起存，View 态自动修复时要用
             mainTableId,
             formId: data?.forms?.find((f) => f?.mainTable?.tableId)?.id ?? null,
+            // ★ base 隔离：localStorage 按插件域名存储、跨所有多维表格共享，
+            //   重放前必须校验 baseId，防止把别的 base 的配置重放到当前 base。
+            baseId: payloadBaseId || undefined,
           })
         );
       } catch {
@@ -464,11 +541,14 @@ export async function saveConfig(data: PluginData): Promise<SaveResult> {
       // ★ base 持久化备份：dev 模式下宿主 widget 配置不保证跨 F5 持久化，
       //   把 thin + dataConditions 备份到飞书 base（setData 按 base 维度持久化，
       //   不受页面刷新影响）。刷新后 loadConfig 会自动从这里捞回并写回宿主。
+      //   备份同样带 baseId —— bridge 数据按 base 隔离，但多打一层标记双保险。
       try {
+        const backupBaseId = await getBaseId();
         await bitable.bridge.setData(
           BACKUP_KEY,
           JSON.stringify({
             time: new Date().toISOString(),
+            baseId: backupBaseId || undefined,
             customConfig: thin,
             dataConditions: fullDataConditions,
           })
@@ -545,7 +625,14 @@ export async function saveConfig(data: PluginData): Promise<SaveResult> {
 
   try {
     // bridge 没有 10240 字节限制，但为保持持久化层一致，也用瘦身形态写入
-    await bitable.bridge.setData(CONFIG_STORAGE_KEY, serializeConfig(data));
+    const thinBridge: any = serializeConfig(data);
+    try {
+      const baseId = await getBaseId();
+      if (baseId) thinBridge.baseId = baseId;
+    } catch {
+      /* ignore */
+    }
+    await bitable.bridge.setData(CONFIG_STORAGE_KEY, JSON.stringify(thinBridge));
     return { storage: 'bridge' };
   } catch (e) {
     console.warn('[config] bridge.setData 失败，回退到本地存储:', e);
@@ -554,7 +641,14 @@ export async function saveConfig(data: PluginData): Promise<SaveResult> {
   if (LS_OK) {
     try {
       // localStorage 直接存完整 data（dev 调试用，不考虑大小），方便人肉 inspect
-      localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(data));
+      let dataWithBase: PluginData = data;
+      try {
+        const baseId = await getBaseId();
+        if (baseId) dataWithBase = { ...data, baseId };
+      } catch {
+        /* ignore */
+      }
+      localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(dataWithBase));
       return {
         storage: 'local',
         warning: '开发模式：bridge.setData 不可用，已保存到本地存储（iframe localStorage）。正式发布后会自动使用云端存储。',
@@ -578,9 +672,7 @@ export async function saveConfig(data: PluginData): Promise<SaveResult> {
 export async function repairDashboardConfigFromLastSave(
   maxAttempts = 3
 ): Promise<{ repaired: boolean; reason: string; detail?: Record<string, unknown> }> {
-  const hostname = window.location.hostname;
-  const isLocalDev = ['localhost', '127.0.0.1', '[::1]'].includes(hostname);
-  if (!isLocalDev) return { repaired: false, reason: 'not-local-dev' };
+  if (!isLocalDevHost()) return { repaired: false, reason: 'not-local-dev' };
   if (!isDashboardHost()) return { repaired: false, reason: 'not-dashboard' };
 
   const saved = await loadSavedPayload();
@@ -608,13 +700,24 @@ export async function repairDashboardConfigFromLastSave(
   return { repaired: false, reason: 'repair-failed-after-retries', detail: { lastErr } };
 }
 
-/** 读取最近一次保存的 payload：先 localStorage，再 base 备份 */
+/** 读取最近一次保存的 payload：先 localStorage，再 base 备份。
+ *  ★ base 隔离：两路来源都必须校验 baseId —— localStorage 按插件域名存储
+ *  （云端部署下跨所有多维表格共享），不校验会把别的 base 的配置重放到当前 base，
+ *  导致「在 B 表配置后，A 表的 widget 也坏了」这类跨表污染。 */
 async function loadSavedPayload(): Promise<any> {
+  const currentBaseId = await getBaseId();
+  const foreign = (v: any) => !!v?.baseId && !!currentBaseId && v.baseId !== currentBaseId;
   try {
     const raw = localStorage.getItem('__plugin_last_save_payload__');
     if (raw) {
       const o = JSON.parse(raw);
-      if (o?.customConfig) return o;
+      if (o?.customConfig) {
+        if (foreign(o)) {
+          console.warn('[config] 跳过其他多维表格的重放 payload（baseId 不匹配）');
+        } else {
+          return o;
+        }
+      }
     }
   } catch {
     /* ignore */
@@ -623,7 +726,7 @@ async function loadSavedPayload(): Promise<any> {
     const b = await bitable.bridge.getData(BACKUP_KEY);
     if (b) {
       const obj = typeof b === 'string' ? JSON.parse(b) : b;
-      if (obj?.customConfig) {
+      if (obj?.customConfig && !foreign(obj)) {
         return { customConfig: obj.customConfig, payload: { dataConditions: obj.dataConditions } };
       }
     }
@@ -633,13 +736,27 @@ async function loadSavedPayload(): Promise<any> {
   return null;
 }
 
-/** dev 模式宿主配置丢失时，从 base 备份捞回并写回宿主 */
+/** dev 模式宿主配置丢失时，从 base 备份捞回并写回宿主。
+ *  ★ 仅限本地开发环境：生产环境宿主 KV 持久可靠，getConfig 为空就意味着
+ *  「新 widget 尚未配置」——此时从备份恢复会把旧 widget / 其他表单的配置注入进来，
+ *  正是「云端部署后每次进配置都保留上次配置」和「跨多维表格串配置」的根源。 */
 async function tryRestoreFromBaseBackup(): Promise<PluginData | null> {
+  if (!isLocalDevHost()) return null;
   try {
     const b = await bitable.bridge.getData(BACKUP_KEY);
     if (!b) return null;
     const obj = typeof b === 'string' ? JSON.parse(b) : b;
     if (!obj?.customConfig) return null;
+    // base 隔离双保险（bridge 数据本身按 base 隔离，这里防异常共享场景）
+    try {
+      const current = await getBaseId();
+      if (obj.baseId && current && obj.baseId !== current) {
+        console.warn('[config] base 备份属于其他多维表格（baseId 不匹配），跳过恢复');
+        return null;
+      }
+    } catch {
+      /* ignore */
+    }
     const reparsed = asData(obj.customConfig);
     if (!reparsed) return null;
     // 写回宿主，触发宿主重新校验（这次配置是从上次成功保存完整保留的）

@@ -120,6 +120,13 @@ export interface PluginData {
   forms: FormPluginConfig[];
   /** 使用态默认展示的表单 ID */
   defaultFormId?: string;
+  /**
+   * ★ 配置所属多维表格的 baseId（保存时写入）。
+   * 读取时校验：与当前 base 不一致的配置一律丢弃 —— 防止同一插件部署在多个
+   * 多维表格时互相串配置（跨 base 污染 / 新 widget 预填旧表单的根源）。
+   * 旧版配置无此字段视为本 base 配置，放行兼容。
+   */
+  baseId?: string;
 }
 
 /** 生成唯一 ID（优先 crypto.randomUUID，回退时间戳+随机） */
