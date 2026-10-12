@@ -50,6 +50,7 @@ export function metaToFieldConfig(meta: FieldMetaLite): FieldConfig {
     required: false,
     label: meta.name,
     options: meta.options,
+    linkTableId: meta.linkTableId,
   };
 }
 

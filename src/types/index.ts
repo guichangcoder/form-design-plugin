@@ -23,6 +23,32 @@ export const UNSUPPORTED_FIELD_TYPES: FieldType[] = [
   FieldType.Location,
 ];
 
+/** 选项引用条件：源表字段 等于 固定值 / 当前记录内某字段值（联动） */
+export interface OptionRefCondition {
+  /** 源表过滤字段 ID */
+  sourceFieldId: string;
+  /** 值来源：static=固定值；field=当前记录（主表字段/子表同行字段）的值 */
+  valueSource: 'static' | 'field';
+  /** valueSource=static 时的固定值（按单元格文本比较） */
+  staticValue?: string;
+  /** valueSource=field 时引用的当前表单字段 ID（同区块：主表→主表字段，子表→同行字段） */
+  formFieldId?: string;
+}
+
+/**
+ * 选项引用配置（单选/多选字段）：从本 base 内其他数据表的字段内容动态生成选项。
+ * 参考多维表格原生「引用选项」：选项 = 源表取值字段的记录值（去重），
+ * conditions 全部满足的记录才纳入；条件引用表单字段时即实现「省-市」级联。
+ */
+export interface OptionReference {
+  /** 源表 ID（可与当前表相同） */
+  tableId: string;
+  /** 源表取值字段 ID（其记录值去重后作为选项文本） */
+  fieldId: string;
+  /** 过滤条件（全部满足才纳入；空数组 = 不过滤，引用全部记录） */
+  conditions: OptionRefCondition[];
+}
+
 /** 单个字段在表单中的配置 */
 export interface FieldConfig {
   fieldId: string;
@@ -44,6 +70,8 @@ export interface FieldConfig {
   options?: { id: string; name: string; color?: string }[];
   /** 关联字段指向的表 ID（仅关联类型） */
   linkTableId?: string;
+  /** 选项引用（仅单选/多选）：配置后忽略固定 options，改为从源表动态取选项 */
+  optionRef?: OptionReference;
 }
 
 /** 子表配置 */

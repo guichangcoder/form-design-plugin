@@ -2,6 +2,7 @@ import React from 'react';
 import { FieldType } from '@lark-base-open/js-sdk';
 import { SubTableConfig, FormValues, ConditionalState, FieldError } from '../../types';
 import { isFieldRequired, isHiddenField } from '../../utils/validator';
+import { getOptionRefDependencies } from '../../utils/optionRef';
 import { toast } from '../../utils/toast';
 import { FieldRenderer } from './FieldRenderer';
 import { Button } from '@douyinfe/semi-ui';
@@ -18,7 +19,20 @@ interface Props {
 
 export function SubForm({ sub, rows, onChange, cond, errors }: Props) {
   const updateRow = (idx: number, fieldId: string, v: unknown) =>
-    onChange(rows.map((r, i) => (i === idx ? { ...r, [fieldId]: v } : r)));
+    onChange(
+      rows.map((r, i) => {
+        if (i !== idx) return r;
+        const next: FormValues = { ...r, [fieldId]: v };
+        // 行内级联清空：引用选项依赖了被改字段的同行字段，父值一变即清空
+        for (const f of sub.fields) {
+          if (f.fieldId === fieldId) continue;
+          if (!getOptionRefDependencies(f).includes(fieldId)) continue;
+          if (next[f.fieldId] === undefined) continue;
+          next[f.fieldId] = f.fieldType === FieldType.MultiSelect ? [] : undefined;
+        }
+        return next;
+      })
+    );
 
   const addRow = () => {
     if (sub.maxRows && rows.length >= sub.maxRows) {
@@ -38,12 +52,12 @@ export function SubForm({ sub, rows, onChange, cond, errors }: Props) {
 
   const removeRow = (idx: number) => onChange(rows.filter((_, i) => i !== idx));
 
-  // 关联字段（含指向主表的关联字段）由提交逻辑自动维护，录入表单不显示。
+  // 仅排除「指向主表的关联字段」本身（提交逻辑自动注入主表 recordId，hydrate 时也会从
+  // sub.fields 剔除）；其他关联字段照常渲染为记录选择器，供用户从目标表挑选记录。
   // 条件隐藏按「全表级 + 当前行级」判断（P2-9：子表规则逐行生效）。
   const visibleInRow = (f: SubTableConfig['fields'][number], rowIndex: number) =>
     f.visible &&
-    f.fieldType !== FieldType.SingleLink &&
-    f.fieldType !== FieldType.DuplexLink &&
+    f.fieldId !== sub.linkFieldId &&
     !isHiddenField(cond, sub.tableId, f.fieldId, rowIndex);
 
   return (
@@ -83,6 +97,7 @@ export function SubForm({ sub, rows, onChange, cond, errors }: Props) {
                   value={row[f.fieldId]}
                   onChange={(v) => updateRow(idx, f.fieldId, v)}
                   disabled={f.readonly}
+                  formValues={row}
                 />
                 {err && <div className="field-err">{err.message}</div>}
               </div>

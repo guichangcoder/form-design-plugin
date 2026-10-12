@@ -37,10 +37,9 @@ export function isFieldRequired(
   cond: ConditionalState,
   rowIndex?: number
 ): boolean {
-  // 关联字段由提交逻辑自动注入主表 recordId，不应要求用户填写。
-  if (field.fieldType === FieldType.SingleLink || field.fieldType === FieldType.DuplexLink) {
-    return false;
-  }
+  // 关联字段现在由用户从目标表选记录（recordId 数组），与其他字段一样遵守必填规则。
+  // 唯一的例外——子表中「指向主表的关联字段」——不在 sub.fields 里（hydrate 已剔除），
+  // validateSubRow 也会显式跳过，故无需在此按类型豁免。
   if (cond.forcedUnrequired[tableId]?.has(field.fieldId)) return false;
   if (rowIndex !== undefined && cond.rowForcedUnrequired[tableId]?.[rowIndex]?.has(field.fieldId)) {
     return false;
@@ -111,15 +110,28 @@ export function validateForm(
   // 2. 校验子表（每条记录，按行应用条件规则）
   for (const sub of config.subTables) {
     const rows = subValues[sub.tableId] ?? [];
-    // 子表初始会展示一行空白占位；用户未填写任何字段时，不创建空子表记录，
-    // 也不应因为子表必填字段而阻止只填写主表。
+    // 子表初始会展示一行空白占位；用户未填写任何字段时，不创建空子表记录。
+    // 但若该子表配置了「可见的必填字段」，则整张子表视为必录：
+    // 首行（占位行）即使全空也必须参与校验，否则用户只填主表就能绕过子表必填。
+    // （无必填字段的子表保持原语义：全空即跳过，允许只提交主表。）
+    const subHasVisibleRequired = sub.fields.some(
+      (f) =>
+        f.fieldId !== sub.linkFieldId &&
+        f.visible &&
+        !isHiddenField(cond, sub.tableId, f.fieldId, 0) &&
+        isFieldRequired(f, sub.tableId, cond, 0)
+    );
     // 注意：rowIndex 必须是原始行索引（行级条件规则按原始行索引计算），
     // 不能用 filter 后的新索引，否则空行错位会导致行级必填/隐藏判定张冠李戴。
     rows.forEach((row, rowIndex) => {
       const hasAnyValue = sub.fields.some((field) => !isEmptyValue(row[field.fieldId]));
-      if (!hasAnyValue) return;
+      if (!hasAnyValue && !(subHasVisibleRequired && rowIndex === 0)) return;
       validateSubRow(sub, row, rowIndex, cond, errors, fieldErrors);
     });
+    // 行数组为空的防御（正常 UI 至少保留一行）：子表必录时按首行全空报错
+    if (rows.length === 0 && subHasVisibleRequired) {
+      validateSubRow(sub, {}, 0, cond, errors, fieldErrors);
+    }
   }
 
   return { valid: errors.length === 0, errors, fieldErrors };
@@ -134,6 +146,8 @@ function validateSubRow(
   fieldErrors: FieldError[]
 ): void {
   for (const field of sub.fields) {
+    // 子表「指向主表的关联字段」由提交逻辑自动注入，永不参与必填/格式校验
+    if (field.fieldId === sub.linkFieldId) continue;
     if (isHiddenField(cond, sub.tableId, field.fieldId, rowIndex)) continue;
     const value = row[field.fieldId];
     if (isFieldRequired(field, sub.tableId, cond, rowIndex)) {

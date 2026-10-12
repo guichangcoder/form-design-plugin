@@ -12,6 +12,7 @@ import { validateForm } from '../src/utils/validator';
 import { submitForm } from '../src/services/recordService';
 import { __setAppForTest as selectBaseForTest } from '../src/services/appContext';
 import { serializeConfig, hydrateConfig } from '../src/services/configSize';
+import { resolveRefOptions, getOptionRefDependencies, hasOptionRef } from '../src/utils/optionRef';
 
 const results = [];
 function log(line) { process.stdout.write(line + '\n'); }
@@ -305,6 +306,162 @@ async function run() {
     // 填上值后放行
     const res2 = validateForm(form, { fldM1: 'ABC公司' }, {}, cond);
     check('F12 填值后校验通过', res2.valid === true, res2.errors);
+  }
+
+  // —— F13：子表必填整表必录（空子表 + 部分填写 + 无必填子表豁免 + hydrate 往返）——
+  {
+    // 子表字段「明细」必填
+    const fullConfig = {
+      id: 'form1',
+      version: '1.0.0',
+      formTitle: '主子联填',
+      mainTable: {
+        tableId: MAIN,
+        tableName: '主表',
+        fields: [
+          { fieldId: 'fldM1', fieldName: '标题', fieldType: FieldType.Text, visible: true, required: true, label: '标题' },
+        ],
+      },
+      subTables: [
+        {
+          tableId: SUB1,
+          tableName: '子表1',
+          linkFieldId: 'fldLink1',
+          fields: [
+            { fieldId: 'fldS1', fieldName: '明细', fieldType: FieldType.Text, visible: true, required: true, label: '明细' },
+          ],
+          allowMultiple: true,
+        },
+      ],
+      conditionalRules: [],
+    };
+    // 序列化 → 宿主存取 → hydrate（模拟真实加载链路，确认 required 不丢）
+    const thin = serializeConfig({ forms: [fullConfig], defaultFormId: 'form1' });
+    const stored = JSON.parse(JSON.stringify(thin));
+    const metaBase = {
+      getTableById: async (id) => ({
+        getFieldMetaList: async () =>
+          id === MAIN
+            ? [{ id: 'fldM1', name: '标题', type: FieldType.Text }]
+            : [{ id: 'fldS1', name: '明细', type: FieldType.Text }],
+      }),
+      getTableMetaList: async () => [
+        { id: MAIN, name: '主表' },
+        { id: SUB1, name: '子表1' },
+      ],
+    };
+    selectBaseForTest({ base: metaBase });
+    const hydrated = await hydrateConfig(stored);
+    const form = hydrated.forms[0];
+    const sf = form.subTables[0].fields.find((f) => f.fieldId === 'fldS1');
+    check('F13 hydrate 后子表 required 保留', sf?.required === true, sf);
+
+    const cond = computeConditionalState(form, {}, { [SUB1]: [{}] });
+    // a) 子表整行为空 + 子表有必填字段 → 必须拦截（本轮回填的缺口）
+    const v1 = validateForm(form, { fldM1: 't' }, { [SUB1]: [{}] }, cond);
+    check('F13 空子表（有必填字段）被拦截', v1.valid === false, v1.errors);
+    check(
+      'F13 报错指向子表第 1 行必填字段',
+      v1.errors.some((e) => e.includes('第 1 行') && e.includes('明细')),
+      v1.errors
+    );
+    check(
+      'F13 字段级错误定位到子表 fldS1 第 0 行',
+      v1.fieldErrors.some((e) => e.tableId === SUB1 && e.fieldId === 'fldS1' && e.rowIndex === 0),
+      v1.fieldErrors
+    );
+    // b) 子表部分填写（别的字段有值、必填为空）→ 拦截
+    const form2 = JSON.parse(JSON.stringify(form));
+    form2.subTables[0].fields.push({
+      fieldId: 'fldS2x', fieldName: '备注', fieldType: FieldType.Text, visible: true, required: false,
+    });
+    const cond2 = computeConditionalState(form2, {}, { [SUB1]: [{}] });
+    const v2 = validateForm(form2, { fldM1: 't' }, { [SUB1]: [{ fldS2x: 'x' }] }, cond2);
+    check('F13 子表部分填写但必填为空被拦截', v2.valid === false, v2.errors);
+    // c) 子表无必填字段 + 整行为空 → 放行（保持「允许只提交主表」语义）
+    const form3 = JSON.parse(JSON.stringify(form));
+    form3.subTables[0].fields[0].required = false;
+    const cond3 = computeConditionalState(form3, {}, { [SUB1]: [{}] });
+    const v3 = validateForm(form3, { fldM1: 't' }, { [SUB1]: [{}] }, cond3);
+    check('F13 无必填字段的空子表仍放行', v3.valid === true, v3.errors);
+    // d) 必填填上 → 放行
+    const v4 = validateForm(form, { fldM1: 't' }, { [SUB1]: [{ fldS1: 'v' }] }, cond);
+    check('F13 子表必填填值后通过', v4.valid === true, v4.errors);
+  }
+
+  // —— F14：选项引用（resolveRefOptions 过滤/去重/联动 + 序列化往返 + 依赖提取）——
+  {
+    // 源表：城市表（fldCity=城市名，fldProv=所属省）
+    const records = [
+      { fields: { fldCity: '杭州', fldProv: '浙江' } },
+      { fields: { fldCity: '宁波', fldProv: '浙江' } },
+      { fields: { fldCity: '杭州', fldProv: '浙江' } }, // 重复值 → 去重
+      { fields: { fldCity: '南京', fldProv: '江苏' } },
+      { fields: { fldCity: '', fldProv: '江苏' } },    // 空取值 → 跳过
+    ];
+    // a) 无条件 → 全部城市去重
+    const refAll = { tableId: 'tblCity', fieldId: 'fldCity', conditions: [] };
+    const o1 = resolveRefOptions(refAll, records, {});
+    check('F14 无条件引用全量去重', o1.join(',') === '杭州,宁波,南京', o1);
+    // b) 静态条件：仅浙江省
+    const refZhejiang = {
+      tableId: 'tblCity', fieldId: 'fldCity',
+      conditions: [{ sourceFieldId: 'fldProv', valueSource: 'static', staticValue: '浙江' }],
+    };
+    const o2 = resolveRefOptions(refZhejiang, records, {});
+    check('F14 静态条件过滤（仅浙江）', o2.join(',') === '杭州,宁波', o2);
+    // c) 联动条件：源表 fldProv = 当前表单 fldMProv 的值（省-市级联）
+    const refCascade = {
+      tableId: 'tblCity', fieldId: 'fldCity',
+      conditions: [{ sourceFieldId: 'fldProv', valueSource: 'field', formFieldId: 'fldMProv' }],
+    };
+    const o3 = resolveRefOptions(refCascade, records, { fldMProv: '江苏' });
+    check('F14 联动条件按表单值过滤（江苏）', o3.join(',') === '南京', o3);
+    const o4 = resolveRefOptions(refCascade, records, { fldMProv: '浙江' });
+    check('F14 联动条件随表单值变化（浙江）', o4.join(',') === '杭州,宁波', o4);
+    // d) 联动父字段未填 → 无选项（省未选，市为空）
+    const o5 = resolveRefOptions(refCascade, records, {});
+    check('F14 联动父字段未填时无选项', o5.length === 0, o5);
+    // e) hasOptionRef / getOptionRefDependencies
+    const fCascade = { fieldId: 'fldMCity', optionRef: refCascade };
+    check('F14 hasOptionRef 识别完整配置', hasOptionRef(fCascade) === true);
+    check('F14 不完整的 optionRef 不算启用', hasOptionRef({ fieldId: 'x', optionRef: { tableId: '', fieldId: '', conditions: [] } }) === false);
+    check('F14 依赖提取返回联动字段', getOptionRefDependencies(fCascade).join(',') === 'fldMProv', getOptionRefDependencies(fCascade));
+    check('F14 静态条件不产生依赖', getOptionRefDependencies({ fieldId: 'y', optionRef: refZhejiang }).length === 0);
+    // f) 序列化 → 宿主存取 → hydrate：optionRef 完整保留
+    const cfg = {
+      id: 'form1', version: '1.0.0', formTitle: '引用选项',
+      mainTable: {
+        tableId: MAIN, tableName: '主表',
+        fields: [
+          { fieldId: 'fldMProv', fieldName: '省', fieldType: FieldType.SingleSelect, visible: true, required: false, label: '省' },
+          { fieldId: 'fldMCity', fieldName: '市', fieldType: FieldType.SingleSelect, visible: true, required: false, label: '市', optionRef: refCascade },
+        ],
+      },
+      subTables: [],
+      conditionalRules: [],
+    };
+    const thin = serializeConfig({ forms: [cfg], defaultFormId: 'form1' });
+    const stored = JSON.parse(JSON.stringify(thin));
+    check(
+      'F14 序列化保留 optionRef',
+      JSON.stringify(stored.forms[0].mainTable.fields.find((f) => f.fieldId === 'fldMCity')?.optionRef) === JSON.stringify(refCascade),
+      stored.forms[0].mainTable.fields
+    );
+    const metaBase = {
+      getTableById: async () => ({
+        getFieldMetaList: async () => [
+          { id: 'fldMProv', name: '省', type: FieldType.SingleSelect },
+          { id: 'fldMCity', name: '市', type: FieldType.SingleSelect },
+        ],
+      }),
+      getTableMetaList: async () => [{ id: MAIN, name: '主表' }],
+    };
+    selectBaseForTest({ base: metaBase });
+    const hydrated = await hydrateConfig(stored);
+    const hf = hydrated.forms[0].mainTable.fields.find((f) => f.fieldId === 'fldMCity');
+    check('F14 hydrate 后 optionRef 保留', JSON.stringify(hf?.optionRef) === JSON.stringify(refCascade), hf);
+    check('F14 hydrate 后 fieldType 恢复', hf?.fieldType === FieldType.SingleSelect, hf);
   }
 
   const failed = results.filter((r) => !r.pass);

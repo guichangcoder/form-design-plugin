@@ -16,7 +16,11 @@ import {
 } from '@douyinfe/semi-ui';
 import { IconUpload } from '@douyinfe/semi-icons';
 import { PersonSelector, BitableUser } from './PersonSelector';
+import { LinkSelector } from './LinkSelector';
+import { RefOptionSelect } from './RefOptionSelect';
 import { fuzzyOptionFilter } from './fuzzyOptionFilter';
+import { hasOptionRef } from '../../utils/optionRef';
+import { FormValues } from '../../types';
 
 interface Props {
   field: FieldConfig;
@@ -25,6 +29,8 @@ interface Props {
   disabled?: boolean;
   /** 字段所属表 ID（人员选择器用于加载候选人员） */
   tableId: string;
+  /** 当前记录值（主表值 / 子表当前行值）：引用选项的联动条件据此实时过滤 */
+  formValues?: FormValues;
 }
 
 const fullWidth: React.CSSProperties = { width: '100%' };
@@ -79,9 +85,10 @@ function AttachmentUploader({
 
 /**
  * 单字段渲染器：根据字段类型分发到对应的 Semi UI 组件。
- * 关联字段（SingleLink/DuplexLink）由提交逻辑自动维护，前端仅作只读提示。
+ * 关联字段（SingleLink/DuplexLink）由 LinkSelector 让用户从目标表选记录；
+ * 仅子表中指向主表的关联字段例外（SubForm 不渲染，提交逻辑自动注入主表 recordId）。
  */
-export function FieldRenderer({ field, value, onChange, disabled, tableId }: Props) {
+export function FieldRenderer({ field, value, onChange, disabled, tableId, formValues }: Props) {
   const options = (field.options ?? []).map((o) => ({ value: o.name, label: o.name }));
 
   switch (field.fieldType) {
@@ -123,6 +130,18 @@ export function FieldRenderer({ field, value, onChange, disabled, tableId }: Pro
       );
 
     case FieldType.SingleSelect:
+      // 配置了引用选项：选项从源表动态取（支持条件过滤与省-市级联）
+      if (hasOptionRef(field)) {
+        return (
+          <RefOptionSelect
+            field={field}
+            value={value}
+            onChange={onChange}
+            disabled={disabled}
+            formValues={formValues ?? {}}
+          />
+        );
+      }
       return (
         <Select
           style={fullWidth}
@@ -137,6 +156,18 @@ export function FieldRenderer({ field, value, onChange, disabled, tableId }: Pro
       );
 
     case FieldType.MultiSelect:
+      if (hasOptionRef(field)) {
+        return (
+          <RefOptionSelect
+            field={field}
+            value={value}
+            onChange={onChange}
+            disabled={disabled}
+            multiple
+            formValues={formValues ?? {}}
+          />
+        );
+      }
       return (
         <Select
           style={fullWidth}
@@ -207,9 +238,18 @@ export function FieldRenderer({ field, value, onChange, disabled, tableId }: Pro
 
     case FieldType.SingleLink:
     case FieldType.DuplexLink:
-      // 关联字段由提交逻辑自动写入（指向主表记录），无需用户填写
+      // 关联字段：以「关联目标表记录选择器」形式录入，选项为目标表记录（主字段内容）。
+      // 表单态保存 recordId 数组，提交时由 valueConverter 包裹为 IOpenLink 写入。
+      // 注意：子表中指向主表的关联字段不会走到这里（SubForm 已排除，提交逻辑自动注入）。
       return (
-        <Typography.Text type="tertiary">系统自动关联（提交时与主表关联）</Typography.Text>
+        <LinkSelector
+          tableId={tableId}
+          fieldId={field.fieldId}
+          linkTableId={field.linkTableId}
+          value={Array.isArray(value) ? (value as string[]) : []}
+          onChange={onChange}
+          disabled={disabled}
+        />
       );
 
     case FieldType.GroupChat:

@@ -2,6 +2,7 @@ import { FieldType } from '@lark-base-open/js-sdk';
 import { FieldConfig, FormValues } from '../types';
 import { isEmptyValue } from './validator';
 import { getBase } from '../services/appContext';
+import { getLinkTargetTableId } from '../services/baseService';
 
 /**
  * 将表单态的单个字段值，转换为多维表格 SDK 写入所需的 cell 值格式。
@@ -42,7 +43,8 @@ function toSelectCellValue(raw: unknown, field?: FieldConfig): unknown {
 /**
  * 将一组表单字段值转换为 SDK 写入格式（fields 对象）。
  * key 统一使用字段 ID，value 为转换后的 cell 值。空值字段会被跳过。
- * 关联字段（SingleLink/DuplexLink）不在此处处理，由 submitForm 单独设置。
+ * 关联字段：用户选择的目标表 recordId 数组在此包裹为 IOpenLink；
+ * 子表「指向主表的关联字段」无用户值，由 submitForm 单独注入。
  */
 export async function convertToSdkFormat(
   fields: FieldConfig[],
@@ -55,8 +57,25 @@ export async function convertToSdkFormat(
   for (const field of fields) {
     const raw = values[field.fieldId];
     if (isEmptyValue(raw)) continue;
-    // 关联字段写入由 submitForm 注入（含主表 recordId），这里跳过
+    // 关联字段：用户从目标表选择的 recordId 数组 → 包裹为 IOpenLink 写入。
+    // （子表中「指向主表的关联字段」无用户值，已被 isEmptyValue 跳过；
+    //   recordService 随后会注入主表 recordId 覆盖同名 key。）
     if (field.fieldType === FieldType.SingleLink || field.fieldType === FieldType.DuplexLink) {
+      const ids = (Array.isArray(raw) ? (raw as string[]) : []).filter(Boolean);
+      if (ids.length === 0) continue;
+      const target =
+        field.linkTableId || (await getLinkTargetTableId(tableId, field.fieldId)) || '';
+      if (!target) {
+        throw new Error(`关联字段「${field.label || field.fieldName}」未找到目标表，请重新保存配置`);
+      }
+      result[field.fieldId] = {
+        text: '',
+        type: 'text',
+        recordIds: ids,
+        tableId: target,
+        record_ids: ids,
+        table_id: target,
+      };
       continue;
     }
     // 附件：在提交阶段统一上传并包裹为 IOpenAttachment[]（token 由 batchUploadFile 返回）

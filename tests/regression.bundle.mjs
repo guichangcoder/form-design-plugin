@@ -29443,9 +29443,6 @@ function isHiddenField(cond, tableId, fieldId, rowIndex) {
   return false;
 }
 function isFieldRequired(field, tableId, cond, rowIndex) {
-  if (field.fieldType === j5.SingleLink || field.fieldType === j5.DuplexLink) {
-    return false;
-  }
   if (cond.forcedUnrequired[tableId]?.has(field.fieldId)) return false;
   if (rowIndex !== void 0 && cond.rowForcedUnrequired[tableId]?.[rowIndex]?.has(field.fieldId)) {
     return false;
@@ -29490,16 +29487,23 @@ function validateForm(config, mainValues, subValues, cond) {
   }
   for (const sub of config.subTables) {
     const rows = subValues[sub.tableId] ?? [];
+    const subHasVisibleRequired = sub.fields.some(
+      (f12) => f12.fieldId !== sub.linkFieldId && f12.visible && !isHiddenField(cond, sub.tableId, f12.fieldId, 0) && isFieldRequired(f12, sub.tableId, cond, 0)
+    );
     rows.forEach((row, rowIndex) => {
       const hasAnyValue = sub.fields.some((field) => !isEmptyValue2(row[field.fieldId]));
-      if (!hasAnyValue) return;
+      if (!hasAnyValue && !(subHasVisibleRequired && rowIndex === 0)) return;
       validateSubRow(sub, row, rowIndex, cond, errors, fieldErrors);
     });
+    if (rows.length === 0 && subHasVisibleRequired) {
+      validateSubRow(sub, {}, 0, cond, errors, fieldErrors);
+    }
   }
   return { valid: errors.length === 0, errors, fieldErrors };
 }
 function validateSubRow(sub, row, rowIndex, cond, errors, fieldErrors) {
   for (const field of sub.fields) {
+    if (field.fieldId === sub.linkFieldId) continue;
     if (isHiddenField(cond, sub.tableId, field.fieldId, rowIndex)) continue;
     const value = row[field.fieldId];
     if (isFieldRequired(field, sub.tableId, cond, rowIndex)) {
@@ -29655,6 +29659,20 @@ async function convertToSdkFormat(fields, values, tableId) {
     const raw = values[field.fieldId];
     if (isEmptyValue2(raw)) continue;
     if (field.fieldType === j5.SingleLink || field.fieldType === j5.DuplexLink) {
+      const ids = (Array.isArray(raw) ? raw : []).filter(Boolean);
+      if (ids.length === 0) continue;
+      const target = field.linkTableId || await getLinkTargetTableId(tableId, field.fieldId) || "";
+      if (!target) {
+        throw new Error(`\u5173\u8054\u5B57\u6BB5\u300C${field.label || field.fieldName}\u300D\u672A\u627E\u5230\u76EE\u6807\u8868\uFF0C\u8BF7\u91CD\u65B0\u4FDD\u5B58\u914D\u7F6E`);
+      }
+      result[field.fieldId] = {
+        text: "",
+        type: "text",
+        recordIds: ids,
+        tableId: target,
+        record_ids: ids,
+        table_id: target
+      };
       continue;
     }
     if (field.fieldType === j5.Attachment && Array.isArray(raw)) {
@@ -29840,8 +29858,10 @@ var KEEP_FIELDS = [
   // 用户决策
   "defaultValue",
   // 用户决策
-  "readonly"
+  "readonly",
   // 用户决策
+  "optionRef"
+  // 用户决策（选项引用：源表/源字段/条件，体积很小）
   // 注：未来若加 order/width 等用户决策字段，记得也加进来
 ];
 function trimField(f12) {
@@ -29866,7 +29886,8 @@ function untrimField(stub) {
     defaultValue: stub.defaultValue,
     readonly: !!stub.readonly,
     options: stub.options,
-    linkTableId: stub.linkTableId
+    linkTableId: stub.linkTableId,
+    optionRef: stub.optionRef
   };
 }
 function serializeConfig(data) {
@@ -30043,6 +30064,58 @@ async function safeGetTableNameMap() {
   } catch {
     return /* @__PURE__ */ new Map();
   }
+}
+
+// src/utils/cellText.ts
+function stringifyCellValue(v11) {
+  if (v11 === null || v11 === void 0) return "";
+  if (typeof v11 === "string") return v11;
+  if (typeof v11 === "number") {
+    return v11 > 9466848e5 && v11 < 41024448e5 ? new Date(v11).toLocaleDateString() : String(v11);
+  }
+  if (typeof v11 === "boolean") return v11 ? "\u662F" : "\u5426";
+  if (Array.isArray(v11)) {
+    return v11.map((item) => stringifyCellValue(item)).filter(Boolean).join(" ");
+  }
+  if (typeof v11 === "object") {
+    const o11 = v11;
+    if (typeof o11.text === "string" && o11.text) return o11.text;
+    if (typeof o11.name === "string" && o11.name) return o11.name;
+    if (typeof o11.full_address === "string") return o11.full_address;
+    if (typeof o11.link === "string") return o11.link;
+    return "";
+  }
+  return "";
+}
+
+// src/utils/optionRef.ts
+function resolveRefOptions(ref, records, formValues) {
+  if (!ref?.tableId || !ref?.fieldId) return [];
+  const out = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const rec of records ?? []) {
+    const fields = rec?.fields ?? {};
+    const ok2 = (ref.conditions ?? []).every((c11) => {
+      const cellText = stringifyCellValue(fields[c11.sourceFieldId]);
+      const expected = c11.valueSource === "field" ? stringifyCellValue(formValues?.[c11.formFieldId ?? ""]) : c11.staticValue ?? "";
+      if (!expected) return false;
+      return cellText === expected;
+    });
+    if (!ok2) continue;
+    const text = stringifyCellValue(fields[ref.fieldId]);
+    if (text && !seen.has(text)) {
+      seen.add(text);
+      out.push(text);
+    }
+  }
+  return out;
+}
+function hasOptionRef(field) {
+  return !!field.optionRef?.tableId && !!field.optionRef?.fieldId;
+}
+function getOptionRefDependencies(field) {
+  if (!hasOptionRef(field)) return [];
+  return (field.optionRef.conditions ?? []).filter((c11) => c11.valueSource === "field" && c11.formFieldId).map((c11) => c11.formFieldId);
 }
 
 // tests/regression.entry.mjs
@@ -30308,6 +30381,152 @@ async function run() {
     check("F12 \u5B57\u6BB5\u7EA7\u9519\u8BEF\u5B9A\u4F4D\u5230 fldM1", res.fieldErrors.some((e11) => e11.fieldId === "fldM1" && e11.rowIndex === void 0), res.fieldErrors);
     const res2 = validateForm(form, { fldM1: "ABC\u516C\u53F8" }, {}, cond);
     check("F12 \u586B\u503C\u540E\u6821\u9A8C\u901A\u8FC7", res2.valid === true, res2.errors);
+  }
+  {
+    const fullConfig = {
+      id: "form1",
+      version: "1.0.0",
+      formTitle: "\u4E3B\u5B50\u8054\u586B",
+      mainTable: {
+        tableId: MAIN,
+        tableName: "\u4E3B\u8868",
+        fields: [
+          { fieldId: "fldM1", fieldName: "\u6807\u9898", fieldType: j5.Text, visible: true, required: true, label: "\u6807\u9898" }
+        ]
+      },
+      subTables: [
+        {
+          tableId: SUB1,
+          tableName: "\u5B50\u88681",
+          linkFieldId: "fldLink1",
+          fields: [
+            { fieldId: "fldS1", fieldName: "\u660E\u7EC6", fieldType: j5.Text, visible: true, required: true, label: "\u660E\u7EC6" }
+          ],
+          allowMultiple: true
+        }
+      ],
+      conditionalRules: []
+    };
+    const thin = serializeConfig({ forms: [fullConfig], defaultFormId: "form1" });
+    const stored = JSON.parse(JSON.stringify(thin));
+    const metaBase = {
+      getTableById: async (id) => ({
+        getFieldMetaList: async () => id === MAIN ? [{ id: "fldM1", name: "\u6807\u9898", type: j5.Text }] : [{ id: "fldS1", name: "\u660E\u7EC6", type: j5.Text }]
+      }),
+      getTableMetaList: async () => [
+        { id: MAIN, name: "\u4E3B\u8868" },
+        { id: SUB1, name: "\u5B50\u88681" }
+      ]
+    };
+    __setAppForTest({ base: metaBase });
+    const hydrated = await hydrateConfig(stored);
+    const form = hydrated.forms[0];
+    const sf2 = form.subTables[0].fields.find((f12) => f12.fieldId === "fldS1");
+    check("F13 hydrate \u540E\u5B50\u8868 required \u4FDD\u7559", sf2?.required === true, sf2);
+    const cond = computeConditionalState(form, {}, { [SUB1]: [{}] });
+    const v1 = validateForm(form, { fldM1: "t" }, { [SUB1]: [{}] }, cond);
+    check("F13 \u7A7A\u5B50\u8868\uFF08\u6709\u5FC5\u586B\u5B57\u6BB5\uFF09\u88AB\u62E6\u622A", v1.valid === false, v1.errors);
+    check(
+      "F13 \u62A5\u9519\u6307\u5411\u5B50\u8868\u7B2C 1 \u884C\u5FC5\u586B\u5B57\u6BB5",
+      v1.errors.some((e11) => e11.includes("\u7B2C 1 \u884C") && e11.includes("\u660E\u7EC6")),
+      v1.errors
+    );
+    check(
+      "F13 \u5B57\u6BB5\u7EA7\u9519\u8BEF\u5B9A\u4F4D\u5230\u5B50\u8868 fldS1 \u7B2C 0 \u884C",
+      v1.fieldErrors.some((e11) => e11.tableId === SUB1 && e11.fieldId === "fldS1" && e11.rowIndex === 0),
+      v1.fieldErrors
+    );
+    const form2 = JSON.parse(JSON.stringify(form));
+    form2.subTables[0].fields.push({
+      fieldId: "fldS2x",
+      fieldName: "\u5907\u6CE8",
+      fieldType: j5.Text,
+      visible: true,
+      required: false
+    });
+    const cond2 = computeConditionalState(form2, {}, { [SUB1]: [{}] });
+    const v22 = validateForm(form2, { fldM1: "t" }, { [SUB1]: [{ fldS2x: "x" }] }, cond2);
+    check("F13 \u5B50\u8868\u90E8\u5206\u586B\u5199\u4F46\u5FC5\u586B\u4E3A\u7A7A\u88AB\u62E6\u622A", v22.valid === false, v22.errors);
+    const form3 = JSON.parse(JSON.stringify(form));
+    form3.subTables[0].fields[0].required = false;
+    const cond3 = computeConditionalState(form3, {}, { [SUB1]: [{}] });
+    const v32 = validateForm(form3, { fldM1: "t" }, { [SUB1]: [{}] }, cond3);
+    check("F13 \u65E0\u5FC5\u586B\u5B57\u6BB5\u7684\u7A7A\u5B50\u8868\u4ECD\u653E\u884C", v32.valid === true, v32.errors);
+    const v42 = validateForm(form, { fldM1: "t" }, { [SUB1]: [{ fldS1: "v" }] }, cond);
+    check("F13 \u5B50\u8868\u5FC5\u586B\u586B\u503C\u540E\u901A\u8FC7", v42.valid === true, v42.errors);
+  }
+  {
+    const records = [
+      { fields: { fldCity: "\u676D\u5DDE", fldProv: "\u6D59\u6C5F" } },
+      { fields: { fldCity: "\u5B81\u6CE2", fldProv: "\u6D59\u6C5F" } },
+      { fields: { fldCity: "\u676D\u5DDE", fldProv: "\u6D59\u6C5F" } },
+      // 重复值 → 去重
+      { fields: { fldCity: "\u5357\u4EAC", fldProv: "\u6C5F\u82CF" } },
+      { fields: { fldCity: "", fldProv: "\u6C5F\u82CF" } }
+      // 空取值 → 跳过
+    ];
+    const refAll = { tableId: "tblCity", fieldId: "fldCity", conditions: [] };
+    const o1 = resolveRefOptions(refAll, records, {});
+    check("F14 \u65E0\u6761\u4EF6\u5F15\u7528\u5168\u91CF\u53BB\u91CD", o1.join(",") === "\u676D\u5DDE,\u5B81\u6CE2,\u5357\u4EAC", o1);
+    const refZhejiang = {
+      tableId: "tblCity",
+      fieldId: "fldCity",
+      conditions: [{ sourceFieldId: "fldProv", valueSource: "static", staticValue: "\u6D59\u6C5F" }]
+    };
+    const o22 = resolveRefOptions(refZhejiang, records, {});
+    check("F14 \u9759\u6001\u6761\u4EF6\u8FC7\u6EE4\uFF08\u4EC5\u6D59\u6C5F\uFF09", o22.join(",") === "\u676D\u5DDE,\u5B81\u6CE2", o22);
+    const refCascade = {
+      tableId: "tblCity",
+      fieldId: "fldCity",
+      conditions: [{ sourceFieldId: "fldProv", valueSource: "field", formFieldId: "fldMProv" }]
+    };
+    const o32 = resolveRefOptions(refCascade, records, { fldMProv: "\u6C5F\u82CF" });
+    check("F14 \u8054\u52A8\u6761\u4EF6\u6309\u8868\u5355\u503C\u8FC7\u6EE4\uFF08\u6C5F\u82CF\uFF09", o32.join(",") === "\u5357\u4EAC", o32);
+    const o42 = resolveRefOptions(refCascade, records, { fldMProv: "\u6D59\u6C5F" });
+    check("F14 \u8054\u52A8\u6761\u4EF6\u968F\u8868\u5355\u503C\u53D8\u5316\uFF08\u6D59\u6C5F\uFF09", o42.join(",") === "\u676D\u5DDE,\u5B81\u6CE2", o42);
+    const o52 = resolveRefOptions(refCascade, records, {});
+    check("F14 \u8054\u52A8\u7236\u5B57\u6BB5\u672A\u586B\u65F6\u65E0\u9009\u9879", o52.length === 0, o52);
+    const fCascade = { fieldId: "fldMCity", optionRef: refCascade };
+    check("F14 hasOptionRef \u8BC6\u522B\u5B8C\u6574\u914D\u7F6E", hasOptionRef(fCascade) === true);
+    check("F14 \u4E0D\u5B8C\u6574\u7684 optionRef \u4E0D\u7B97\u542F\u7528", hasOptionRef({ fieldId: "x", optionRef: { tableId: "", fieldId: "", conditions: [] } }) === false);
+    check("F14 \u4F9D\u8D56\u63D0\u53D6\u8FD4\u56DE\u8054\u52A8\u5B57\u6BB5", getOptionRefDependencies(fCascade).join(",") === "fldMProv", getOptionRefDependencies(fCascade));
+    check("F14 \u9759\u6001\u6761\u4EF6\u4E0D\u4EA7\u751F\u4F9D\u8D56", getOptionRefDependencies({ fieldId: "y", optionRef: refZhejiang }).length === 0);
+    const cfg = {
+      id: "form1",
+      version: "1.0.0",
+      formTitle: "\u5F15\u7528\u9009\u9879",
+      mainTable: {
+        tableId: MAIN,
+        tableName: "\u4E3B\u8868",
+        fields: [
+          { fieldId: "fldMProv", fieldName: "\u7701", fieldType: j5.SingleSelect, visible: true, required: false, label: "\u7701" },
+          { fieldId: "fldMCity", fieldName: "\u5E02", fieldType: j5.SingleSelect, visible: true, required: false, label: "\u5E02", optionRef: refCascade }
+        ]
+      },
+      subTables: [],
+      conditionalRules: []
+    };
+    const thin = serializeConfig({ forms: [cfg], defaultFormId: "form1" });
+    const stored = JSON.parse(JSON.stringify(thin));
+    check(
+      "F14 \u5E8F\u5217\u5316\u4FDD\u7559 optionRef",
+      JSON.stringify(stored.forms[0].mainTable.fields.find((f12) => f12.fieldId === "fldMCity")?.optionRef) === JSON.stringify(refCascade),
+      stored.forms[0].mainTable.fields
+    );
+    const metaBase = {
+      getTableById: async () => ({
+        getFieldMetaList: async () => [
+          { id: "fldMProv", name: "\u7701", type: j5.SingleSelect },
+          { id: "fldMCity", name: "\u5E02", type: j5.SingleSelect }
+        ]
+      }),
+      getTableMetaList: async () => [{ id: MAIN, name: "\u4E3B\u8868" }]
+    };
+    __setAppForTest({ base: metaBase });
+    const hydrated = await hydrateConfig(stored);
+    const hf2 = hydrated.forms[0].mainTable.fields.find((f12) => f12.fieldId === "fldMCity");
+    check("F14 hydrate \u540E optionRef \u4FDD\u7559", JSON.stringify(hf2?.optionRef) === JSON.stringify(refCascade), hf2);
+    check("F14 hydrate \u540E fieldType \u6062\u590D", hf2?.fieldType === j5.SingleSelect, hf2);
   }
   const failed = results.filter((r10) => !r10.pass);
   log(`

@@ -37,6 +37,7 @@ const KEEP_FIELDS: ReadonlyArray<keyof FieldConfig> = [
   'placeholder',   // 用户决策
   'defaultValue',  // 用户决策
   'readonly',      // 用户决策
+  'optionRef',     // 用户决策（选项引用：源表/源字段/条件，体积很小）
   // 注：未来若加 order/width 等用户决策字段，记得也加进来
 ] as const;
 
@@ -68,6 +69,7 @@ function untrimField(stub: any): FieldConfig {
     readonly: !!stub.readonly,
     options: stub.options,
     linkTableId: stub.linkTableId,
+    optionRef: stub.optionRef,
   };
 }
 

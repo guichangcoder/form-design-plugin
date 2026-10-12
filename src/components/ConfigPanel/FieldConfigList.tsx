@@ -1,13 +1,20 @@
 import React, { useState } from 'react';
-import { FieldConfig } from '../../types';
+import { FieldType } from '@lark-base-open/js-sdk';
+import { FieldConfig, OptionReference } from '../../types';
 import { FIELD_TYPE_LABEL } from '../../utils/fieldMapper';
 import { FieldTypeIcon } from '../../utils/fieldTypeIcons';
-import { Input, Switch, Typography } from '@douyinfe/semi-ui';
-import { IconSearch } from '@douyinfe/semi-icons';
+import { Button, Input, Switch, Typography } from '@douyinfe/semi-ui';
+import { IconSearch, IconLink } from '@douyinfe/semi-icons';
+import { OptionRefEditor } from './OptionRefEditor';
 
 interface Props {
   fields: FieldConfig[];
   onChange: (fields: FieldConfig[]) => void;
+}
+
+/** 可配置「引用选项」的字段类型（单选/多选） */
+function isSelectField(t: FieldType): boolean {
+  return t === FieldType.SingleSelect || t === FieldType.MultiSelect;
 }
 
 export function FieldConfigList({ fields, onChange }: Props) {
@@ -15,6 +22,8 @@ export function FieldConfigList({ fields, onChange }: Props) {
   const [overIndex, setOverIndex] = useState<number | null>(null);
   // P2-10：字段搜索（大表下快速定位字段）。搜索时禁用拖拽排序，避免索引错乱。
   const [keyword, setKeyword] = useState('');
+  // 引用选项编辑器：正在编辑的字段索引（null = 关闭）
+  const [refEditIndex, setRefEditIndex] = useState<number | null>(null);
 
   const update = (idx: number, patch: Partial<FieldConfig>) => {
     onChange(fields.map((f, i) => (i === idx ? { ...f, ...patch } : f)));
@@ -141,12 +150,40 @@ export function FieldConfigList({ fields, onChange }: Props) {
                 必填
               </label>
             </div>
+            {/* 第三行（仅单选/多选）：引用选项入口 */}
+            {isSelectField(f.fieldType) && (
+              <div className="cfg-field-optionref">
+                <Button
+                  size="small"
+                  theme="borderless"
+                  type={f.optionRef ? 'primary' : 'tertiary'}
+                  icon={<IconLink />}
+                  onClick={() => setRefEditIndex(idx)}
+                >
+                  {f.optionRef
+                    ? `已启用引用选项${f.optionRef.conditions.length ? `（${f.optionRef.conditions.length} 个条件）` : ''}`
+                    : '引用选项…'}
+                </Button>
+              </div>
+            )}
           </div>
         );
       })}
       <Typography.Text type="tertiary" style={{ display: 'block', marginTop: 8, fontSize: 12 }}>
         拖拽左侧把手可调整字段显示顺序 · 隐藏字段不参与录入与必填校验
       </Typography.Text>
+      {refEditIndex !== null && fields[refEditIndex] && (
+        <OptionRefEditor
+          visible
+          field={fields[refEditIndex]}
+          siblingFields={fields}
+          onCancel={() => setRefEditIndex(null)}
+          onSave={(optionRef: OptionReference | undefined) => {
+            update(refEditIndex, { optionRef });
+            setRefEditIndex(null);
+          }}
+        />
+      )}
     </div>
   );
 }
