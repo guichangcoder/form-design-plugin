@@ -13,13 +13,12 @@ export const READONLY_FIELD_TYPES: FieldType[] = [
 ];
 
 /**
- * 暂不支持录入的字段类型（飞书官方诊断 P2-12）。
- * 这些字段的写入结构不是简单文本（人员需要 open_id 结构、群聊需要 chat_id、
- * 地理位置需要 {lat,lng,address} 结构），按文本录入会写入失败或写入脏数据。
- * 配置阶段直接从可录入列表排除，不向用户暴露"看似能填其实写不进"的字段。
+ * 暂不支持录入的字段类型（飞书官方诊断 P2-12 的群聊/地理位置部分）。
+ * - 人员字段（User）已支持：以人员选择器录入，写入结构为 IOpenUser[]（open_id）。
+ * - 群聊/地理位置的写入结构非简单文本（chat_id / 经纬度结构），按文本录入会写脏数据，
+ *   配置阶段直接从可录入列表排除。
  */
 export const UNSUPPORTED_FIELD_TYPES: FieldType[] = [
-  FieldType.User,
   FieldType.GroupChat,
   FieldType.Location,
 ];

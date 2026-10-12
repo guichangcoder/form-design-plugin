@@ -29548,7 +29548,6 @@ var READONLY_FIELD_TYPES = [
   j5.Barcode
 ];
 var UNSUPPORTED_FIELD_TYPES = [
-  j5.User,
   j5.GroupChat,
   j5.Location
 ];
@@ -29634,7 +29633,7 @@ function convertCellValue(type, raw, field) {
       return Number.isFinite(timestamp) ? timestamp : raw;
     }
     case j5.Attachment:
-      return Array.isArray(raw) ? { text: "", val: raw } : raw;
+      return raw;
     case j5.SingleSelect:
       return toSelectCellValue(raw, field);
     case j5.MultiSelect:
@@ -29656,6 +29655,19 @@ async function convertToSdkFormat(fields, values, tableId) {
     const raw = values[field.fieldId];
     if (isEmptyValue2(raw)) continue;
     if (field.fieldType === j5.SingleLink || field.fieldType === j5.DuplexLink) {
+      continue;
+    }
+    if (field.fieldType === j5.Attachment && Array.isArray(raw)) {
+      const files = raw.filter((f12) => f12 instanceof File);
+      if (files.length === 0) continue;
+      const tokens = await getBase().batchUploadFile(files);
+      result[field.fieldId] = files.map((f12, i3) => ({
+        name: f12.name,
+        size: f12.size,
+        type: f12.type,
+        token: tokens[i3],
+        timeStamp: Date.now()
+      }));
       continue;
     }
     const fieldInstance = await table.getField(field.fieldId);

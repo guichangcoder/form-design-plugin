@@ -79,6 +79,7 @@ export function SubForm({ sub, rows, onChange, cond, errors }: Props) {
                 </label>
                 <FieldRenderer
                   field={f}
+                  tableId={sub.tableId}
                   value={row[f.fieldId]}
                   onChange={(v) => updateRow(idx, f.fieldId, v)}
                   disabled={f.readonly}

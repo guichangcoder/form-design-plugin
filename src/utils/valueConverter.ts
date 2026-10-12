@@ -20,8 +20,9 @@ export function convertCellValue(
       return Number.isFinite(timestamp) ? timestamp : raw;
     }
     case FieldType.Attachment:
-      // 附件值：batchUploadFile 返回的 fileToken 数组，需包裹为 {text, val}
-      return Array.isArray(raw) ? { text: '', val: raw as string[] } : raw;
+      // 附件在 convertToSdkFormat 中统一上传并包裹为 {name,size,type,token,timeStamp}，
+      // 这里对直接调用兜底返回原值（File[] 由 SDK 字段 transform 处理）。
+      return raw;
     case FieldType.SingleSelect:
       return toSelectCellValue(raw, field);
     case FieldType.MultiSelect:
@@ -56,6 +57,20 @@ export async function convertToSdkFormat(
     if (isEmptyValue(raw)) continue;
     // 关联字段写入由 submitForm 注入（含主表 recordId），这里跳过
     if (field.fieldType === FieldType.SingleLink || field.fieldType === FieldType.DuplexLink) {
+      continue;
+    }
+    // 附件：在提交阶段统一上传并包裹为 IOpenAttachment[]（token 由 batchUploadFile 返回）
+    if (field.fieldType === FieldType.Attachment && Array.isArray(raw)) {
+      const files = (raw as File[]).filter((f) => f instanceof File);
+      if (files.length === 0) continue;
+      const tokens = await getBase().batchUploadFile(files);
+      result[field.fieldId] = files.map((f, i) => ({
+        name: f.name,
+        size: f.size,
+        type: f.type,
+        token: tokens[i],
+        timeStamp: Date.now(),
+      }));
       continue;
     }
     const fieldInstance = await table.getField(field.fieldId);

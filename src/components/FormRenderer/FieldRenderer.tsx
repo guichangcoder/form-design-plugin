@@ -1,8 +1,6 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useRef } from 'react';
 import { FieldType } from '@lark-base-open/js-sdk';
 import { FieldConfig } from '../../types';
-import { getBase } from '../../services/appContext';
-import { toast } from '../../utils/toast';
 import {
   Input,
   TextArea,
@@ -10,47 +8,81 @@ import {
   Select,
   DatePicker,
   Switch,
-  Upload,
   Rating,
   Typography,
+  Button,
+  Tag,
+  Space,
 } from '@douyinfe/semi-ui';
+import { IconUpload } from '@douyinfe/semi-icons';
+import { PersonSelector, BitableUser } from './PersonSelector';
+import { fuzzyOptionFilter } from './fuzzyOptionFilter';
 
 interface Props {
   field: FieldConfig;
   value: unknown;
   onChange: (v: unknown) => void;
   disabled?: boolean;
+  /** 字段所属表 ID（人员选择器用于加载候选人员） */
+  tableId: string;
 }
 
 const fullWidth: React.CSSProperties = { width: '100%' };
 
 /**
+ * 附件上传器：表单内持有 File[]，提交时由 valueConverter 统一调 batchUploadFile 上传
+ * 并包裹为 { name,size,type,token,timeStamp } 写入（避免渲染期异步上传导致的状态错乱）。
+ * 列表展示已选文件，支持逐个移除。
+ */
+function AttachmentUploader({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: File[];
+  onChange: (v: File[]) => void;
+  disabled?: boolean;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const files: File[] = Array.isArray(value) ? value : [];
+
+  const pick = () => inputRef.current?.click();
+  const onPick = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const picked = Array.from(e.target.files || []);
+    if (picked.length) onChange([...files, ...picked]);
+    e.target.value = ''; // 允许再次选择同一文件
+  };
+  const removeAt = (i: number) => onChange(files.filter((_, idx) => idx !== i));
+
+  return (
+    <div>
+      <input ref={inputRef} type="file" multiple style={{ display: 'none' }} onChange={onPick} />
+      <Space wrap style={{ marginBottom: 8 }}>
+        {files.map((f, i) => (
+          <Tag
+            key={`${f.name}-${i}`}
+            type="light"
+            closable={!disabled}
+            onClose={() => removeAt(i)}
+          >
+            {f.name}（{Math.max(1, Math.round(f.size / 1024))} KB）
+          </Tag>
+        ))}
+        {files.length === 0 && <Typography.Text type="tertiary">尚未上传附件</Typography.Text>}
+      </Space>
+      <Button icon={<IconUpload />} disabled={disabled} onClick={pick}>
+        选择文件
+      </Button>
+    </div>
+  );
+}
+
+/**
  * 单字段渲染器：根据字段类型分发到对应的 Semi UI 组件。
  * 关联字段（SingleLink/DuplexLink）由提交逻辑自动维护，前端仅作只读提示。
- * 注：Semi 各组件的 onChange 签名不完全一致，这里统一用 any 接收后转交外层 onChange。
  */
-export function FieldRenderer({ field, value, onChange, disabled }: Props) {
+export function FieldRenderer({ field, value, onChange, disabled, tableId }: Props) {
   const options = (field.options ?? []).map((o) => ({ value: o.name, label: o.name }));
-  const attachmentQueue = useRef(Promise.resolve());
-  const latestAttachmentValue = useRef<string[]>(Array.isArray(value) ? (value as string[]) : []);
-
-  useEffect(() => {
-    if (Array.isArray(value)) latestAttachmentValue.current = value as string[];
-  }, [value]);
-
-  const uploadAttachment = (file: File) => {
-    const task = attachmentQueue.current.then(async () => {
-      const tokens = await getBase().batchUploadFile([file]);
-      const next = [...latestAttachmentValue.current, ...tokens];
-      latestAttachmentValue.current = next;
-      onChange(next);
-    });
-    attachmentQueue.current = task.then(
-      () => undefined,
-      () => undefined
-    );
-    void task.catch(() => toast('附件上传失败', 'error'));
-  };
 
   switch (field.fieldType) {
     case FieldType.Text:
@@ -96,8 +128,10 @@ export function FieldRenderer({ field, value, onChange, disabled }: Props) {
           style={fullWidth}
           optionList={options}
           value={(value as string) || undefined}
-          placeholder={field.placeholder ?? '请选择'}
+          placeholder={field.placeholder ?? '请选择（输入可搜索）'}
           disabled={disabled}
+          filter={fuzzyOptionFilter}
+          emptyContent="无匹配选项"
           onChange={(v: any) => onChange(v)}
         />
       );
@@ -109,8 +143,10 @@ export function FieldRenderer({ field, value, onChange, disabled }: Props) {
           multiple
           optionList={options}
           value={(value as string[]) ?? []}
-          placeholder={field.placeholder ?? '请选择'}
+          placeholder={field.placeholder ?? '请选择（输入可搜索）'}
           disabled={disabled}
+          filter={fuzzyOptionFilter}
+          emptyContent="无匹配选项"
           onChange={(v: any) => onChange(v)}
         />
       );
@@ -131,23 +167,19 @@ export function FieldRenderer({ field, value, onChange, disabled }: Props) {
 
     case FieldType.Rating:
       return (
-        <Rating
-          value={(value as number) ?? 0}
-          disabled={disabled}
-          onChange={(v: any) => onChange(v)}
-        />
+        <Rating value={(value as number) ?? 0} disabled={disabled} onChange={(v: any) => onChange(v)} />
       );
 
     case FieldType.User:
-    case FieldType.GroupChat:
-    case FieldType.Location:
-      // P2-12：这些字段的写入结构不是简单文本（人员需 open_id、群聊需 chat_id、
-      // 地理位置需经纬度结构），按文本录入会写入失败。配置阶段已不可勾选，
-      // 这里仅对历史遗留配置给出明确提示，而不是渲染一个"看似能填"的输入框。
+      // 人员字段：以人员选择器形式录入（候选来自本字段历史人员 + 当前用户）
       return (
-        <Typography.Text type="warning">
-          「{field.fieldName}」类型暂不支持录入，请在多维表格中直接填写，或在配置中隐藏该字段
-        </Typography.Text>
+        <PersonSelector
+          tableId={tableId}
+          fieldId={field.fieldId}
+          value={(value as BitableUser[]) || []}
+          onChange={onChange}
+          disabled={disabled}
+        />
       );
 
     case FieldType.Phone:
@@ -166,20 +198,10 @@ export function FieldRenderer({ field, value, onChange, disabled }: Props) {
 
     case FieldType.Attachment:
       return (
-        <Upload
-          action=""
-          multiple
+        <AttachmentUploader
+          value={(value as File[]) || []}
+          onChange={onChange}
           disabled={disabled}
-          beforeUpload={(obj: any) => {
-            // Semi 传入的是 { file: FileItem }，真实 File 位于 file.fileInstance。
-            const file = obj?.file?.fileInstance as File | undefined;
-            if (!file) {
-              toast('无法读取待上传附件', 'error');
-              return false;
-            }
-            uploadAttachment(file);
-            return false; // 阻止默认上传行为，使用 batchUploadFile
-          }}
         />
       );
 
@@ -188,6 +210,15 @@ export function FieldRenderer({ field, value, onChange, disabled }: Props) {
       // 关联字段由提交逻辑自动写入（指向主表记录），无需用户填写
       return (
         <Typography.Text type="tertiary">系统自动关联（提交时与主表关联）</Typography.Text>
+      );
+
+    case FieldType.GroupChat:
+    case FieldType.Location:
+      // 群聊/地理位置的写入结构非简单文本（chat_id / 经纬度结构），按文本录入会写脏数据
+      return (
+        <Typography.Text type="warning">
+          「{field.fieldName}」类型暂不支持录入，请在多维表格中直接填写，或在配置中隐藏该字段
+        </Typography.Text>
       );
 
     default:

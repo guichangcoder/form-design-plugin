@@ -11,3 +11,6 @@ deploy/
 *_delete.txt
 *.timestamp-*.mjs
 .npm-cache/
+
+# 回归测试本地输出
+tests/out.txt

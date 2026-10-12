@@ -40,6 +40,7 @@ export function MainForm({ config, values, onChange, cond, errors }: Props) {
               </label>
               <FieldRenderer
                 field={f}
+                tableId={tableId}
                 value={values[f.fieldId]}
                 onChange={(v) => setField(f.fieldId, v)}
                 disabled={f.readonly}
