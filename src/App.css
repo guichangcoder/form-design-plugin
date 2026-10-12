@@ -291,14 +291,32 @@ button {
 }
 
 /* ---------- 字段配置列表（配置模式） ---------- */
+/* 窄配置面板（应用模式右侧 340px）下采用两行布局：
+   第一行放字段标识（把手/图标/名称/类型），第二行放标签输入与显示/必填开关，
+   保证所有控件在 316px 内容区内完整可见、可配置。 */
 .cfg-field-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+  display: block;
   padding: 8px 4px;
   border-bottom: 1px solid #f1f5f9;
   transition: background 0.15s;
   cursor: default;
+}
+
+.cfg-field-row .cfg-field-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.cfg-field-row .cfg-field-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  /* 与第一行字段名起始位置对齐（把手 24px + 图标 18px + 2×gap 8px） */
+  padding-left: 58px;
+  min-width: 0;
 }
 
 .cfg-field-row:hover {
@@ -356,8 +374,16 @@ button {
   opacity: 1;
 }
 
+.cfg-field-row .f-type-icon {
+  flex: 0 0 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
 .cfg-field-row .f-name {
-  flex: 0 0 128px;
+  flex: 1 1 auto;
+  min-width: 0;
   font-size: 13px;
   font-weight: 500;
   color: #374151;
@@ -367,17 +393,22 @@ button {
 }
 
 .cfg-field-row .f-type {
-  flex: 0 0 66px;
+  flex: 0 0 auto;
+  max-width: 72px;
   font-size: 11px;
   color: #64748b;
   background: #f1f5f9;
   border-radius: 4px;
   padding: 2px 6px;
   text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .cfg-field-row .f-label-input {
-  flex: 1;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .cfg-field-row .f-toggle {
@@ -387,6 +418,7 @@ button {
   gap: 4px;
   font-size: 12px;
   color: #64748b;
+  white-space: nowrap;
 }
 
 /* ---------- 规则编辑器 ---------- */
@@ -839,4 +871,70 @@ button {
   font-weight: 500;
   color: var(--ink);
   margin-bottom: 6px;
+}
+
+/* ---------- 应用模式配置态：左实时预览 + 右 340px 配置区（官方 P1-4） ---------- */
+.plugin-content--app-config {
+  max-width: none;
+  margin: 0;
+  padding: 0;
+  height: calc(100vh - 56px);
+}
+
+.app-config-layout {
+  display: flex;
+  height: 100%;
+  min-height: 480px;
+}
+
+.app-config-preview {
+  flex: 1;
+  overflow: auto;
+  padding: 28px 32px;
+  background: #f2f3f5;
+}
+
+.app-config-preview .fill-form {
+  max-width: 640px;
+  margin: 0 auto;
+  background: #fff;
+  border-radius: 12px;
+  padding: 24px;
+  box-shadow: 0 2px 8px rgba(16, 24, 40, 0.06);
+}
+
+.app-config-preview-empty {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: #4e5969;
+  font-size: 14px;
+  border: 1px dashed #c9cdd4;
+  border-radius: 12px;
+  margin: 12px;
+}
+
+.app-config-panel {
+  width: 340px;
+  flex-shrink: 0;
+  overflow: auto;
+  border-left: 1px solid var(--line, #e5e6eb);
+  padding: 12px;
+  background: var(--card, #fff);
+}
+
+/* ---------- 字段级校验错误（提交后红字提示待填写字段） ---------- */
+.field-row--error .semi-input-wrapper,
+.field-row--error .semi-select,
+.field-row--error .semi-datepicker {
+  border-color: #f5222d !important;
+}
+
+.field-err {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #f5222d;
 }

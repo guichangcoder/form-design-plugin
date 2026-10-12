@@ -1,14 +1,23 @@
 import { FieldType } from '@lark-base-open/js-sdk';
-import { READONLY_FIELD_TYPES } from '../types';
+import { READONLY_FIELD_TYPES, UNSUPPORTED_FIELD_TYPES } from '../types';
 
 /** 判断字段类型是否为系统只读（不可录入） */
 export function isReadonlyField(type: FieldType): boolean {
   return READONLY_FIELD_TYPES.includes(type);
 }
 
+/**
+ * 判断字段类型是否暂不支持录入（飞书官方诊断 P2-12）。
+ * 人员/群聊/地理位置的写入结构不是简单文本，按文本录入会失败或写脏数据，
+ * 配置阶段直接排除，不让用户填到提交阶段才报错。
+ */
+export function isUnsupportedField(type: FieldType): boolean {
+  return UNSUPPORTED_FIELD_TYPES.includes(type);
+}
+
 /** 判断字段类型是否可录入（用于配置阶段过滤字段列表） */
 export function isInputtableField(type: FieldType): boolean {
-  return !isReadonlyField(type);
+  return !isReadonlyField(type) && !isUnsupportedField(type);
 }
 
 /**

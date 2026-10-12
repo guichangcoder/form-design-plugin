@@ -130,6 +130,10 @@ export function serializeConfig(data: PluginData): any {
       })),
     })),
     defaultFormId: data.defaultFormId,
+    // ★ 应用模式数据源标记：baseToken 必须随配置持久化（View 态据此用
+    //   Workspace.getBitable 重新绑定到同一个多维表格）
+    ...(data.baseToken ? { baseToken: data.baseToken } : {}),
+    ...(data.baseId ? { baseId: data.baseId } : {}),
   };
 }
 
@@ -182,6 +186,8 @@ export async function hydrateConfig(thin: PluginData): Promise<PluginData & { __
       defaultFormId: thin.defaultFormId,
       // ★ 保留 base 归属标记（loadConfig 的跨 base 校验依赖它；组件侧无感知）
       ...(thin.baseId ? { baseId: thin.baseId } : {}),
+      // ★ 保留应用模式数据源标记（保存/重放依赖）
+      ...(thin.baseToken ? { baseToken: thin.baseToken } : {}),
     };
     // 健康度检查：所有表单的主表字段是否能从 base 拿到任何字段（type/name）
     const anyMatched = hydrated.some(

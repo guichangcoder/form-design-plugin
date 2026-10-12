@@ -8,13 +8,23 @@ import { IconPlus } from '@douyinfe/semi-icons';
 import { FieldConfigList } from './FieldConfigList';
 import { SubTableConfig } from './SubTableConfig';
 import { RuleEditor } from './RuleEditor';
+import { BasePicker } from './BasePicker';
 import { toast } from '../../utils/toast';
 import { DEFAULT_THEME, PRESET_COLORS, applyThemeColor } from '../../utils/theme';
+import { isWorkspaceAvailable } from '../../services/appContext';
 
 interface Props {
   initialConfig: FormPluginConfig | null;
   onSave: (config: FormPluginConfig) => void;
   onCancel: () => void;
+  /** 应用模式：显示数据源（多维表格）选择器 */
+  appMode?: boolean;
+  /** 当前已选 baseToken（配置回填用） */
+  baseToken?: string;
+  /** 数据源切换回调：父级需要记录 baseToken 并清空旧草稿 */
+  onBaseChange?: (baseToken: string, baseName: string) => void;
+  /** 草稿实时变化回调：应用模式「左预览」用它渲染实时表单预览 */
+  onDraftChange?: (draft: FormPluginConfig) => void;
 }
 
 function defaultConfig(): FormPluginConfig {
@@ -41,17 +51,26 @@ function SectionHead({ num, title, desc }: { num: string; title: string; desc?: 
   );
 }
 
-export function ConfigPanel({ initialConfig, onSave, onCancel }: Props) {
+export function ConfigPanel({ initialConfig, onSave, onCancel, appMode, baseToken, onBaseChange, onDraftChange }: Props) {
   const { tables } = useTableMeta();
   const [draft, setDraft] = useState<FormPluginConfig>(() =>
     initialConfig && initialConfig.mainTable ? initialConfig : defaultConfig()
   );
   const { fields: mainFields } = useFieldMeta(draft.mainTable.tableId || undefined);
 
+  // 应用模式必须显式选择数据源后才能继续配置（P0-1：不混用默认 base）
+  const needBase = !!appMode && isWorkspaceAvailable();
+  const baseReady = !needBase || !!baseToken;
+
   // 主题色实时预览：draft 变化即应用到页面
   useEffect(() => {
     applyThemeColor(draft.themeColor);
   }, [draft.themeColor]);
+
+  // 草稿实时外抛（左预览布局用）
+  useEffect(() => {
+    onDraftChange?.(draft);
+  }, [draft, onDraftChange]);
 
   // 主表选择后，自动用其字段初始化表单配置
   useEffect(() => {
@@ -85,6 +104,10 @@ export function ConfigPanel({ initialConfig, onSave, onCancel }: Props) {
   };
 
   const save = async () => {
+    if (needBase && !baseToken) {
+      toast('请先选择数据源多维表格', 'warning');
+      return;
+    }
     if (!draft.mainTable.tableId) {
       toast('请先选择主表', 'warning');
       return;
@@ -132,6 +155,37 @@ export function ConfigPanel({ initialConfig, onSave, onCancel }: Props) {
 
   return (
     <div>
+      {/* 00 数据源（应用模式必选，官方 P0-1：Workspace 绑定） */}
+      {needBase && (
+        <div className="section-card">
+          <SectionHead num="00" title="数据源" desc="必填 · 选择本表单要写入的多维表格" />
+          <div className="sec-body">
+            <BasePicker
+              value={baseToken}
+              onChange={(token, name) => onBaseChange?.(token, name)}
+            />
+            {!baseToken && (
+              <Typography.Text type="warning" style={{ display: 'block', marginTop: 8, fontSize: 12 }}>
+                请先选择数据源多维表格，再配置主表/子表
+              </Typography.Text>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* 未选数据源时，后续配置区锁定（防止把默认 base 的表配进来）。
+          fieldset disabled 只能禁原生控件，Semi 组件需配合 pointerEvents 拦截 */}
+      <fieldset
+        disabled={!baseReady}
+        style={{
+          border: 'none',
+          padding: 0,
+          margin: 0,
+          minWidth: 0,
+          opacity: baseReady ? 1 : 0.55,
+          pointerEvents: baseReady ? 'auto' : 'none',
+        }}
+      >
       {/* 01 基本信息 */}
       <div className="section-card">
         <SectionHead num="01" title="基本信息" desc="表单标题与说明" />
@@ -221,6 +275,8 @@ export function ConfigPanel({ initialConfig, onSave, onCancel }: Props) {
             value={draft.mainTable.tableId || undefined}
             onChange={updateMainTable}
             optionList={tables.map((t) => ({ value: t.id, label: t.name }))}
+            filter
+            searchPlaceholder="搜索数据表"
           />
           <div style={{ marginTop: 12 }}>
             <FieldConfigList
@@ -300,6 +356,7 @@ export function ConfigPanel({ initialConfig, onSave, onCancel }: Props) {
       <Typography.Text type="tertiary" style={{ display: 'block', textAlign: 'center', marginTop: 10, fontSize: 12 }}>
         保存后进入填写模式；可随时回到配置模式调整
       </Typography.Text>
+      </fieldset>
     </div>
   );
 }

@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { Button } from '@douyinfe/semi-ui';
 import { IconPlus } from '@douyinfe/semi-icons';
-import { bitable, dashboard, DashboardState } from '@lark-base-open/js-sdk';
+import { dashboard, DashboardState } from '@lark-base-open/js-sdk';
 import { useForms } from './hooks/useForms';
 import { ConfigPanel } from './components/ConfigPanel';
 import { FormRenderer } from './components/FormRenderer';
@@ -21,6 +21,8 @@ import {
   HostContext,
   repairDashboardConfigFromLastSave,
 } from './services/configService';
+import { getBase, getBaseToken, isWorkspaceAvailable } from './services/appContext';
+import { getFieldMetaList } from './services/baseService';
 import { probeHost, probeOneLine } from './services/probe';
 import { exportDiagnosticBundle } from './services/diagExport';
 
@@ -136,6 +138,15 @@ export default function App() {
   // dev 模式下宿主配置可能未被稳定持久化；View 态只尝试重放一次
   const repairAttempted = useRef(false);
   const [repairDiag, setRepairDiag] = useState<string>('');
+  // 应用模式数据源（P0-1）：当前选中的多维表格 baseToken
+  const [baseToken, setBaseToken] = useState<string>(() => getBaseToken());
+  // 配置态「左预览」的实时草稿（ConfigPanel.onDraftChange 喂入）
+  const [previewDraft, setPreviewDraft] = useState<FormPluginConfig | null>(null);
+  // P1-5：监听到底表结构变化后置位，暂停提交直到用户重新载入
+  const [metaStale, setMetaStale] = useState(false);
+  // data 的最新引用（onDataChange 回调里要用，避免闭包过期）
+  const dataRef = useRef<PluginData | null>(null);
+  dataRef.current = data;
   // dashboard View 态可能在首次 load 后再走一次配置重放；期间保持 loading 屏，
   // 避免把“尚未读取完成”误报成“配置数据发生变更”。
   const [repairing, setRepairing] = useState(context === 'dashboard');
@@ -246,6 +257,76 @@ export default function App() {
     setInner('list');
   }, [loading, context, data]);
 
+  // 配置加载完成后同步 baseToken（loadConfig 已通过 Workspace 绑定对应 base）
+  useEffect(() => {
+    if (data?.baseToken) setBaseToken(data.baseToken);
+  }, [data?.baseToken]);
+
+  // P1-5：展示态监听底表数据/结构变化。字段被删除、选项变更或权限变化时
+  // 暂停提交并提示重新载入 —— 不静默清空用户正在填写的数据，也不自动整表重载。
+  useEffect(() => {
+    if (context !== 'dashboard' || inConfig) return;
+    let off: (() => void) | undefined;
+    let checking = false;
+    try {
+      const b = getBase() as any;
+      if (b && typeof b.onDataChange === 'function') {
+        off = b.onDataChange(async () => {
+          if (checking) return;
+          checking = true;
+          try {
+            const d = dataRef.current;
+            if (!d || d.forms.length === 0) return;
+            // 轻量校验：配置引用的字段是否都还存在（拿不到 meta 视为失效）
+            for (const form of d.forms) {
+              const tableIds = [
+                form.mainTable.tableId,
+                ...form.subTables.map((s) => s.tableId),
+              ].filter(Boolean);
+              for (const tid of tableIds) {
+                const metas = await getFieldMetaList(tid);
+                const ids = new Set(metas.map((m) => m.id));
+                const configuredIds =
+                  tid === form.mainTable.tableId
+                    ? form.mainTable.fields.map((f) => f.fieldId)
+                    : (form.subTables.find((s) => s.tableId === tid)?.fields ?? []).map(
+                        (f) => f.fieldId
+                      );
+                if (configuredIds.some((fid) => !ids.has(fid))) {
+                  console.warn('[App] 检测到表结构变化（字段缺失），暂停提交:', tid);
+                  setMetaStale(true);
+                  return;
+                }
+              }
+            }
+          } catch (e) {
+            // 表被删除或无权限读取时 getFieldMetaList 抛错 → 视为元数据失效
+            console.warn('[App] 元数据校验失败，暂停提交:', e);
+            setMetaStale(true);
+          } finally {
+            checking = false;
+          }
+        });
+      }
+    } catch {
+      /* 接口不可用则忽略 */
+    }
+    return () => {
+      try {
+        off && off();
+      } catch {
+        /* ignore */
+      }
+    };
+  }, [context, inConfig, baseToken]);
+
+  /** 元数据失效后用户点「重新载入」：重新 hydrate 配置并恢复提交 */
+  const handleReloadMeta = async () => {
+    await load();
+    setMetaStale(false);
+    toast('已重新载入最新表结构', 'success');
+  };
+
   // View 态自动修复（dev 模式）：F5 刷新后宿主 widget 配置可能丢失，导致弹
   // 「配置数据发生变更，请重新配置」。这里用最近一次成功保存的 payload 原样重放写回宿主，
   // 最多 2 轮（每轮内部再试 3 次），兜底宿主写入时序抖动。
@@ -291,7 +372,12 @@ export default function App() {
       ? base.forms.map((f) => (f.id === form.id ? form : f))
       : [...base.forms, form];
     const defaultFormId = base.defaultFormId ?? forms2[0]?.id;
-    const next: PluginData = { forms: forms2, defaultFormId };
+    // ★ 应用模式：baseToken 随配置持久化（P0-1）。View 态据此用 Workspace 重新绑定。
+    const next: PluginData = {
+      forms: forms2,
+      defaultFormId,
+      baseToken: baseToken || data?.baseToken || undefined,
+    };
     try {
       const r = await save(next);
       repairAttempted.current = false;
@@ -379,6 +465,12 @@ export default function App() {
       toast(`保存失败：${(e as Error)?.message ?? String(e)}`, 'error');
       throw e;
     }
+  };
+
+  /** 应用模式：切换数据源多维表格（P0-1）。ConfigPanel 以 baseToken 为 key 自动重挂载清空旧草稿 */
+  const handleBaseChange = (token: string, _name: string) => {
+    setBaseToken(token);
+    setPreviewDraft(null);
   };
 
   const handleEditForm = (form: FormPluginConfig | null) => {
@@ -647,15 +739,41 @@ export default function App() {
       </div>
         ) : null}
       {/* ----- 开始：被 ErrorBoundary 包裹的所有内容 ----- */}
-      <div className="plugin-content">
+      <div className={showDashConfig ? 'plugin-content plugin-content--app-config' : 'plugin-content'}>
         {showDashConfig && (
-          <ConfigPanel
-            initialConfig={dashConfigInitial}
-            onSave={handleSaveForm}
-            onCancel={() => {
-              /* dashboard 配置态取消由宿主处理，插件侧无需操作 */
-            }}
-          />
+          // ★ 应用模式配置态布局（官方 P1-4）：左侧实时表单预览 + 右侧 340px 配置区。
+          // 预览随草稿实时渲染（含主题色与条件联动），提交按钮在预览中禁用。
+          <div className="app-config-layout">
+            <div className="app-config-preview">
+              {previewDraft && previewDraft.mainTable.tableId ? (
+                <FormRenderer config={previewDraft} preview />
+              ) : (
+                <div className="app-config-preview-empty">
+                  <div style={{ fontSize: 32, marginBottom: 8 }}>👀</div>
+                  <div>实时预览区</div>
+                  <div style={{ fontSize: 12, color: '#86909c', marginTop: 6 }}>
+                    {isWorkspaceAvailable() && !baseToken
+                      ? '先在右侧「00 数据源」选择多维表格，再选主表后这里会实时显示表单效果'
+                      : '在右侧选择主表后，这里会实时显示表单效果'}
+                  </div>
+                </div>
+              )}
+            </div>
+            <div className="app-config-panel">
+              <ConfigPanel
+                key={baseToken || 'no-base'}
+                initialConfig={dashConfigInitial}
+                appMode
+                baseToken={baseToken}
+                onBaseChange={handleBaseChange}
+                onDraftChange={setPreviewDraft}
+                onSave={handleSaveForm}
+                onCancel={() => {
+                  /* dashboard 配置态取消由宿主处理，插件侧无需操作 */
+                }}
+              />
+            </div>
+          </div>
         )}
 
         {showManager && (
@@ -688,11 +806,21 @@ export default function App() {
         )}
 
         {showDirect && directForm && (
-          <FormRenderer config={directForm} onBackToConfig={handleBack} />
+          <FormRenderer
+            config={directForm}
+            onBackToConfig={handleBack}
+            metaStale={metaStale}
+            onReloadMeta={handleReloadMeta}
+          />
         )}
 
         {showFill && activeForm && (
-          <FormRenderer config={activeForm} onBackToConfig={handleBack} />
+          <FormRenderer
+            config={activeForm}
+            onBackToConfig={handleBack}
+            metaStale={metaStale}
+            onReloadMeta={handleReloadMeta}
+          />
         )}
 
         {/* View 态空数据诊断：开发态展示完整排查信息；发布态只给一条干净指引 */}

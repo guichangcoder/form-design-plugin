@@ -12,7 +12,8 @@
  *  5. 当前 document.referrer + parent 同源探测 —— 确认是在飞书 iframe 里
  */
 
-import { bitable, dashboard } from '@lark-base-open/js-sdk';
+import { dashboard } from '@lark-base-open/js-sdk';
+import { getBase } from './appContext';
 
 type ProbeResult = {
   url: string;
@@ -78,7 +79,7 @@ export async function probeHost(): Promise<ProbeResult> {
   // base.getTableList —— genDefaultConfig 用的就是这个数据
   const tblRes = { ok: false, count: null as number | null, firstId: null as string | null, err: null as string | null };
   try {
-    const list: any = await (bitable as any).base.getTableList();
+    const list: any = await (getBase() as any).getTableList();
     const arr = Array.isArray(list) ? list : [];
     tblRes.ok = true;
     tblRes.count = arr.length;

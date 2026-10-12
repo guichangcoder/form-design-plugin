@@ -1,7 +1,7 @@
 import React from 'react';
 import { FieldType } from '@lark-base-open/js-sdk';
-import { SubTableConfig, FormValues, ConditionalState } from '../../types';
-import { isFieldRequired } from '../../utils/validator';
+import { SubTableConfig, FormValues, ConditionalState, FieldError } from '../../types';
+import { isFieldRequired, isHiddenField } from '../../utils/validator';
 import { toast } from '../../utils/toast';
 import { FieldRenderer } from './FieldRenderer';
 import { Button } from '@douyinfe/semi-ui';
@@ -12,9 +12,11 @@ interface Props {
   rows: FormValues[];
   onChange: (rows: FormValues[]) => void;
   cond: ConditionalState;
+  /** 提交校验后的字段级错误（按行 + 字段下方红字提示） */
+  errors?: FieldError[];
 }
 
-export function SubForm({ sub, rows, onChange, cond }: Props) {
+export function SubForm({ sub, rows, onChange, cond, errors }: Props) {
   const updateRow = (idx: number, fieldId: string, v: unknown) =>
     onChange(rows.map((r, i) => (i === idx ? { ...r, [fieldId]: v } : r)));
 
@@ -36,12 +38,13 @@ export function SubForm({ sub, rows, onChange, cond }: Props) {
 
   const removeRow = (idx: number) => onChange(rows.filter((_, i) => i !== idx));
 
-  // 关联字段（含指向主表的关联字段）由提交逻辑自动维护，录入表单不显示
-  const visible = (f: SubTableConfig['fields'][number]) =>
+  // 关联字段（含指向主表的关联字段）由提交逻辑自动维护，录入表单不显示。
+  // 条件隐藏按「全表级 + 当前行级」判断（P2-9：子表规则逐行生效）。
+  const visibleInRow = (f: SubTableConfig['fields'][number], rowIndex: number) =>
     f.visible &&
     f.fieldType !== FieldType.SingleLink &&
     f.fieldType !== FieldType.DuplexLink &&
-    !cond.hiddenFields[sub.tableId]?.has(f.fieldId);
+    !isHiddenField(cond, sub.tableId, f.fieldId, rowIndex);
 
   return (
     <div>
@@ -62,22 +65,28 @@ export function SubForm({ sub, rows, onChange, cond }: Props) {
               </Button>
             )}
           </div>
-          {sub.fields.filter(visible).map((f) => (
-            <div key={f.fieldId} className="field-row">
-              <label className="field-label">
-                {isFieldRequired(f, sub.tableId, cond) && (
-                  <span className="required-star">*</span>
-                )}
-                {f.label || f.fieldName}
-              </label>
-              <FieldRenderer
-                field={f}
-                value={row[f.fieldId]}
-                onChange={(v) => updateRow(idx, f.fieldId, v)}
-                disabled={f.readonly}
-              />
-            </div>
-          ))}
+          {sub.fields.filter((f) => visibleInRow(f, idx)).map((f) => {
+            const err = errors?.find(
+              (e) => e.tableId === sub.tableId && e.fieldId === f.fieldId && e.rowIndex === idx
+            );
+            return (
+              <div key={f.fieldId} className={`field-row ${err ? 'field-row--error' : ''}`}>
+                <label className="field-label">
+                  {isFieldRequired(f, sub.tableId, cond, idx) && (
+                    <span className="required-star">*</span>
+                  )}
+                  {f.label || f.fieldName}
+                </label>
+                <FieldRenderer
+                  field={f}
+                  value={row[f.fieldId]}
+                  onChange={(v) => updateRow(idx, f.fieldId, v)}
+                  disabled={f.readonly}
+                />
+                {err && <div className="field-err">{err.message}</div>}
+              </div>
+            );
+          })}
         </div>
       ))}
       {sub.allowMultiple && (

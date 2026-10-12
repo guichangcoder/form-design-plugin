@@ -1,10 +1,18 @@
-import { bitable, dashboard, DashboardState } from '@lark-base-open/js-sdk';
+import { dashboard, DashboardState } from '@lark-base-open/js-sdk';
 import { CONFIG_STORAGE_KEY, FormPluginConfig, PluginData } from '../types';
 import {
   serializeConfig,
   hydrateConfig,
   estimateConfigBytes,
 } from './configSize';
+import {
+  getBase,
+  getBridge,
+  getDashboard,
+  getBaseToken,
+  isWorkspaceAvailable,
+  selectBase,
+} from './appContext';
 
 /** dev 模式下宿主 widget 配置可能在 F5 后丢失；用飞书 base 做一份持久化备份，
  *  刷新后即使宿主读不到配置，也能从 base 捞回并重新写回宿主。base 不受页面刷新影响。 */
@@ -183,7 +191,7 @@ export function getBaseId(): Promise<string> {
   if (!baseIdCache) {
     baseIdCache = (async () => {
       try {
-        const b = bitable.base as any;
+        const b = getBase() as any;
         if (b && typeof b.getBaseId === 'function') {
           return String((await b.getBaseId()) ?? '');
         }
@@ -194,6 +202,11 @@ export function getBaseId(): Promise<string> {
     })();
   }
   return baseIdCache;
+}
+
+/** base 切换后 baseId 缓存必须失效（否则会沿用上一个 base 的标记） */
+export function resetBaseIdCache(): void {
+  baseIdCache = null;
 }
 
 /** 是否本地开发环境（localhost）。所有「备份恢复 / 配置重放」只允许在 dev 生效。 */
@@ -225,6 +238,24 @@ export interface SaveResult {
 }
 
 /**
+ * 配置里带 baseToken 时，先通过 Workspace 绑定到对应的多维表格实例（P0-1）。
+ * 之后所有 base/bridge/dashboard 读写都走该实例，与配置声明的数据源严格一致。
+ * 旧配置无 baseToken 时跳过（回退全局默认 base，保持向后兼容）。
+ */
+async function ensureBaseBound(parsed: PluginData | null): Promise<void> {
+  const token = parsed?.baseToken;
+  if (!token || !isWorkspaceAvailable()) return;
+  if (getBaseToken() === token) return;
+  const ok = await selectBase(token);
+  if (ok) {
+    resetBaseIdCache();
+    console.log('[config] 已通过 Workspace 绑定配置所属 base');
+  } else {
+    console.warn('[config] Workspace.getBitable 失败，回退全局默认 base');
+  }
+}
+
+/**
  * 读取插件数据（多表单）。
  * 优先级：dashboard（若在仪表盘页面宿主）→ bridge → localStorage。
  * 兼容旧版单份配置自动升级。
@@ -236,7 +267,7 @@ export async function loadConfig(): Promise<PluginData | null> {
   let source: 'dashboard' | 'bridge' | 'local' | null = null;
   if (getHostContext() === 'dashboard') {
     try {
-      const cfg = await (dashboard as any).getConfig();
+      const cfg = await (getDashboard() as any).getConfig();
       const data = cfg && cfg.customConfig;
       const parsed = asData(data);
       if (parsed) {
@@ -247,6 +278,8 @@ export async function loadConfig(): Promise<PluginData | null> {
           console.warn('[config] getConfig 返回的是其他多维表格的配置（baseId 不匹配），已丢弃');
           return null;
         }
+        // ★ 应用模式：先绑定配置所属的 base，再做字段 hydrate（P0-1）
+        await ensureBaseBound(parsed);
         source = 'dashboard';
         const result = await hydrateConfig(parsed);
         console.log(`[config] loadConfig 完成（${source}），耗时 ${Math.round(performance.now() - startedAt)}ms`);
@@ -272,7 +305,7 @@ export async function loadConfig(): Promise<PluginData | null> {
   }
 
   try {
-    let data: unknown = await bitable.bridge.getData(CONFIG_STORAGE_KEY);
+    let data: unknown = await getBridge().getData(CONFIG_STORAGE_KEY);
     if (typeof data === 'string') {
       try {
         data = JSON.parse(data);
@@ -285,6 +318,7 @@ export async function loadConfig(): Promise<PluginData | null> {
       if (await isForeignConfig(parsed)) {
         console.warn('[config] bridge 存的是其他多维表格的配置（baseId 不匹配），已忽略');
       } else {
+        await ensureBaseBound(parsed);
         source = 'bridge';
         const result = await hydrateConfig(parsed);
         console.log(`[config] loadConfig 完成（${source}），耗时 ${Math.round(performance.now() - startedAt)}ms`);
@@ -304,6 +338,7 @@ export async function loadConfig(): Promise<PluginData | null> {
           if (await isForeignConfig(parsed)) {
             console.warn('[config] localStorage 存的是其他多维表格的配置（baseId 不匹配），已忽略');
           } else {
+            await ensureBaseBound(parsed);
             source = 'local';
             const result = await hydrateConfig(parsed);
             console.log(`[config] loadConfig 完成（${source}），耗时 ${Math.round(performance.now() - startedAt)}ms`);
@@ -320,16 +355,22 @@ export async function loadConfig(): Promise<PluginData | null> {
 
 /**
  * 保存插件数据（多表单）。
- * - 仪表盘页面宿主：dashboard.saveConfig({ customConfig })（页面实例级）。
+ * - 仪表盘/应用模式宿主：dashboard.saveConfig({ dataConditions, customConfig })。
  *   这是通知飞书宿主「配置已保存」的唯一方式 —— 宿主收到后会：① 关闭配置弹窗
- *   ② 将插件以 View 状态插入仪表盘画布。saveConfig 必须 resolve，弹窗才会关闭；
+ *   ② 将插件以 View 状态插入画布。saveConfig 必须 resolve，弹窗才会关闭；
  *   若抛错则弹窗不关闭，因此真实宿主下必须向上抛出错误，绝不能静默回退到 bridge/localStorage。
  * - 否则（侧边栏扩展 / dev 本地）：优先 bridge，失败回退 localStorage。
  *
- * dataConditions 是应用插件实例声明的数据源列表。表单会直接引用主表和各子表，
- * 因此必须把配置中实际引用的所有表都声明出来；customConfig 中也必须保留这些表 ID。
- * 只声明主表会让宿主在 View 态发现子表引用不在数据源列表中，随后显示
- * 「配置数据发生变更，请重新配置」。
+ * dataConditions 契约（App 插件 SDK 指南 修订222，飞书官方诊断 P0-1）：
+ *   ① 当前版本仅支持一组条件 → 只声明主表一条；
+ *   ② 非空时必须带 baseToken（配置所属多维表格）。
+ *   子表的数据读写不依赖 dataConditions 声明，而是通过
+ *   Workspace.getBitable(baseToken) 拿到的 base 实例直接访问
+ *   （应用已获得该 base 的读写授权）；主表/子表跨 Base 不允许，保存前强校验。
+ *
+ * 保存策略（诊断 P2-13）：单次保存 + 有界重试（仅当 saveConfig 显式返回 false
+ * 或抛可重试错误时，最多 3 次尝试、间隔 500ms）。不再做「800ms 后补存 /
+ * 状态切换后补存」这类无条件重复提交外部状态变更的历史补丁。
  */
 export async function saveConfig(data: PluginData): Promise<SaveResult> {
   // 估算"完整"形态字节数，用于诊断条展示压缩效果
@@ -349,54 +390,65 @@ export async function saveConfig(data: PluginData): Promise<SaveResult> {
     } catch {
       /* 拿不到 baseId 则不写标记（读取侧对无标记配置放行兼容） */
     }
+    // ★ baseToken（应用模式契约必填）：优先用配置面板选择并存入 data 的，
+    //   其次用 appContext 当前已绑定的。
+    const baseToken = data.baseToken || getBaseToken() || undefined;
+    if (baseToken) thinBase.baseToken = baseToken;
     const thin = thinBase;
     const thinBytes = estimateConfigBytes(thin) || -1;
     try {
-      // ★ dataConditions = 「主表 + 所有子表」完整声明集。
-      //   宿主 View 态校验：customConfig 引用的每张表都必须在 dataConditions 里，
-      //   缺哪张就报「配置数据发生变更，请重新配置」（2026-10-06 实测：
-      //   只声明主表 + 剥离子表 tableId 仍失败 → 校验的是声明集，不是字符串扫描）。
-      //   历史踩坑记录（留档，均已实测）：
-      //   - 传 0 个（SDK 兜底取 base 第一张表）→ 与用户主表不一致 → 配置变更报错
-      //   - 只传 1 个主表 → 纯主表表单可用，但带子表必失败
-      //   - 早年「传 N 个 → create widget failed」的结论疑似被当时的 10KB 超限
-      //     问题污染（两种错在宿主侧同报 create widget failed），体积受控后需重测。
-      //   每个条目用 SDK genDefaultConfig() 同款结构：{tableId, dataRange:{type:'ALL'}}，
-      //   宿主保存时会自动补全 groups/series。
       const firstForm = data?.forms?.find((f) => f?.mainTable?.tableId);
       const mainTableId = firstForm?.mainTable?.tableId;
-      const subTableIds = (firstForm?.subTables ?? [])
-        .map((s) => s?.tableId)
-        .filter((id): id is string => !!id);
-      const allTableIds = Array.from(
-        new Set([mainTableId, ...subTableIds].filter((id): id is string => !!id))
-      );
-      // ★ dataConditions 格式：每项 tableId + dataRange + groups + series
-      //   宿主 dataConditions 是类图表数据配置格式，缺 groups/series 会被过滤。
-      const buildDataConditions = (tableIds: string[]) => tableIds.map((tableId) => ({
-        tableId,
-        dataRange: { type: 'ALL' },
-        groups: [],
-        series: 'COUNTA',
-      }));
-      const fullDataConditions = buildDataConditions(allTableIds);
 
-      // 先探测当前宿主状态（Create / Config）
+      // ★ 跨 Base 强校验：主表与所有子表都必须存在于当前绑定的 base 内。
+      //   配置 UI 的表列表本来就来自绑定 base 的实例，这里是保存前的最后防线。
+      if (baseToken && mainTableId) {
+        const subIds = (firstForm?.subTables ?? [])
+          .map((s) => s?.tableId)
+          .filter((id): id is string => !!id);
+        try {
+          const metas = await getBase().getTableMetaList();
+          const inBase = new Set(metas.map((t) => t.id));
+          const outsiders = [mainTableId, ...subIds].filter((id) => !inBase.has(id));
+          if (outsiders.length > 0) {
+            throw new Error(
+              `以下数据表不属于已选择的多维表格（${outsiders.join('、')}），请重新选择数据源后配置`
+            );
+          }
+        } catch (ve) {
+          if (ve instanceof Error && ve.message.includes('不属于已选择的多维表格')) throw ve;
+          console.warn('[config] 表归属校验时 base 不可达，跳过校验:', ve);
+        }
+      }
+
+      // ★ dataConditions：仅一组条件（官方当前版本限制），声明主表 + baseToken。
+      const dataConditions = mainTableId
+        ? [
+            {
+              tableId: mainTableId,
+              ...(baseToken ? { baseToken } : {}),
+              dataRange: { type: 'ALL' },
+              groups: [],
+              series: 'COUNTA',
+            },
+          ]
+        : [];
+
       let saveState = 'unknown';
       try {
-        saveState = String((dashboard as any).state ?? 'unknown');
-      } catch { /* ignore */ }
-      console.log('[config] 保存前 dashboard.state =', saveState, '，声明表数 =', allTableIds.length);
+        saveState = String((getDashboard() as any).state ?? 'unknown');
+      } catch {
+        /* ignore */
+      }
+      console.log(
+        '[config] 保存 dashboard.state =', saveState,
+        '｜ baseToken =', baseToken ? `...${baseToken.slice(-6)}` : '(无)',
+        '｜ thin字节数:', thinBytes, '（完整形态原本:', fullBytes, 'B）'
+      );
 
       const fullPayload: Record<string, unknown> = {
         customConfig: thin,
-        dataConditions: fullDataConditions,
-      };
-      const payloadLog = {
-        customConfigLength: JSON.stringify(thin).length,
-        dataConditions: fullDataConditions,
-        declaredTables: allTableIds,
-        saveState,
+        dataConditions,
       };
       // 把本次保存 payload 写到 localStorage：配置态若保存成功但 View 态失败，
       // 用户刷新回配置态后仍能看到上一次保存的真实参数，便于排查。
@@ -407,14 +459,15 @@ export async function saveConfig(data: PluginData): Promise<SaveResult> {
           JSON.stringify({
             schemaVersion: 1,
             time: new Date().toISOString(),
-            // 保留完整 thin payload；dev 模式宿主丢配置时可在 View 态重放
-            payload: payloadLog,
+            payload: {
+              customConfigLength: JSON.stringify(thin).length,
+              dataConditions,
+            },
             customConfig: thin,
             fullBytes,
             thinBytes,
-            // ★ 关键：保存时把主表 ID 和表单 ID 一起存，View 态自动修复时要用
             mainTableId,
-            formId: data?.forms?.find((f) => f?.mainTable?.tableId)?.id ?? null,
+            formId: firstForm?.id ?? null,
             // ★ base 隔离：localStorage 按插件域名存储、跨所有多维表格共享，
             //   重放前必须校验 baseId，防止把别的 base 的配置重放到当前 base。
             baseId: payloadBaseId || undefined,
@@ -423,120 +476,34 @@ export async function saveConfig(data: PluginData): Promise<SaveResult> {
       } catch {
         /* ignore */
       }
-      console.log(
-        '[config] 调用 dashboard.saveConfig，thin字节数:',
-        thinBytes,
-        '（完整形态原本:',
-        fullBytes,
-        'B）payload:',
-        JSON.stringify(payloadLog)
-      );
 
-      // ★ 两阶段保存策略（解决 Create 态多表 dataConditions 丢失问题）
-      //
-      // 背景：飞书仪表盘页面插件在 Create 态首次 saveConfig 创建 widget 时，
-      // dataConditions 的多表声明可能不被完整接受，导致 View 态校验失败
-      // （customConfig 引用的表不在 dataConditions 中 → 「配置数据发生变更」）。
-      // 而 Config 态下保存，dataConditions 能被完整接受。
-      //
-      // 策略：
-      // 1. Create 态 + 多表：先存主表创建 widget → 等状态切 Config → 再存全表
-      // 2. Config 态 + 多表：直接存全表（Config 态能正确接受多表）
-      // 3. 单表：直接存（无此问题）
-      //
-      // 验证：getConfig 不可靠（永远只返回主数据源），改用 dashboard.state 判断
-      // 阶段切换是否完成。最终用一次 getConfig 做记录（不做成败判断）。
-      let reSaved = 0;
-      let phaseInfo = '';
-      let finalState = saveState;
-
-      const hasMultipleTables = allTableIds.length > 1;
-
-      // ★ 保存策略（2024-10-09 调整：基于用户反馈"再存一次就好"）
-      //
-      // 背景：飞书仪表盘页面插件 Create 态首次保存时，多表 dataConditions 可能
-      // 不被完整接受，导致 View 态显示「配置数据发生变更」。第二次在 Config 态
-      // 保存就能正常显示。
-      //
-      // 策略：
-      // 1. 先探测 dashboard.state 的实际值（做诊断用）
-      // 2. 直接保存完整配置（不再分两阶段，避免主表-only配置的中间状态）
-      // 3. 多表情况下，连续补存 2 次，每次间隔 800ms，模拟"再存一次就好"的效果
-      // 4. 等待宿主状态稳定（从 Create 切走）后再补存一次做最终保险
-      phaseInfo = hasMultipleTables ? '多次补存策略' : '单阶段(单表)';
-
-      // 先探测初始 state
-      let stateBefore = 'unknown';
-      try {
-        stateBefore = String((dashboard as any).state ?? 'unknown');
-      } catch { /* ignore */ }
-      saveState = stateBefore;
-      console.log('[config] 保存前 dashboard.state =', stateBefore, '，声明表数 =', allTableIds.length);
-
-      // —— 第一次保存（完整配置）——
-      console.log('[config] 第1次保存（完整配置）…');
-      const firstSuccess = await (dashboard as any).saveConfig(fullPayload);
-      console.log('[config] 第1次 saveConfig 返回:', firstSuccess);
-      if (firstSuccess === false) {
-        throw new Error('首次保存失败：dashboard.saveConfig 返回 false');
-      }
-
-      // —— 多表情况下连续补存 ——
-      if (hasMultipleTables) {
-        // 第 1 次补存（模拟"再存一次就好"）
-        await new Promise((r) => setTimeout(r, 800));
+      // —— 单次保存 + 有界重试（最多 3 次，仅显式失败时重试）——
+      const MAX_ATTEMPTS = 3;
+      let saved = false;
+      let attempts = 0;
+      let lastErr = '';
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+        attempts = attempt;
         try {
-          const s2 = await (dashboard as any).saveConfig(fullPayload);
-          reSaved += 1;
-          console.log('[config] 第2次 saveConfig 返回:', s2);
-        } catch (e2) {
-          console.warn('[config] 第2次 saveConfig 失败:', e2);
-        }
-
-        // 等状态从 Create 切走后，再补存第 3 次（Config 态下的补存）
-        let waited = 0;
-        let curState = stateBefore;
-        const maxWait = 4000;
-        const pollInterval = 200;
-        while (waited < maxWait) {
-          await new Promise((r) => setTimeout(r, pollInterval));
-          waited += pollInterval;
-          try {
-            curState = String((dashboard as any).state ?? 'unknown');
-          } catch { /* ignore */ }
-          if (!/create/i.test(curState)) break;
-        }
-        finalState = curState;
-        console.log(`[config] 状态等待 ${waited}ms 后 state = ${curState}`);
-
-        // 状态切走了（到 Config 或 View），再补存一次
-        if (!/create/i.test(curState)) {
-          await new Promise((r) => setTimeout(r, 300));
-          try {
-            const s3 = await (dashboard as any).saveConfig(fullPayload);
-            reSaved += 1;
-            console.log('[config] 第3次 saveConfig（状态切走后）返回:', s3);
-            phaseInfo = '状态切换后补存成功';
-          } catch (e3) {
-            console.warn('[config] 第3次 saveConfig（状态切走后）失败:', e3);
-            phaseInfo = '状态切换后补存失败';
+          const r = await (getDashboard() as any).saveConfig(fullPayload);
+          console.log(`[config] 第${attempt}次 saveConfig 返回:`, r);
+          if (r === false) {
+            lastErr = 'dashboard.saveConfig 返回 false';
+          } else {
+            saved = true;
+            break;
           }
-        } else {
-          console.warn('[config] 等待超时，状态仍为 Create');
-          phaseInfo = '状态未切换(超时)';
+        } catch (e) {
+          lastErr = String((e as Error)?.message ?? e);
+          console.warn(`[config] 第${attempt}次 saveConfig 异常:`, e);
         }
-      } else {
-        // 单表：保存后也读一下 state
-        await new Promise((r) => setTimeout(r, 300));
-        try {
-          finalState = String((dashboard as any).state ?? 'unknown');
-        } catch { /* ignore */ }
+        if (attempt < MAX_ATTEMPTS) {
+          await new Promise((r) => setTimeout(r, 500));
+        }
       }
-
-      // 更新 finalState
-      try {
-        finalState = String((dashboard as any).state ?? finalState);
-      } catch { /* ignore */ }
+      if (!saved) {
+        throw new Error(`保存失败（已尝试 ${MAX_ATTEMPTS} 次）：${lastErr || '未知错误'}`);
+      }
 
       // ★ base 持久化备份：dev 模式下宿主 widget 配置不保证跨 F5 持久化，
       //   把 thin + dataConditions 备份到飞书 base（setData 按 base 维度持久化，
@@ -544,13 +511,14 @@ export async function saveConfig(data: PluginData): Promise<SaveResult> {
       //   备份同样带 baseId —— bridge 数据按 base 隔离，但多打一层标记双保险。
       try {
         const backupBaseId = await getBaseId();
-        await bitable.bridge.setData(
+        await getBridge().setData(
           BACKUP_KEY,
           JSON.stringify({
             time: new Date().toISOString(),
             baseId: backupBaseId || undefined,
+            baseToken: baseToken || undefined,
             customConfig: thin,
-            dataConditions: fullDataConditions,
+            dataConditions,
           })
         );
         console.log('[config] base 备份写入成功');
@@ -559,15 +527,13 @@ export async function saveConfig(data: PluginData): Promise<SaveResult> {
       }
 
       // ★ 最终读回 getConfig（仅做诊断记录，不做成败判断）
-      // getConfig 可能只返回主数据源，不能真实反映多表是否保存成功。
-      // 这里只把结果存下来供诊断条展示，判断是否成功用 dashboard.state 切换。
       let finalReadback: { ok: boolean; ccLen: number; dataConditions: unknown; err?: string } = {
         ok: false,
         ccLen: 0,
         dataConditions: null,
       };
       try {
-        const cfg: any = await (dashboard as any).getConfig();
+        const cfg: any = await (getDashboard() as any).getConfig();
         const cc = cfg?.customConfig;
         const dc: any[] = cfg?.dataConditions ?? [];
         finalReadback = {
@@ -581,17 +547,23 @@ export async function saveConfig(data: PluginData): Promise<SaveResult> {
         finalReadback = { ok: false, ccLen: 0, dataConditions: null, err: msg };
         console.log('[config] 最终读回 getConfig 失败:', msg);
       }
+      let finalState = saveState;
+      try {
+        finalState = String((getDashboard() as any).state ?? saveState);
+      } catch {
+        /* ignore */
+      }
       try {
         localStorage.setItem(
           '__plugin_last_save_readback__',
           JSON.stringify({
             time: new Date().toISOString(),
             readback: finalReadback,
-            reSaved,
-            phaseInfo,
+            reSaved: attempts - 1,
+            phaseInfo: attempts > 1 ? `重试${attempts - 1}次后成功` : '单次保存成功',
             saveState,
             finalState,
-            expectedTables: allTableIds.length,
+            expectedTables: dataConditions.length,
           })
         );
       } catch {
@@ -600,8 +572,7 @@ export async function saveConfig(data: PluginData): Promise<SaveResult> {
 
       const parts: string[] = [];
       if (thinBytes >= 0) parts.push(`序列化后 ${thinBytes} B`);
-      if (phaseInfo) parts.push(phaseInfo);
-      if (reSaved > 0) parts.push(`补存${reSaved}次`);
+      if (attempts > 1) parts.push(`重试${attempts - 1}次后成功`);
       parts.push(`state:${saveState}→${finalState}`);
       return { storage: 'dashboard', warning: parts.join(' · ') };
     } catch (e) {
@@ -632,7 +603,7 @@ export async function saveConfig(data: PluginData): Promise<SaveResult> {
     } catch {
       /* ignore */
     }
-    await bitable.bridge.setData(CONFIG_STORAGE_KEY, JSON.stringify(thinBridge));
+    await getBridge().setData(CONFIG_STORAGE_KEY, JSON.stringify(thinBridge));
     return { storage: 'bridge' };
   } catch (e) {
     console.warn('[config] bridge.setData 失败，回退到本地存储:', e);
@@ -687,7 +658,7 @@ export async function repairDashboardConfigFromLastSave(
   let lastErr = '';
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
-      const success = await (dashboard as any).saveConfig({ dataConditions, customConfig });
+      const success = await (getDashboard() as any).saveConfig({ dataConditions, customConfig });
       if (success !== false) {
         return { repaired: true, reason: `replayed-attempt-${attempt}`, detail: { dataConditions } };
       }
@@ -723,7 +694,7 @@ async function loadSavedPayload(): Promise<any> {
     /* ignore */
   }
   try {
-    const b = await bitable.bridge.getData(BACKUP_KEY);
+    const b = await getBridge().getData(BACKUP_KEY);
     if (b) {
       const obj = typeof b === 'string' ? JSON.parse(b) : b;
       if (obj?.customConfig && !foreign(obj)) {
@@ -743,7 +714,7 @@ async function loadSavedPayload(): Promise<any> {
 async function tryRestoreFromBaseBackup(): Promise<PluginData | null> {
   if (!isLocalDevHost()) return null;
   try {
-    const b = await bitable.bridge.getData(BACKUP_KEY);
+    const b = await getBridge().getData(BACKUP_KEY);
     if (!b) return null;
     const obj = typeof b === 'string' ? JSON.parse(b) : b;
     if (!obj?.customConfig) return null;
@@ -761,7 +732,7 @@ async function tryRestoreFromBaseBackup(): Promise<PluginData | null> {
     if (!reparsed) return null;
     // 写回宿主，触发宿主重新校验（这次配置是从上次成功保存完整保留的）
     try {
-      await (dashboard as any).saveConfig({
+      await (getDashboard() as any).saveConfig({
         dataConditions: obj.dataConditions,
         customConfig: obj.customConfig,
       });
@@ -779,13 +750,13 @@ export async function clearConfig(): Promise<void> {
   if (isDashboardHost()) {
     try {
       // 同样只传 customConfig，dataConditions 交给 SDK 兜底
-      await (dashboard as any).saveConfig({ dataConditions: [], customConfig: { forms: [] } });
+      await (getDashboard() as any).saveConfig({ dataConditions: [], customConfig: { forms: [] } });
     } catch {
       /* ignore */
     }
   }
   try {
-    await bitable.bridge.setData(CONFIG_STORAGE_KEY, null);
+    await getBridge().setData(CONFIG_STORAGE_KEY, null);
   } catch {
     /* ignore */
   }

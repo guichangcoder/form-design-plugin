@@ -63,6 +63,11 @@ export function RuleEditor({ config, rules, onChange }: Props) {
     onChange(rules.map((r, i) => (i === idx ? { ...r, ...patch } : r)));
   };
 
+  // P2-9：触发字段在子表时，规则逐行生效，只能作用于同一张子表
+  // （否则「第 2 行命中却控制主表字段」会造成语义混乱）。
+  const isSubTrigger = (tableId: string) =>
+    !!tableId && tableId !== config.mainTable.tableId && config.subTables.some((s) => s.tableId === tableId);
+
   return (
     <div>
       {rules.length === 0 && (
@@ -74,6 +79,11 @@ export function RuleEditor({ config, rules, onChange }: Props) {
       {rules.map((rule, idx) => {
         const action = rule.actions[0] ?? { type: 'hide', tableId: '', fieldIds: [] };
         const needValue = rule.trigger.operator !== 'isEmpty' && rule.trigger.operator !== 'isNotEmpty';
+        const subTrigger = isSubTrigger(rule.trigger.tableId);
+        // 子表触发时目标表锁定为同一张子表
+        const actionTableOptions = subTrigger
+          ? getTableOptions(config).filter((o) => o.value === rule.trigger.tableId)
+          : getTableOptions(config);
         return (
           <div key={rule.ruleId} className="rule-box">
             <div className="rule-row">
@@ -82,10 +92,20 @@ export function RuleEditor({ config, rules, onChange }: Props) {
                 style={{ width: 150 }}
                 placeholder="表"
                 value={rule.trigger.tableId || undefined}
-                onChange={(v: any) =>
-                  updateRule(idx, { trigger: { ...rule.trigger, tableId: v, fieldId: '' } })
-                }
+                onChange={(v: any) => {
+                  const patch: ConditionalRule['trigger'] = { ...rule.trigger, tableId: v, fieldId: '' };
+                  // 子表触发：目标表同步锁定为该子表
+                  if (isSubTrigger(v)) {
+                    updateRule(idx, {
+                      trigger: patch,
+                      actions: [{ ...action, tableId: v, fieldIds: [] }],
+                    });
+                  } else {
+                    updateRule(idx, { trigger: patch });
+                  }
+                }}
                 optionList={getTableOptions(config)}
+                filter
               />
               <Select
                 style={{ width: 150 }}
@@ -94,6 +114,7 @@ export function RuleEditor({ config, rules, onChange }: Props) {
                 value={rule.trigger.fieldId || undefined}
                 onChange={(v: any) => updateRule(idx, { trigger: { ...rule.trigger, fieldId: v } })}
                 optionList={getFieldOptions(config, rule.trigger.tableId)}
+                filter
               />
               <Select
                 style={{ width: 120 }}
@@ -128,7 +149,8 @@ export function RuleEditor({ config, rules, onChange }: Props) {
                 placeholder="目标表"
                 value={action.tableId || undefined}
                 onChange={(v: any) => updateRule(idx, { actions: [{ ...action, tableId: v, fieldIds: [] }] })}
-                optionList={getTableOptions(config)}
+                optionList={actionTableOptions}
+                filter
               />
               <Select
                 style={{ minWidth: 180 }}
@@ -138,6 +160,7 @@ export function RuleEditor({ config, rules, onChange }: Props) {
                 value={action.fieldIds}
                 onChange={(v: any) => updateRule(idx, { actions: [{ ...action, fieldIds: v }] })}
                 optionList={getFieldOptions(config, action.tableId)}
+                filter
               />
               <Button
                 type="danger"
@@ -155,6 +178,9 @@ export function RuleEditor({ config, rules, onChange }: Props) {
       <Button theme="borderless" icon={<IconPlus />} onClick={() => onChange([...rules, newRule()])}>
         添加规则
       </Button>
+      <Typography.Text type="tertiary" style={{ display: 'block', marginTop: 8, fontSize: 12 }}>
+        主表字段触发的规则对整单生效；子表字段触发的规则逐行生效，且只能作用于同一张子表
+      </Typography.Text>
     </div>
   );
 }

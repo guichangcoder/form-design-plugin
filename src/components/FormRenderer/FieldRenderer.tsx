@@ -1,7 +1,7 @@
 import React, { useEffect, useRef } from 'react';
 import { FieldType } from '@lark-base-open/js-sdk';
 import { FieldConfig } from '../../types';
-import { bitable } from '@lark-base-open/js-sdk';
+import { getBase } from '../../services/appContext';
 import { toast } from '../../utils/toast';
 import {
   Input,
@@ -40,7 +40,7 @@ export function FieldRenderer({ field, value, onChange, disabled }: Props) {
 
   const uploadAttachment = (file: File) => {
     const task = attachmentQueue.current.then(async () => {
-      const tokens = await bitable.base.batchUploadFile([file]);
+      const tokens = await getBase().batchUploadFile([file]);
       const next = [...latestAttachmentValue.current, ...tokens];
       latestAttachmentValue.current = next;
       onChange(next);
@@ -138,11 +138,21 @@ export function FieldRenderer({ field, value, onChange, disabled }: Props) {
         />
       );
 
+    case FieldType.User:
+    case FieldType.GroupChat:
+    case FieldType.Location:
+      // P2-12：这些字段的写入结构不是简单文本（人员需 open_id、群聊需 chat_id、
+      // 地理位置需经纬度结构），按文本录入会写入失败。配置阶段已不可勾选，
+      // 这里仅对历史遗留配置给出明确提示，而不是渲染一个"看似能填"的输入框。
+      return (
+        <Typography.Text type="warning">
+          「{field.fieldName}」类型暂不支持录入，请在多维表格中直接填写，或在配置中隐藏该字段
+        </Typography.Text>
+      );
+
     case FieldType.Phone:
     case FieldType.Url:
     case FieldType.Email:
-    case FieldType.Location:
-    case FieldType.GroupChat:
       return (
         <Input
           style={fullWidth}

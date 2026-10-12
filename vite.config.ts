@@ -23,9 +23,10 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist',
-    // 本开发环境的回收站 trash 机制损坏，emptyOutDir:true 清理旧产物时会失败；
-    // 改为 false（只写不删）可正常构建。用户真实部署环境可改回 true 自动清理。
-    emptyOutDir: false,
+    // 飞书官方诊断 P1-7：正式发布必须从空目录产出，emptyOutDir:false 会把
+    // 历史哈希资源持续留在 dist（包体膨胀、旧代码随包交付，扩大审计面）。
+    // Vite 用 fs.rm 清理（不走回收站），如有权限问题请先手动删除 dist 再构建。
+    emptyOutDir: true,
     sourcemap: false,
     target: 'es2019',
   },

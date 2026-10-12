@@ -12,6 +12,18 @@ export const READONLY_FIELD_TYPES: FieldType[] = [
   FieldType.Barcode,
 ];
 
+/**
+ * 暂不支持录入的字段类型（飞书官方诊断 P2-12）。
+ * 这些字段的写入结构不是简单文本（人员需要 open_id 结构、群聊需要 chat_id、
+ * 地理位置需要 {lat,lng,address} 结构），按文本录入会写入失败或写入脏数据。
+ * 配置阶段直接从可录入列表排除，不向用户暴露"看似能填其实写不进"的字段。
+ */
+export const UNSUPPORTED_FIELD_TYPES: FieldType[] = [
+  FieldType.User,
+  FieldType.GroupChat,
+  FieldType.Location,
+];
+
 /** 单个字段在表单中的配置 */
 export interface FieldConfig {
   fieldId: string;
@@ -95,18 +107,34 @@ export type FormValues = Record<string, unknown>;
 
 /** 条件引擎计算结果 */
 export interface ConditionalState {
-  /** tableId -> 需要隐藏的 fieldId 集合 */
+  /** tableId -> 需要隐藏的 fieldId 集合（全表级：主表字段，或主表触发规则作用到子表全部行） */
   hiddenFields: Record<string, Set<string>>;
-  /** tableId -> 需要强制必填的 fieldId 集合 */
+  /** tableId -> 需要强制必填的 fieldId 集合（全表级） */
   forcedRequired: Record<string, Set<string>>;
-  /** tableId -> 需要取消必填的 fieldId 集合 */
+  /** tableId -> 需要取消必填的 fieldId 集合（全表级） */
   forcedUnrequired: Record<string, Set<string>>;
+  /** 子表行级隐藏：subTableId -> 每行的 fieldId 集合（子表字段触发、作用于同一张子表） */
+  rowHiddenFields: Record<string, Array<Set<string>>>;
+  /** 子表行级强制必填 */
+  rowForcedRequired: Record<string, Array<Set<string>>>;
+  /** 子表行级取消必填 */
+  rowForcedUnrequired: Record<string, Array<Set<string>>>;
 }
 
 /** 校验结果 */
 export interface ValidationResult {
   valid: boolean;
   errors: string[];
+  /** 字段级错误（用于在对应字段下方红字提示 + 高亮待填写字段） */
+  fieldErrors: FieldError[];
+}
+
+/** 字段级校验错误：rowIndex 仅子表行存在 */
+export interface FieldError {
+  tableId: string;
+  fieldId: string;
+  rowIndex?: number;
+  message: string;
 }
 
 /**
@@ -120,6 +148,13 @@ export interface PluginData {
   forms: FormPluginConfig[];
   /** 使用态默认展示的表单 ID */
   defaultFormId?: string;
+  /**
+   * ★ 应用模式：配置所属多维表格的 baseToken（保存时写入）。
+   * 应用插件与多维表格是一对多关系，必须通过 Workspace.getBitable(baseToken)
+   * 拿到该 base 的 base/dashboard/ui/bridge 实例后再做数据读写；
+   * dataConditions 里也必须带同一个 baseToken（非空时必填，官方契约）。
+   */
+  baseToken?: string;
   /**
    * ★ 配置所属多维表格的 baseId（保存时写入）。
    * 读取时校验：与当前 base 不一致的配置一律丢弃 —— 防止同一插件部署在多个

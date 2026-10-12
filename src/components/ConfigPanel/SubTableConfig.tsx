@@ -70,6 +70,8 @@ export function SubTableConfig({ sub, index, tables, mainTableId, onChange, onRe
       <Select
         style={{ width: '100%' }}
         placeholder="选择子表"
+        filter
+        searchPlaceholder="搜索数据表"
         value={sub.tableId || undefined}
         onChange={(v: any) => {
           if (v === sub.tableId) return;
@@ -112,6 +114,8 @@ export function SubTableConfig({ sub, index, tables, mainTableId, onChange, onRe
             <Select
               style={{ flex: 1, minWidth: 160 }}
               placeholder="选择关联字段"
+              filter
+              searchPlaceholder="搜索关联字段"
               value={sub.linkFieldId || undefined}
               onChange={(v: any) =>
                 onChange({

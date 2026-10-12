@@ -1,6 +1,7 @@
-import { bitable, FieldType } from '@lark-base-open/js-sdk';
+import { FieldType } from '@lark-base-open/js-sdk';
 import { FieldConfig, FormValues } from '../types';
 import { isEmptyValue } from './validator';
+import { getBase } from '../services/appContext';
 
 /**
  * 将表单态的单个字段值，转换为多维表格 SDK 写入所需的 cell 值格式。
@@ -47,7 +48,7 @@ export async function convertToSdkFormat(
   values: FormValues,
   tableId: string
 ): Promise<Record<string, unknown>> {
-  const table = await bitable.base.getTableById(tableId);
+  const table = await getBase().getTableById(tableId);
   const result: Record<string, unknown> = {};
 
   for (const field of fields) {
