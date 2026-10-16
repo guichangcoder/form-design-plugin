@@ -236,8 +236,9 @@ async function paginate(
     pageToken?: any;
     total?: number;
   }>,
-  collect: (item: any) => void
-): Promise<{ scanned: number; truncated: boolean; total?: number }> {
+  collect: (item: any) => void,
+  opts?: { shouldAbort?: (total: number | undefined) => boolean }
+): Promise<{ scanned: number; truncated: boolean; total?: number; aborted?: boolean }> {
   let scanned = 0;
   let truncated = false;
   let total: number | undefined;
@@ -247,6 +248,11 @@ async function paginate(
   do {
     const res = await fetchPage(pageToken);
     if (typeof res.total === 'number') total = res.total;
+    // 拿到总数后发现超过阈值 → 立即停止，不再翻页（否则 2 万条要发上百次请求，
+    // 还会把用户的失焦校验请求堵在队列后面 —— 这正是「第一次校验等很久」的根因）
+    if (opts?.shouldAbort?.(total)) {
+      return { scanned, truncated: false, total, aborted: true };
+    }
     const items = res.items ?? [];
     if (items.length === 0) break;
     for (const it of items) {
@@ -291,12 +297,14 @@ export function loadAllExistingValues(
 
   const p = (async (): Promise<ExistingSet> => {
     const values = new Set<string>();
+    const shouldSkip = (total: number | undefined) =>
+      !!opts?.totalLimit && typeof total === 'number' && total > opts.totalLimit;
 
     const finish = (scanned: number, truncated: boolean, total?: number): ExistingSet => {
       // 表太大：不缓存空集合，标记为 skipped，改走服务端过滤
-      if (opts?.totalLimit && typeof total === 'number' && total > opts.totalLimit) {
+      if (shouldSkip(total)) {
         console.log(
-          `[uniqueCheck] 字段「${label ?? fieldId}」共 ${total} 条记录，超过预加载阈值 ${opts.totalLimit}，改用服务端过滤判定`
+          `[uniqueCheck] 字段「${label ?? fieldId}」共 ${total} 条记录，超过预加载阈值 ${opts?.totalLimit}，改用服务端过滤判定`
         );
         return { ok: true, values: new Set(), scanned: 0, truncated: false, skipped: true };
       }
@@ -330,7 +338,8 @@ export function loadAllExistingValues(
             (item) => {
               const n = normalizeForCompare(item?.value);
               if (n) values.add(n);
-            }
+            },
+            { shouldAbort: shouldSkip }
           );
           return finish(r.scanned, r.truncated, r.total);
         }
@@ -361,7 +370,8 @@ export function loadAllExistingValues(
         (rec) => {
           const n = normalizeForCompare(rec?.fields?.[fieldId]);
           if (n) values.add(n);
-        }
+        },
+        { shouldAbort: shouldSkip }
       );
       return finish(r.scanned, r.truncated, r.total);
     } catch (e) {

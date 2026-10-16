@@ -37,6 +37,8 @@ interface Props {
   uniqueStatus?: 'idle' | 'checking' | 'ok' | 'dup' | 'error';
   /** 状态附带说明（如「无法校验」的详细原因） */
   uniqueHint?: string;
+  /** 配置态实时预览：数据驱动控件（人员/关联/引用选项）不发起任何加载请求 */
+  preview?: boolean;
 }
 
 const fullWidth: React.CSSProperties = { width: '100%' };
@@ -135,8 +137,21 @@ export function FieldRenderer({
   onBlur,
   uniqueStatus,
   uniqueHint,
+  preview,
 }: Props) {
   const options = (field.options ?? []).map((o) => ({ value: o.name, label: o.name }));
+
+  // ★ 配置态实时预览：人员/关联/引用选项控件都要拉表数据，配置页一打开就并发一堆请求 → 卡顿。
+  //   预览只展示控件形态即可，数据加载留给真正的填写态。
+  if (
+    preview &&
+    (field.fieldType === FieldType.User ||
+      field.fieldType === FieldType.SingleLink ||
+      field.fieldType === FieldType.DuplexLink ||
+      hasOptionRef(field))
+  ) {
+    return <Input style={fullWidth} disabled placeholder="预览模式不加载数据" />;
+  }
 
   const control = ((): React.ReactNode => {
     switch (field.fieldType) {

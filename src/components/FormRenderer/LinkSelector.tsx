@@ -24,7 +24,7 @@ interface Candidate {
 
 /** 一次选择器最多加载的记录条数（分页拉取，防止超大表把面板拖垮） */
 const MAX_RECORDS = 2000;
-const PAGE_SIZE = 500;
+const PAGE_SIZE = 200; // SDK 单次上限就是 200，传更大值非法
 
 /**
  * 关联字段（单向/双向）选择器：

@@ -19,9 +19,11 @@ interface Props {
   uniqueState?: Record<string, UniqueFieldState>;
   /** 字段失焦回调（触发唯一性校验），需带行索引 */
   onFieldBlur?: (fieldId: string, rowIndex: number) => void;
+  /** 配置态实时预览：数据驱动控件不加载数据 */
+  preview?: boolean;
 }
 
-export function SubForm({ sub, rows, onChange, cond, errors, uniqueState, onFieldBlur }: Props) {
+export function SubForm({ sub, rows, onChange, cond, errors, uniqueState, onFieldBlur, preview }: Props) {
   const updateRow = (idx: number, fieldId: string, v: unknown) =>
     onChange(
       rows.map((r, i) => {
@@ -109,6 +111,7 @@ export function SubForm({ sub, rows, onChange, cond, errors, uniqueState, onFiel
                       : undefined
                   }
                   uniqueHint={uniqueState?.[`${idx}:${f.fieldId}`]?.detail}
+                  preview={preview}
                 />
                 {err && <div className="field-err">{err.message}</div>}
               </div>

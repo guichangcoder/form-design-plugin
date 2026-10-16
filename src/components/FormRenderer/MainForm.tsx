@@ -16,6 +16,8 @@ interface Props {
   uniqueState?: Record<string, UniqueFieldState>;
   /** 字段失焦回调（触发唯一性校验） */
   onFieldBlur?: (fieldId: string) => void;
+  /** 配置态实时预览：数据驱动控件不加载数据 */
+  preview?: boolean;
 }
 
 export function MainForm({
@@ -26,6 +28,7 @@ export function MainForm({
   errors,
   uniqueState,
   onFieldBlur,
+  preview,
 }: Props) {
   const setField = (fieldId: string, v: unknown) => {
     const next: FormValues = { ...values, [fieldId]: v };
@@ -69,6 +72,7 @@ export function MainForm({
                   f.unique?.enabled ? (uniqueState?.[f.fieldId]?.status ?? 'idle') : undefined
                 }
                 uniqueHint={uniqueState?.[f.fieldId]?.detail}
+                preview={preview}
               />
               {err && <div className="field-err">{err.message}</div>}
             </div>

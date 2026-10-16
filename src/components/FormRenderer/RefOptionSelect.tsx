@@ -20,7 +20,7 @@ interface Props {
 
 /** 源表记录加载上限（分页拉取，防止超大表拖垮面板） */
 const MAX_RECORDS = 2000;
-const PAGE_SIZE = 500;
+const PAGE_SIZE = 200; // SDK 单次上限就是 200，传更大值非法
 
 /**
  * 引用选项选择器（参考多维表格原生「引用选项」）：

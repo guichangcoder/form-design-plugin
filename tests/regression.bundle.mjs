@@ -30379,7 +30379,7 @@ async function filterFindDup(tableId, fieldId, n11, raw, fieldType) {
     return void 0;
   }
 }
-async function paginate(fetchPage, collect) {
+async function paginate(fetchPage, collect, opts) {
   let scanned = 0;
   let truncated = false;
   let total;
@@ -30388,6 +30388,9 @@ async function paginate(fetchPage, collect) {
   do {
     const res = await fetchPage(pageToken);
     if (typeof res.total === "number") total = res.total;
+    if (opts?.shouldAbort?.(total)) {
+      return { scanned, truncated: false, total, aborted: true };
+    }
     const items = res.items ?? [];
     if (items.length === 0) break;
     for (const it3 of items) {
@@ -30417,10 +30420,11 @@ function loadAllExistingValues(tableId, fieldId, label, opts) {
   }
   const p11 = (async () => {
     const values = /* @__PURE__ */ new Set();
+    const shouldSkip = (total) => !!opts?.totalLimit && typeof total === "number" && total > opts.totalLimit;
     const finish = (scanned, truncated, total) => {
-      if (opts?.totalLimit && typeof total === "number" && total > opts.totalLimit) {
+      if (shouldSkip(total)) {
         console.log(
-          `[uniqueCheck] \u5B57\u6BB5\u300C${label ?? fieldId}\u300D\u5171 ${total} \u6761\u8BB0\u5F55\uFF0C\u8D85\u8FC7\u9884\u52A0\u8F7D\u9608\u503C ${opts.totalLimit}\uFF0C\u6539\u7528\u670D\u52A1\u7AEF\u8FC7\u6EE4\u5224\u5B9A`
+          `[uniqueCheck] \u5B57\u6BB5\u300C${label ?? fieldId}\u300D\u5171 ${total} \u6761\u8BB0\u5F55\uFF0C\u8D85\u8FC7\u9884\u52A0\u8F7D\u9608\u503C ${opts?.totalLimit}\uFF0C\u6539\u7528\u670D\u52A1\u7AEF\u8FC7\u6EE4\u5224\u5B9A`
         );
         return { ok: true, values: /* @__PURE__ */ new Set(), scanned: 0, truncated: false, skipped: true };
       }
@@ -30451,7 +30455,8 @@ function loadAllExistingValues(tableId, fieldId, label, opts) {
             (item) => {
               const n11 = normalizeForCompare(item?.value);
               if (n11) values.add(n11);
-            }
+            },
+            { shouldAbort: shouldSkip }
           );
           return finish(r11.scanned, r11.truncated, r11.total);
         }
@@ -30478,7 +30483,8 @@ function loadAllExistingValues(tableId, fieldId, label, opts) {
         (rec) => {
           const n11 = normalizeForCompare(rec?.fields?.[fieldId]);
           if (n11) values.add(n11);
-        }
+        },
+        { shouldAbort: shouldSkip }
       );
       return finish(r10.scanned, r10.truncated, r10.total);
     } catch (e11) {
@@ -31238,6 +31244,7 @@ async function run() {
     readCalls = 0;
     const bigSet = await loadAllExistingValues(MAIN, "fldM1", "\u5408\u540C\u53F7", { totalLimit: 3 });
     check("F16 \u8D85\u5927\u8868\u8DF3\u8FC7\u5168\u91CF\u9884\u62C9\uFF08\u6807\u8BB0 skipped\uFF09", bigSet.ok && bigSet.skipped === true, bigSet);
+    check("F16 \u8D85\u5927\u8868\u63A2\u6D4B\u5230\u603B\u6570\u540E\u53EA\u53D1 1 \u6B21\u8BF7\u6C42\u5373\u4E2D\u6B62\uFF08\u4E0D\u518D\u9010\u9875\u626B\u5B8C\uFF09", readCalls === 1, readCalls);
     const cBig = await checkOneValue(MAIN, "fldM1", "\u8DE8\u9875\u503CC", void 0, j5.Text);
     check("F16 \u8D85\u5927\u8868\u5224\u91CD\u4F9D\u7136\u51C6\u786E\uFF08\u670D\u52A1\u7AEF\u8FC7\u6EE4\uFF09", cBig.status === "dup", cBig);
     invalidateExistingCache();

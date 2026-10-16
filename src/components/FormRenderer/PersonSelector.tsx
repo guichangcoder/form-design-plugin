@@ -48,14 +48,35 @@ export function PersonSelector({ value, onChange, disabled, tableId, fieldId }: 
         }
       };
 
-      // 1) 读取本字段历史人员（去重）
+      // 1) 读取本字段历史人员（去重）。
+      //    优先分页取前列数据（候选人员是去重后的，前 1000 行足够覆盖团队），
+      //    避免在几万行的大表上用 getFieldValueList 整列拉取导致打开表单卡顿。
       try {
         const table = await getBase().getTableById(tableId);
-        const field = await table.getField(fieldId);
-        const values = await field.getFieldValueList();
-        for (const item of values as Array<{ value?: unknown }>) {
-          const v = item?.value;
-          if (Array.isArray(v)) v.forEach((u) => push(u as BitableUser));
+        const field: any = await table.getField(fieldId);
+        const PAGE_SIZE = 200; // SDK 单次上限
+        const MAX_PAGES = 5; // 最多取前 1000 行
+        const collect = (items: Array<{ value?: unknown }>) => {
+          for (const item of items) {
+            const v = item?.value;
+            if (Array.isArray(v)) v.forEach((u) => push(u as BitableUser));
+          }
+        };
+        if (typeof field.getFieldValueListByPage === 'function') {
+          let pageToken: number | undefined;
+          let pages = 0;
+          do {
+            const res: any = await field.getFieldValueListByPage({
+              pageSize: PAGE_SIZE,
+              ...(pageToken !== undefined ? { pageToken } : {}),
+            });
+            collect((res?.fieldValues ?? []) as Array<{ value?: unknown }>);
+            pages += 1;
+            pageToken = res?.hasMore && pages < MAX_PAGES ? res?.pageToken : undefined;
+          } while (pageToken);
+        } else {
+          // 旧宿主无分页接口：回退整列取值
+          collect((await field.getFieldValueList()) as Array<{ value?: unknown }>);
         }
       } catch {
         /* 读取历史人员失败不影响选择器可用 */

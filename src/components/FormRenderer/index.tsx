@@ -122,7 +122,9 @@ export function FormRenderer({ config, onBackToConfig, preview, metaStale, onRel
 
   // ★ 后台静默预加载：小表直接把已有取值全量拉好并缓存（第一次失焦秒出）；
   //   大表（超过阈值）不预拉，避免上百次翻页卡页面 —— 判重改由服务端过滤完成，同样准确。
+  //   配置态预览不预加载（预览不填数据，加载纯属浪费且拖慢配置页）。
   useEffect(() => {
+    if (preview) return;
     uniqueFields.forEach((x) => {
       loadAllExistingValues(x.tableId, x.fieldId, x.label, {
         totalLimit: FULL_SCAN_TOTAL_LIMIT,
@@ -130,7 +132,7 @@ export function FormRenderer({ config, onBackToConfig, preview, metaStale, onRel
         /* 预加载失败不影响使用，失焦时会再次尝试并提示 */
       });
     });
-  }, [uniqueFields]);
+  }, [uniqueFields, preview]);
 
   /** 失焦校验单个字段（主表 / 子表共用） */
   const runUniqueCheck = (
@@ -491,6 +493,7 @@ export function FormRenderer({ config, onBackToConfig, preview, metaStale, onRel
             errors={submitErrors}
             uniqueState={mainUnique}
             onFieldBlur={handleMainBlur}
+            preview={preview}
           />
         </div>
       </div>
@@ -508,6 +511,7 @@ export function FormRenderer({ config, onBackToConfig, preview, metaStale, onRel
               errors={submitErrors}
               uniqueState={subUnique[sub.tableId]}
               onFieldBlur={handleSubBlur(sub.tableId)}
+              preview={preview}
             />
           </div>
         </div>

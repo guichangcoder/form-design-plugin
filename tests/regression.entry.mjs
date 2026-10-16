@@ -714,6 +714,7 @@ async function run() {
     readCalls = 0;
     const bigSet = await loadAllExistingValues(MAIN, 'fldM1', '合同号', { totalLimit: 3 });
     check('F16 超大表跳过全量预拉（标记 skipped）', bigSet.ok && bigSet.skipped === true, bigSet);
+    check('F16 超大表探测到总数后只发 1 次请求即中止（不再逐页扫完）', readCalls === 1, readCalls);
     const cBig = await checkOneValue(MAIN, 'fldM1', '跨页值C', undefined, FieldType.Text);
     check('F16 超大表判重依然准确（服务端过滤）', cBig.status === 'dup', cBig);
 
