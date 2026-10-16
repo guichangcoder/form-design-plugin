@@ -29555,6 +29555,14 @@ var UNSUPPORTED_FIELD_TYPES = [
   j5.GroupChat,
   j5.Location
 ];
+var UNIQUE_CHECKABLE_TYPES = [
+  j5.Text,
+  j5.Phone,
+  j5.Email,
+  j5.Url,
+  j5.Number,
+  j5.Currency
+];
 
 // src/utils/fieldMapper.ts
 function isReadonlyField(type) {
@@ -29860,8 +29868,13 @@ var KEEP_FIELDS = [
   // 用户决策
   "readonly",
   // 用户决策
-  "optionRef"
+  "optionRef",
   // 用户决策（选项引用：源表/源字段/条件，体积很小）
+  "unique",
+  // 用户决策（唯一性校验开关与提示文案）
+  "dateAutoFill"
+  // 用户决策（日期联动预填：来源字段/偏移，体积很小）
+  // ⚠️ 新增任何字段级配置都必须登记到这里，否则保存时被剥离 → 发布后该配置静默丢失
   // 注：未来若加 order/width 等用户决策字段，记得也加进来
 ];
 function trimField(f12) {
@@ -29887,7 +29900,9 @@ function untrimField(stub) {
     readonly: !!stub.readonly,
     options: stub.options,
     linkTableId: stub.linkTableId,
-    optionRef: stub.optionRef
+    optionRef: stub.optionRef,
+    unique: stub.unique,
+    dateAutoFill: stub.dateAutoFill
   };
 }
 function serializeConfig(data) {
@@ -30116,6 +30131,351 @@ function hasOptionRef(field) {
 function getOptionRefDependencies(field) {
   if (!hasOptionRef(field)) return [];
   return (field.optionRef.conditions ?? []).filter((c11) => c11.valueSource === "field" && c11.formFieldId).map((c11) => c11.formFieldId);
+}
+
+// src/utils/dateCalc.ts
+function daysInMonth(year, monthIndex) {
+  return new Date(year, monthIndex + 1, 0).getDate();
+}
+function addMonths(base, months) {
+  const day = base.getDate();
+  const y11 = base.getFullYear();
+  const m10 = base.getMonth() + months;
+  const target = new Date(y11, m10, 1);
+  const last = daysInMonth(target.getFullYear(), target.getMonth());
+  target.setDate(Math.min(day, last));
+  target.setHours(
+    base.getHours(),
+    base.getMinutes(),
+    base.getSeconds(),
+    base.getMilliseconds()
+  );
+  return target;
+}
+function applyDateOffset(base, cfg) {
+  if (!base) return null;
+  const t3 = base instanceof Date ? base.getTime() : new Date(base).getTime();
+  if (!Number.isFinite(t3)) return null;
+  if (!cfg || !cfg.sourceFieldId) return null;
+  const sign = cfg.direction === "minus" ? -1 : 1;
+  const amount = Number.isFinite(cfg.amount) ? Math.max(0, Math.floor(Number(cfg.amount))) : 0;
+  const n11 = sign * amount;
+  const d11 = new Date(t3);
+  switch (cfg.unit) {
+    case "day":
+      return new Date(d11.setDate(d11.getDate() + n11));
+    case "month":
+      return addMonths(d11, n11);
+    case "year":
+      return addMonths(d11, n11 * 12);
+    default:
+      return addMonths(d11, 0);
+  }
+}
+function toDateOrNull(v11) {
+  if (v11 instanceof Date) return Number.isFinite(v11.getTime()) ? v11 : null;
+  if (typeof v11 === "number") return Number.isFinite(v11) ? new Date(v11) : null;
+  if (typeof v11 === "string" && v11.trim()) {
+    const t3 = new Date(v11).getTime();
+    return Number.isFinite(t3) ? new Date(t3) : null;
+  }
+  return null;
+}
+function isSameInstant(a, b10) {
+  const ta4 = toTime(a);
+  const tb2 = toTime(b10);
+  if (ta4 === null || tb2 === null) return false;
+  return ta4 === tb2;
+}
+function toTime(v11) {
+  if (v11 instanceof Date) return Number.isFinite(v11.getTime()) ? v11.getTime() : null;
+  if (typeof v11 === "number") return Number.isFinite(v11) ? v11 : null;
+  if (typeof v11 === "string") {
+    const t3 = new Date(v11).getTime();
+    return Number.isFinite(t3) ? t3 : null;
+  }
+  return null;
+}
+function describeOffset(cfg) {
+  if (!cfg) return "";
+  const unitText = cfg.unit === "day" ? "\u5929" : cfg.unit === "month" ? "\u4E2A\u6708" : "\u5E74";
+  const sign = cfg.direction === "minus" ? "-" : "+";
+  return `${sign}${Math.max(0, Math.floor(Number(cfg.amount) || 0))} ${unitText}`;
+}
+
+// src/utils/dateAutoFill.ts
+function applyAutoFill(fields, values, manual, auto, keyOf) {
+  let next = null;
+  for (const f12 of fields) {
+    const cfg = f12.dateAutoFill;
+    if (!cfg?.sourceFieldId) continue;
+    const key = keyOf(f12.fieldId);
+    if (manual.has(key)) continue;
+    const expected = applyDateOffset(toDateOrNull(values[cfg.sourceFieldId]), cfg);
+    const cur = values[f12.fieldId];
+    if (!expected) {
+      if (!isEmptyValue2(cur) && auto.has(key)) {
+        next = next ?? { ...values };
+        next[f12.fieldId] = void 0;
+        auto.delete(key);
+      }
+      continue;
+    }
+    if (!isSameInstant(cur, expected)) {
+      next = next ?? { ...values };
+      next[f12.fieldId] = expected;
+      auto.add(key);
+    }
+  }
+  return next;
+}
+function markManualEdits(fields, before, after, manual, auto, keyOf) {
+  for (const f12 of fields) {
+    if (!f12.dateAutoFill?.sourceFieldId) continue;
+    const key = keyOf(f12.fieldId);
+    const b10 = before[f12.fieldId];
+    const a = after[f12.fieldId];
+    if (isEmptyValue2(a)) {
+      manual.delete(key);
+      auto.delete(key);
+      continue;
+    }
+    if (!isSameInstant(b10, a)) {
+      manual.add(key);
+      auto.delete(key);
+    }
+  }
+}
+
+// src/utils/permError.ts
+var PERM_PATTERN = /permission|forbidden|403|unauthor|denied|no\s*access|not\s*allowed|权限|无查看|不可见|越权/i;
+var MISSING_PATTERN = /not\s*found|not\s*exist|404|不存在|已删除|已移除|deleted|invalid\s*param|参数错误/i;
+function classifySdkError(e11, target) {
+  const raw = String(e11?.message ?? e11 ?? "");
+  const lower = raw.toLowerCase();
+  if (PERM_PATTERN.test(lower)) {
+    return {
+      kind: "permission",
+      title: `\u6CA1\u6709\u300C${target}\u300D\u7684\u67E5\u770B\u6743\u9650`,
+      action: "\u8BF7\u8054\u7CFB\u8BE5\u591A\u7EF4\u8868\u683C\u7684\u7BA1\u7406\u5458\u4E3A\u4F60\u5F00\u901A\u67E5\u770B\u6743\u9650\uFF0C\u6216\u8BA9\u914D\u7F6E\u8005\u6539\u7528\u4F60\u6709\u6743\u9650\u7684\u6570\u636E\u8868"
+    };
+  }
+  if (MISSING_PATTERN.test(lower)) {
+    return {
+      kind: "notfound",
+      title: `\u300C${target}\u300D\u4E0D\u5B58\u5728\u6216\u5DF2\u88AB\u5220\u9664`,
+      action: "\u8BF7\u8BA9\u914D\u7F6E\u8005\u91CD\u65B0\u914D\u7F6E\uFF08\u6570\u636E\u8868/\u5B57\u6BB5\u53EF\u80FD\u5DF2\u88AB\u91CD\u547D\u540D\u6216\u5220\u9664\uFF09"
+    };
+  }
+  return {
+    kind: "unknown",
+    title: `\u8BFB\u53D6\u300C${target}\u300D\u5931\u8D25`,
+    action: raw ? `\u9519\u8BEF\u4FE1\u606F\uFF1A${raw}` : "\u8BF7\u7A0D\u540E\u91CD\u8BD5\uFF1B\u82E5\u6301\u7EED\u5931\u8D25\uFF0C\u8BF7\u8054\u7CFB\u914D\u7F6E\u8005\u68C0\u67E5\u6570\u636E\u6E90\u914D\u7F6E"
+  };
+}
+
+// src/services/uniqueCheck.ts
+var PAGE_SIZE = 500;
+var MAX_RECORDS = 2e4;
+var cache = /* @__PURE__ */ new Map();
+var cacheKey = (tableId, fieldId) => `${tableId}::${fieldId}`;
+function invalidateExistingCache(tableId, fieldId) {
+  if (!tableId) {
+    cache.clear();
+    return;
+  }
+  if (fieldId) {
+    cache.delete(cacheKey(tableId, fieldId));
+    return;
+  }
+  for (const k12 of [...cache.keys()]) {
+    if (k12.startsWith(`${tableId}::`)) cache.delete(k12);
+  }
+}
+function noteSubmittedValues(tableId, fieldId, raws) {
+  const p11 = cache.get(cacheKey(tableId, fieldId));
+  if (!p11) return;
+  p11.then((s) => {
+    if (!s.ok) return;
+    for (const r10 of raws) {
+      const n11 = normalizeForCompare(r10);
+      if (n11) s.values.add(n11);
+    }
+  }).catch(() => {
+  });
+}
+function normalizeForCompare(v11) {
+  if (v11 === null || v11 === void 0) return "";
+  if (typeof v11 === "string") return v11.trim().toLowerCase();
+  if (typeof v11 === "number" || typeof v11 === "boolean") return String(v11).trim().toLowerCase();
+  if (Array.isArray(v11)) {
+    return v11.map((i3) => normalizeForCompare(i3)).filter(Boolean).join(" ").trim().toLowerCase();
+  }
+  if (typeof v11 === "object") {
+    const o11 = v11;
+    if (typeof o11.text === "string") return o11.text.trim().toLowerCase();
+    if (typeof o11.name === "string") return o11.name.trim().toLowerCase();
+    return "";
+  }
+  return String(v11).trim().toLowerCase();
+}
+function isUniqueChecked(field, cond, tableId, rowIndex) {
+  if (!field.unique?.enabled) return false;
+  if (!UNIQUE_CHECKABLE_TYPES.includes(field.fieldType)) return false;
+  if (isHiddenField(cond, tableId, field.fieldId, rowIndex)) return false;
+  return true;
+}
+function loadAllExistingValues(tableId, fieldId, label) {
+  const key = cacheKey(tableId, fieldId);
+  const hit = cache.get(key);
+  if (hit) return hit;
+  const p11 = (async () => {
+    try {
+      const table = await getBase().getTableById(tableId);
+      const values = /* @__PURE__ */ new Set();
+      let scanned = 0;
+      let truncated = false;
+      let pageToken;
+      do {
+        const res = await table.getRecords({
+          pageSize: PAGE_SIZE,
+          ...pageToken ? { pageToken } : {}
+        });
+        const records = res.records ?? [];
+        if (records.length === 0 && !res.hasMore) break;
+        for (const rec of records) {
+          scanned += 1;
+          const n11 = normalizeForCompare(
+            rec.fields?.[fieldId]
+          );
+          if (n11) values.add(n11);
+          if (scanned >= MAX_RECORDS) {
+            truncated = true;
+            break;
+          }
+        }
+        pageToken = res.hasMore && !truncated ? res.pageToken : void 0;
+      } while (pageToken);
+      if (truncated) {
+        console.warn(
+          `[uniqueCheck] \u5B57\u6BB5\u300C${label ?? fieldId}\u300D\u5DF2\u6709\u8BB0\u5F55\u8D85\u8FC7 ${MAX_RECORDS} \u6761\uFF0C\u53EA\u626B\u63CF\u524D ${MAX_RECORDS} \u6761\uFF0C\u552F\u4E00\u6027\u6821\u9A8C\u53EF\u80FD\u4E0D\u5B8C\u6574`
+        );
+      }
+      console.log(
+        `[uniqueCheck] \u5168\u91CF\u626B\u63CF\u5B8C\u6210\uFF1A\u5B57\u6BB5\u300C${label ?? fieldId}\u300D\u5171 ${scanned} \u6761\u8BB0\u5F55\uFF0C${values.size} \u4E2A\u4E0D\u540C\u53D6\u503C${truncated ? "\uFF08\u5DF2\u622A\u65AD\uFF09" : ""}`
+      );
+      return { ok: true, values, scanned, truncated };
+    } catch (e11) {
+      const c11 = classifySdkError(e11, label || "\u8BE5\u5B57\u6BB5\u7684\u5DF2\u6709\u6570\u636E");
+      cache.delete(key);
+      return {
+        ok: false,
+        values: /* @__PURE__ */ new Set(),
+        scanned: 0,
+        truncated: false,
+        reason: c11.title,
+        action: c11.action
+      };
+    }
+  })();
+  cache.set(key, p11);
+  return p11;
+}
+async function checkOneValue(tableId, fieldId, raw, message) {
+  if (isEmptyValue2(raw)) return { status: "ok", message: "" };
+  const n11 = normalizeForCompare(raw);
+  if (!n11) return { status: "ok", message: "" };
+  const set = await loadAllExistingValues(tableId, fieldId);
+  if (!set.ok) {
+    return {
+      status: "error",
+      message: "\u65E0\u6CD5\u6821\u9A8C",
+      detail: `${set.reason ?? "\u8BFB\u53D6\u5DF2\u6709\u6570\u636E\u5931\u8D25"}${set.action ? `\u3002${set.action}` : ""}`
+    };
+  }
+  if (set.values.has(n11)) {
+    return {
+      status: "dup",
+      message: message?.trim() || "\u5DF2\u5B58\u5728\uFF0C\u8BF7\u66F4\u6362",
+      truncated: set.truncated
+    };
+  }
+  return { status: "ok", message: "\u53EF\u7528", truncated: set.truncated };
+}
+async function checkDuplicates(config, mainValues, subValues, cond) {
+  const errors = [];
+  const failures = [];
+  const labelOf = (f12) => f12.label || f12.fieldName || f12.fieldId;
+  const mainTableId = config.mainTable.tableId;
+  for (const field of config.mainTable.fields) {
+    if (!isUniqueChecked(field, cond, mainTableId)) continue;
+    const raw = mainValues[field.fieldId];
+    if (isEmptyValue2(raw)) continue;
+    const set = await loadAllExistingValues(mainTableId, field.fieldId, labelOf(field));
+    if (!set.ok) {
+      failures.push({
+        tableId: mainTableId,
+        fieldId: field.fieldId,
+        label: labelOf(field),
+        reason: `${set.reason ?? "\u8BFB\u53D6\u5DF2\u6709\u6570\u636E\u5931\u8D25"}${set.action ? `\u3002${set.action}` : ""}`
+      });
+      continue;
+    }
+    const n11 = normalizeForCompare(raw);
+    if (n11 && set.values.has(n11)) {
+      errors.push({
+        tableId: mainTableId,
+        fieldId: field.fieldId,
+        message: field.unique?.message?.trim() || "\u8BE5\u503C\u5728\u6570\u636E\u8868\u4E2D\u5DF2\u5B58\u5728\uFF0C\u8BF7\u66F4\u6362"
+      });
+    }
+  }
+  for (const sub of config.subTables) {
+    const pending = /* @__PURE__ */ new Map();
+    const rows = subValues[sub.tableId] ?? [];
+    for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+      const row = rows[rowIndex];
+      for (const field of sub.fields) {
+        if (!isUniqueChecked(field, cond, sub.tableId, rowIndex)) continue;
+        const raw = row[field.fieldId];
+        if (isEmptyValue2(raw)) continue;
+        const n11 = normalizeForCompare(raw);
+        if (!n11) continue;
+        const prev = pending.get(field.fieldId);
+        if (prev && prev.value === n11) {
+          errors.push({
+            tableId: sub.tableId,
+            fieldId: field.fieldId,
+            rowIndex,
+            message: `\u4E0E\u7B2C ${prev.rowIndex + 1} \u6761\u586B\u5199\u91CD\u590D\uFF0C\u8BF7\u66F4\u6362`
+          });
+          continue;
+        }
+        pending.set(field.fieldId, { value: n11, rowIndex });
+        const set = await loadAllExistingValues(sub.tableId, field.fieldId, labelOf(field));
+        if (!set.ok) {
+          if (!failures.some((f12) => f12.tableId === sub.tableId && f12.fieldId === field.fieldId)) {
+            failures.push({
+              tableId: sub.tableId,
+              fieldId: field.fieldId,
+              label: labelOf(field),
+              reason: `${set.reason ?? "\u8BFB\u53D6\u5DF2\u6709\u6570\u636E\u5931\u8D25"}${set.action ? `\u3002${set.action}` : ""}`
+            });
+          }
+          continue;
+        }
+        if (set.values.has(n11)) {
+          errors.push({
+            tableId: sub.tableId,
+            fieldId: field.fieldId,
+            rowIndex,
+            message: field.unique?.message?.trim() || "\u8BE5\u503C\u5728\u6570\u636E\u8868\u4E2D\u5DF2\u5B58\u5728\uFF0C\u8BF7\u66F4\u6362"
+          });
+        }
+      }
+    }
+  }
+  return { errors, failures };
 }
 
 // tests/regression.entry.mjs
@@ -30527,6 +30887,237 @@ async function run() {
     const hf2 = hydrated.forms[0].mainTable.fields.find((f12) => f12.fieldId === "fldMCity");
     check("F14 hydrate \u540E optionRef \u4FDD\u7559", JSON.stringify(hf2?.optionRef) === JSON.stringify(refCascade), hf2);
     check("F14 hydrate \u540E fieldType \u6062\u590D", hf2?.fieldType === j5.SingleSelect, hf2);
+  }
+  {
+    const fmt = (x11) => x11 ? `${x11.getFullYear()}-${String(x11.getMonth() + 1).padStart(2, "0")}-${String(x11.getDate()).padStart(2, "0")}` : "null";
+    const d11 = (s) => /* @__PURE__ */ new Date(`${s}T00:00:00`);
+    const plus1y = { sourceFieldId: "fStart", direction: "plus", amount: 1, unit: "year" };
+    check("F15 +1 \u5E74\uFF082026-03-01\u21922027-03-01\uFF09", fmt(applyDateOffset(d11("2026-03-01"), plus1y)) === "2027-03-01");
+    check(
+      "F15 -1 \u5E74\uFF082026-03-01\u21922025-03-01\uFF09",
+      fmt(applyDateOffset(d11("2026-03-01"), { ...plus1y, direction: "minus" })) === "2025-03-01"
+    );
+    check(
+      "F15 \u6708\u504F\u79FB\u65E5\u6EA2\u51FA\u53D6\u6708\u672B\uFF081/31 +1 \u6708\u21922/28\uFF09",
+      fmt(applyDateOffset(d11("2026-01-31"), { ...plus1y, amount: 1, unit: "month" })) === "2026-02-28"
+    );
+    check(
+      "F15 \u95F0\u5E74 2/29 +1 \u5E74\u2192\u6B21\u5E74 2/28",
+      fmt(applyDateOffset(d11("2024-02-29"), plus1y)) === "2025-02-28"
+    );
+    check(
+      "F15 \u6309\u5929\u504F\u79FB\uFF08+30 \u5929\uFF09",
+      fmt(applyDateOffset(d11("2026-01-01"), { ...plus1y, amount: 30, unit: "day" })) === "2026-01-31"
+    );
+    check("F15 \u6765\u6E90\u4E3A\u7A7A\u8FD4\u56DE null", applyDateOffset(null, plus1y) === null);
+    check("F15 \u975E\u6CD5\u6765\u6E90\u503C\u8FD4\u56DE null", applyDateOffset(/* @__PURE__ */ new Date("bad"), plus1y) === null);
+    check("F15 \u672A\u914D\u7F6E sourceFieldId \u8FD4\u56DE null", applyDateOffset(d11("2026-01-01"), { ...plus1y, sourceFieldId: "" }) === null);
+    check("F15 \u63CF\u8FF0\u6587\u6848", describeOffset(plus1y) === "+1 \u5E74" && describeOffset({ ...plus1y, direction: "minus", amount: 3, unit: "month" }) === "-3 \u4E2A\u6708");
+    check("F15 isSameInstant \u540C\u523B\u5224\u5B9A", isSameInstant(d11("2026-03-01"), /* @__PURE__ */ new Date("2026-03-01T00:00:00")) === true);
+    check("F15 isSameInstant \u4E0D\u540C\u523B\u5224\u5B9A", isSameInstant(d11("2026-03-01"), d11("2026-03-02")) === false);
+    check("F15 toDateOrNull \u652F\u6301\u65F6\u95F4\u6233", fmt(toDateOrNull(d11("2026-05-06").getTime())) === "2026-05-06");
+    const fields = [
+      { fieldId: "fStart", fieldName: "\u5408\u540C\u8D77\u59CB\u65E5", fieldType: j5.DateTime, visible: true, required: false },
+      {
+        fieldId: "fEnd",
+        fieldName: "\u5408\u540C\u5230\u671F\u65E5",
+        fieldType: j5.DateTime,
+        visible: true,
+        required: false,
+        dateAutoFill: plus1y
+      }
+    ];
+    const manual = /* @__PURE__ */ new Set();
+    const auto = /* @__PURE__ */ new Set();
+    const keyOf = (fid) => `main:${fid}`;
+    const v02 = { fStart: d11("2026-03-01") };
+    const n1 = applyAutoFill(fields, v02, manual, auto, keyOf);
+    check("F15 \u6765\u6E90\u6709\u503C\u65F6\u81EA\u52A8\u9884\u586B", n1 && fmt(n1.fEnd) === "2027-03-01", n1 && fmt(n1.fEnd));
+    check("F15 \u9884\u586B\u540E\u6807\u8BB0\u4E3A\u81EA\u52A8\u503C", auto.has("main:fEnd"));
+    check("F15 \u503C\u5DF2\u6B63\u786E\u65F6\u4E0D\u91CD\u590D\u5199\u5165", applyAutoFill(fields, n1, manual, auto, keyOf) === null);
+    const v22 = { ...n1, fStart: d11("2027-05-06") };
+    const n23 = applyAutoFill(fields, v22, manual, auto, keyOf);
+    check("F15 \u672A\u624B\u52A8\u6539\u8FC7\u65F6\u6765\u6E90\u53D8\u5316\u4F1A\u91CD\u7B97", n23 && fmt(n23.fEnd) === "2028-05-06", n23 && fmt(n23.fEnd));
+    const userEdited = { ...n23, fEnd: d11("2027-12-31") };
+    markManualEdits(fields, n23, userEdited, manual, auto, keyOf);
+    check("F15 \u7528\u6237\u624B\u52A8\u6539\u540E\u8FDB\u5165 manual", manual.has("main:fEnd"));
+    const v32 = { ...userEdited, fStart: d11("2029-01-01") };
+    check(
+      "F15 \u624B\u52A8\u6539\u8FC7\u540E\u4E0D\u518D\u88AB\u8986\u76D6",
+      applyAutoFill(fields, v32, manual, auto, keyOf) === null && fmt(v32.fEnd) === "2027-12-31",
+      fmt(v32.fEnd)
+    );
+    const cleared = { ...v32, fEnd: void 0 };
+    markManualEdits(fields, v32, cleared, manual, auto, keyOf);
+    check("F15 \u6E05\u7A7A\u76EE\u6807\u5B57\u6BB5\u64A4\u9500\u624B\u52A8\u6807\u8BB0", !manual.has("main:fEnd"));
+    const n42 = applyAutoFill(fields, cleared, manual, auto, keyOf);
+    check("F15 \u6E05\u7A7A\u540E\u91CD\u65B0\u81EA\u52A8\u9884\u586B", n42 && fmt(n42.fEnd) === "2030-01-01", n42 && fmt(n42.fEnd));
+    const noSrc = { ...n42, fStart: void 0 };
+    const n52 = applyAutoFill(fields, noSrc, manual, auto, keyOf);
+    check("F15 \u6765\u6E90\u6E05\u7A7A\u540E\u6E05\u6389\u81EA\u52A8\u503C", n52 && n52.fEnd === void 0, n52 && fmt(n52.fEnd));
+  }
+  {
+    const NO_PERM = "tblNoPerm";
+    const page1 = [{ fields: { fldM1: "\u5DF2\u5B58\u5728A" } }, { fields: { fldM1: "\u5DF2\u5B58\u5728B" } }];
+    const page2 = [{ fields: { fldM1: "\u8DE8\u9875\u503CC" } }, { fields: { fldM1: "\u5DF2\u5B58\u5728A" } }];
+    let readCalls = 0;
+    const dupBase = {
+      getTableById: async (id) => {
+        if (id === NO_PERM) throw new Error("permission denied: no access to this table");
+        return {
+          getRecords: async ({ pageToken } = {}) => {
+            readCalls += 1;
+            if (id === MAIN) {
+              if (!pageToken) return { records: page1, hasMore: true, pageToken: "tok2" };
+              return { records: page2, hasMore: false };
+            }
+            return { records: [], hasMore: false };
+          }
+        };
+      },
+      getTableMetaList: async () => [{ id: MAIN, name: "\u4E3B\u8868" }]
+    };
+    __setAppForTest({ base: dupBase });
+    invalidateExistingCache();
+    const emptyCond = {
+      hiddenFields: {},
+      forcedRequired: {},
+      forcedUnrequired: {},
+      rowHiddenFields: {},
+      rowForcedRequired: {},
+      rowForcedUnrequired: {}
+    };
+    const cfgDup = {
+      id: "f1",
+      version: "1.0.0",
+      formTitle: "\u67E5\u91CD",
+      mainTable: {
+        tableId: MAIN,
+        tableName: "\u4E3B\u8868",
+        fields: [
+          { fieldId: "fldM1", fieldName: "\u5408\u540C\u53F7", fieldType: j5.Text, visible: true, required: false, unique: { enabled: true } },
+          { fieldId: "fldM2", fieldName: "\u5907\u6CE8", fieldType: j5.Text, visible: true, required: false }
+        ]
+      },
+      subTables: [
+        {
+          tableId: SUB1,
+          tableName: "\u5B50\u88681",
+          linkFieldId: "fldLink1",
+          fields: [
+            { fieldId: "fldS1", fieldName: "\u5B50\u7F16\u53F7", fieldType: j5.Text, visible: true, required: false, unique: { enabled: true } }
+          ],
+          allowMultiple: true
+        }
+      ],
+      conditionalRules: []
+    };
+    const r1 = await checkDuplicates(cfgDup, { fldM1: "\u5DF2\u5B58\u5728A" }, { [SUB1]: [{}] }, emptyCond);
+    check("F16 \u4E0E\u8868\u5185\u5DF2\u6709\u6570\u636E\u91CD\u590D\u88AB\u62E6\u622A", r1.errors.length === 1 && r1.errors[0].fieldId === "fldM1", r1.errors);
+    const r22 = await checkDuplicates(cfgDup, { fldM1: "  \u5DF2\u5B58\u5728a  " }, { [SUB1]: [{}] }, emptyCond);
+    check("F16 \u5FFD\u7565\u5927\u5C0F\u5199\u4E0E\u9996\u5C3E\u7A7A\u683C\u540E\u4ECD\u5224\u91CD", r22.errors.length === 1, r22.errors);
+    const r32 = await checkDuplicates(cfgDup, { fldM1: "NEW-001" }, { [SUB1]: [{}] }, emptyCond);
+    check("F16 \u672A\u91CD\u590D\u7684\u503C\u653E\u884C", r32.errors.length === 0 && r32.failures.length === 0, r32);
+    const r42 = await checkDuplicates(cfgDup, { fldM2: "\u5DF2\u5B58\u5728A" }, { [SUB1]: [{}] }, emptyCond);
+    check("F16 \u672A\u5F00\u542F\u67E5\u91CD\u7684\u5B57\u6BB5\u4E0D\u6821\u9A8C", r42.errors.length === 0, r42.errors);
+    const r52 = await checkDuplicates(
+      cfgDup,
+      { fldM1: "NEW-002" },
+      { [SUB1]: [{ fldS1: "X-1" }, { fldS1: "X-1" }, { fldS1: "X-2" }] },
+      emptyCond
+    );
+    check(
+      "F16 \u5B50\u8868\u672C\u6B21\u63D0\u4EA4\u591A\u884C\u4E92\u67E5\uFF08\u7B2C 2 \u884C\u62A5\u91CD\u590D\uFF09",
+      r52.errors.length === 1 && r52.errors[0].rowIndex === 1 && /第 1 条/.test(r52.errors[0].message),
+      r52.errors
+    );
+    const cfgNoPerm = { ...cfgDup, mainTable: { ...cfgDup.mainTable, tableId: NO_PERM } };
+    const r62 = await checkDuplicates(cfgNoPerm, { fldM1: "ANY" }, { [SUB1]: [{}] }, emptyCond);
+    check("F16 \u8BFB\u53D6\u5DF2\u6709\u6570\u636E\u5931\u8D25\u65F6\u4E0D\u9759\u9ED8\u653E\u884C", r62.failures.length === 1 && r62.errors.length === 0, r62);
+    check(
+      "F16 \u5931\u8D25\u539F\u56E0\u5E26\u6743\u9650\u5206\u7C7B\u63D0\u793A",
+      /权限/.test(r62.failures[0]?.reason ?? ""),
+      r62.failures[0]?.reason
+    );
+    check("F16 \u5F52\u4E00\u5316\uFF1A\u53BB\u7A7A\u683C\u8F6C\u5C0F\u5199", normalizeForCompare("  ABC ") === "abc");
+    check("F16 \u5F52\u4E00\u5316\uFF1A\u6570\u5B57", normalizeForCompare(123) === "123");
+    check("F16 \u5F52\u4E00\u5316\uFF1A\u53D6\u5BF9\u8C61 text", normalizeForCompare({ text: " Hello " }) === "hello");
+    invalidateExistingCache();
+    readCalls = 0;
+    const c1 = await checkOneValue(MAIN, "fldM1", "\u8DE8\u9875\u503CC");
+    check("F16 \u5931\u7126\u6821\u9A8C\u547D\u4E2D\u7B2C 2 \u9875\u6570\u636E\uFF08\u5206\u9875\u5168\u91CF\uFF09", c1.status === "dup", c1);
+    check("F16 \u5168\u91CF\u62C9\u53D6\u786E\u5B9E\u7FFB\u4E86 2 \u9875", readCalls === 2, readCalls);
+    const c22 = await checkOneValue(MAIN, "fldM1", "\u5DF2\u5B58\u5728B");
+    check("F16 \u5931\u7126\u6821\u9A8C\u547D\u4E2D\u7B2C 1 \u9875\u6570\u636E", c22.status === "dup", c22);
+    const c32 = await checkOneValue(MAIN, "fldM1", "BRAND-NEW");
+    check("F16 \u65B0\u503C\u63D0\u793A\u53EF\u7528", c32.status === "ok" && c32.message === "\u53EF\u7528", c32);
+    check("F16 \u7F13\u5B58\u590D\u7528\uFF1A\u540E\u7EED\u6821\u9A8C\u4E0D\u518D\u62C9\u8868", readCalls === 2, readCalls);
+    const c42 = await checkOneValue(MAIN, "fldM1", "");
+    check("F16 \u7A7A\u503C\u4E0D\u63D0\u793A\u4E5F\u4E0D\u5224\u91CD", c42.status === "ok" && c42.message === "", c42);
+    const c52 = await checkOneValue(NO_PERM, "fldM1", "ANY");
+    check("F16 \u65E0\u6743\u9650\u65F6\u8FD4\u56DE error \u4E14\u4E0D\u9759\u9ED8\u653E\u884C", c52.status === "error" && /权限/.test(c52.detail ?? ""), c52);
+    noteSubmittedValues(MAIN, "fldM1", ["BRAND-NEW"]);
+    const c62 = await checkOneValue(MAIN, "fldM1", "BRAND-NEW");
+    check("F16 \u63D0\u4EA4\u540E\u5E76\u5165\u7F13\u5B58\uFF1A\u76F8\u540C\u503C\u518D\u586B\u5373\u5224\u91CD", c62.status === "dup", c62);
+    invalidateExistingCache(MAIN, "fldM1");
+    readCalls = 0;
+    await loadAllExistingValues(MAIN, "fldM1");
+    check("F16 \u5931\u6548\u7F13\u5B58\u540E\u91CD\u65B0\u5206\u9875\u5168\u91CF\u62C9\u53D6", readCalls === 2, readCalls);
+    const set = await loadAllExistingValues(MAIN, "fldM1");
+    check("F16 \u5168\u91CF\u7ED3\u679C\u5E26\u626B\u63CF\u6761\u6570\u4E0E\u53BB\u91CD\u503C", set.scanned === 4 && set.values.size === 3, {
+      scanned: set.scanned,
+      size: set.values.size
+    });
+  }
+  {
+    const dateFill = { sourceFieldId: "fldStart", direction: "plus", amount: 1, unit: "year" };
+    const cfg = {
+      id: "form1",
+      version: "1.0.0",
+      formTitle: "\u65B0\u529F\u80FD\u6301\u4E45\u5316",
+      mainTable: {
+        tableId: MAIN,
+        tableName: "\u4E3B\u8868",
+        fields: [
+          { fieldId: "fldM1", fieldName: "\u5408\u540C\u53F7", fieldType: j5.Text, visible: true, required: true, unique: { enabled: true } },
+          { fieldId: "fldStart", fieldName: "\u8D77\u59CB\u65E5", fieldType: j5.DateTime, visible: true, required: false },
+          { fieldId: "fldEnd", fieldName: "\u5230\u671F\u65E5", fieldType: j5.DateTime, visible: true, required: false, dateAutoFill: dateFill }
+        ]
+      },
+      subTables: [],
+      conditionalRules: []
+    };
+    const thin = serializeConfig({ forms: [cfg], defaultFormId: "form1" });
+    const stored = JSON.parse(JSON.stringify(thin));
+    const f1 = stored.forms[0].mainTable.fields.find((f12) => f12.fieldId === "fldM1");
+    const f32 = stored.forms[0].mainTable.fields.find((f12) => f12.fieldId === "fldEnd");
+    check("F17 \u5E8F\u5217\u5316\u4FDD\u7559 unique\uFF08\u5426\u5219\u53D1\u5E03\u540E\u914D\u7F6E\u9759\u9ED8\u4E22\u5931\uFF09", JSON.stringify(f1?.unique) === JSON.stringify({ enabled: true }), f1);
+    check("F17 \u5E8F\u5217\u5316\u4FDD\u7559 dateAutoFill", JSON.stringify(f32?.dateAutoFill) === JSON.stringify(dateFill), f32);
+    const metaBase = {
+      getTableById: async () => ({
+        getFieldMetaList: async () => [
+          { id: "fldM1", name: "\u5408\u540C\u53F7", type: j5.Text },
+          { id: "fldStart", name: "\u8D77\u59CB\u65E5", type: j5.DateTime },
+          { id: "fldEnd", name: "\u5230\u671F\u65E5", type: j5.DateTime }
+        ]
+      }),
+      getTableMetaList: async () => [{ id: MAIN, name: "\u4E3B\u8868" }]
+    };
+    __setAppForTest({ base: metaBase });
+    const hydrated = await hydrateConfig(stored);
+    const h1 = hydrated.forms[0].mainTable.fields.find((f12) => f12.fieldId === "fldM1");
+    const h32 = hydrated.forms[0].mainTable.fields.find((f12) => f12.fieldId === "fldEnd");
+    check("F17 hydrate \u540E unique \u4FDD\u7559", h1?.unique?.enabled === true, h1);
+    check("F17 hydrate \u540E dateAutoFill \u4FDD\u7559", JSON.stringify(h32?.dateAutoFill) === JSON.stringify(dateFill), h32);
+    check("F17 hydrate \u540E\u65E5\u671F\u5B57\u6BB5\u7C7B\u578B\u6062\u590D", h32?.fieldType === j5.DateTime, h32);
+    const ePerm = classifySdkError(new Error("permission denied"), "\u6E90\u6570\u636E\u8868");
+    check("F17 \u6743\u9650\u9519\u8BEF\u5206\u7C7B", ePerm.kind === "permission" && /权限/.test(ePerm.title), ePerm);
+    const eMissing = classifySdkError(new Error("table not found"), "\u6E90\u6570\u636E\u8868");
+    check("F17 \u76EE\u6807\u4E0D\u5B58\u5728\u5206\u7C7B", eMissing.kind === "notfound", eMissing);
+    const eOther = classifySdkError(new Error("network timeout"), "\u6E90\u6570\u636E\u8868");
+    check("F17 \u672A\u77E5\u9519\u8BEF\u515C\u5E95", eOther.kind === "unknown", eOther);
+    const eZh = classifySdkError(new Error("\u6CA1\u6709\u6743\u9650\u8BBF\u95EE\u8BE5\u6570\u636E\u8868"), "\u6E90\u6570\u636E\u8868");
+    check("F17 \u4E2D\u6587\u6743\u9650\u9519\u8BEF\u4E5F\u80FD\u8BC6\u522B", eZh.kind === "permission", eZh);
   }
   const failed = results.filter((r10) => !r10.pass);
   log(`

@@ -31,9 +31,46 @@ interface Props {
   tableId: string;
   /** 当前记录值（主表值 / 子表当前行值）：引用选项的联动条件据此实时过滤 */
   formValues?: FormValues;
+  /** 失焦回调（唯一性校验在此时触发） */
+  onBlur?: () => void;
+  /** 唯一性校验状态；undefined / 'idle' 时右侧不显示任何提示 */
+  uniqueStatus?: 'idle' | 'checking' | 'ok' | 'dup' | 'error';
+  /** 状态附带说明（如「无法校验」的详细原因） */
+  uniqueHint?: string;
 }
 
 const fullWidth: React.CSSProperties = { width: '100%' };
+
+/** 输入框右侧的唯一性校验提示（仅配置了唯一性校验的字段出现） */
+function UniqueBadge({ status, hint }: { status: string; hint?: string }) {
+  const map: Record<string, { text: string; type: 'success' | 'danger' | 'warning' | 'tertiary' }> = {
+    checking: { text: '校验中…', type: 'tertiary' },
+    ok: { text: '✓ 可用', type: 'success' },
+    dup: { text: '✗ 已存在，请更换', type: 'danger' },
+    error: { text: '⚠ 无法校验', type: 'warning' },
+  };
+  const conf = map[status];
+  if (!conf) return null;
+  return (
+    <div
+      className="unique-badge"
+      title={status === 'error' ? hint : undefined}
+      style={{
+        flexShrink: 0,
+        minWidth: 84,
+        paddingTop: 4,
+        fontSize: 12,
+        lineHeight: 1.5,
+        textAlign: 'right',
+        whiteSpace: 'nowrap',
+      }}
+    >
+      <Typography.Text type={conf.type} size="small">
+        {conf.text}
+      </Typography.Text>
+    </div>
+  );
+}
 
 /**
  * 附件上传器：表单内持有 File[]，提交时由 valueConverter 统一调 batchUploadFile 上传
@@ -88,22 +125,34 @@ function AttachmentUploader({
  * 关联字段（SingleLink/DuplexLink）由 LinkSelector 让用户从目标表选记录；
  * 仅子表中指向主表的关联字段例外（SubForm 不渲染，提交逻辑自动注入主表 recordId）。
  */
-export function FieldRenderer({ field, value, onChange, disabled, tableId, formValues }: Props) {
+export function FieldRenderer({
+  field,
+  value,
+  onChange,
+  disabled,
+  tableId,
+  formValues,
+  onBlur,
+  uniqueStatus,
+  uniqueHint,
+}: Props) {
   const options = (field.options ?? []).map((o) => ({ value: o.name, label: o.name }));
 
-  switch (field.fieldType) {
-    case FieldType.Text:
-      return (
-        <TextArea
-          style={fullWidth}
-          autosize
-          rows={2}
-          value={(value as string) ?? ''}
-          placeholder={field.placeholder}
-          disabled={disabled}
-          onChange={(v: any) => onChange(v)}
-        />
-      );
+  const control = ((): React.ReactNode => {
+    switch (field.fieldType) {
+      case FieldType.Text:
+        return (
+          <TextArea
+            style={fullWidth}
+            autosize
+            rows={2}
+            value={(value as string) ?? ''}
+            placeholder={field.placeholder}
+            disabled={disabled}
+            onChange={(v: any) => onChange(v)}
+            onBlur={onBlur}
+          />
+        );
 
     case FieldType.Number:
     case FieldType.Currency:
@@ -114,6 +163,7 @@ export function FieldRenderer({ field, value, onChange, disabled, tableId, formV
           placeholder={field.placeholder}
           disabled={disabled}
           onChange={(v: any) => onChange(v)}
+          onBlur={onBlur as any}
         />
       );
 
@@ -126,6 +176,7 @@ export function FieldRenderer({ field, value, onChange, disabled, tableId, formV
           value={(value as number) ?? undefined}
           disabled={disabled}
           onChange={(v: any) => onChange(v)}
+          onBlur={onBlur as any}
         />
       );
 
@@ -224,6 +275,7 @@ export function FieldRenderer({ field, value, onChange, disabled, tableId, formV
           disabled={disabled}
           prefix={field.fieldType === FieldType.Url ? 'https://' : undefined}
           onChange={(v: any) => onChange(v)}
+          onBlur={onBlur}
         />
       );
 
@@ -269,7 +321,19 @@ export function FieldRenderer({ field, value, onChange, disabled, tableId, formV
           placeholder={field.placeholder}
           disabled={disabled}
           onChange={(v: any) => onChange(v)}
+          onBlur={onBlur}
         />
       );
   }
+  })();
+
+  // 未配置唯一性校验的字段：保持原来的单控件布局（零改动风险）
+  if (!uniqueStatus || uniqueStatus === 'idle') return <>{control}</>;
+  // 配置了唯一性校验：控件占满剩余宽度，右侧固定显示校验结果
+  return (
+    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, width: '100%' }}>
+      <div style={{ flex: 1, minWidth: 0 }}>{control}</div>
+      <UniqueBadge status={uniqueStatus} hint={uniqueHint} />
+    </div>
+  );
 }

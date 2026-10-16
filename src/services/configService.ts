@@ -406,10 +406,17 @@ export async function saveConfig(data: PluginData): Promise<SaveResult> {
         const subIds = (firstForm?.subTables ?? [])
           .map((s) => s?.tableId)
           .filter((id): id is string => !!id);
+        // ★ 选项引用的源表同样必须在本 base 内：插件以「打开者」的身份读源表记录，
+        //   跨 base 或不属于本多维表格的源表在发布后必然读不到（选项为空/报错）。
+        const refIds = [...(firstForm?.mainTable?.fields ?? []), ...(firstForm?.subTables ?? []).flatMap((s: any) => s?.fields ?? [])]
+          .map((f: any) => f?.optionRef?.tableId)
+          .filter((id): id is string => !!id);
         try {
           const metas = await getBase().getTableMetaList();
           const inBase = new Set(metas.map((t) => t.id));
-          const outsiders = [mainTableId, ...subIds].filter((id) => !inBase.has(id));
+          const outsiders = [...new Set([mainTableId, ...subIds, ...refIds])].filter(
+            (id) => !inBase.has(id)
+          );
           if (outsiders.length > 0) {
             throw new Error(
               `以下数据表不属于已选择的多维表格（${outsiders.join('、')}），请重新选择数据源后配置`

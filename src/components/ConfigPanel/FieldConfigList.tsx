@@ -1,11 +1,13 @@
 import React, { useState } from 'react';
 import { FieldType } from '@lark-base-open/js-sdk';
-import { FieldConfig, OptionReference } from '../../types';
+import { DateAutoFillConfig, FieldConfig, OptionReference, UNIQUE_CHECKABLE_TYPES } from '../../types';
 import { FIELD_TYPE_LABEL } from '../../utils/fieldMapper';
 import { FieldTypeIcon } from '../../utils/fieldTypeIcons';
+import { describeOffset } from '../../utils/dateCalc';
 import { Button, Input, Switch, Typography } from '@douyinfe/semi-ui';
-import { IconSearch, IconLink } from '@douyinfe/semi-icons';
+import { IconSearch, IconLink, IconCalendar } from '@douyinfe/semi-icons';
 import { OptionRefEditor } from './OptionRefEditor';
+import { DateAutoFillEditor } from './DateAutoFillEditor';
 
 interface Props {
   fields: FieldConfig[];
@@ -17,6 +19,16 @@ function isSelectField(t: FieldType): boolean {
   return t === FieldType.SingleSelect || t === FieldType.MultiSelect;
 }
 
+/** 可配置「唯一性校验」的字段类型（可转文本比较的单值字段） */
+function canUniqueCheck(t: FieldType): boolean {
+  return UNIQUE_CHECKABLE_TYPES.includes(t);
+}
+
+/** 可配置「日期联动预填」的字段类型 */
+function isDateField(t: FieldType): boolean {
+  return t === FieldType.DateTime;
+}
+
 export function FieldConfigList({ fields, onChange }: Props) {
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [overIndex, setOverIndex] = useState<number | null>(null);
@@ -24,6 +36,8 @@ export function FieldConfigList({ fields, onChange }: Props) {
   const [keyword, setKeyword] = useState('');
   // 引用选项编辑器：正在编辑的字段索引（null = 关闭）
   const [refEditIndex, setRefEditIndex] = useState<number | null>(null);
+  // 日期联动预填编辑器：正在编辑的字段索引（null = 关闭）
+  const [dateEditIndex, setDateEditIndex] = useState<number | null>(null);
 
   const update = (idx: number, patch: Partial<FieldConfig>) => {
     onChange(fields.map((f, i) => (i === idx ? { ...f, ...patch } : f)));
@@ -150,20 +164,51 @@ export function FieldConfigList({ fields, onChange }: Props) {
                 必填
               </label>
             </div>
-            {/* 第三行（仅单选/多选）：引用选项入口 */}
-            {isSelectField(f.fieldType) && (
+            {/* 第三行：字段级高级配置 —— 唯一性校验 / 日期联动 / 引用选项 */}
+            {(canUniqueCheck(f.fieldType) || isDateField(f.fieldType) || isSelectField(f.fieldType)) && (
               <div className="cfg-field-optionref">
-                <Button
-                  size="small"
-                  theme="borderless"
-                  type={f.optionRef ? 'primary' : 'tertiary'}
-                  icon={<IconLink />}
-                  onClick={() => setRefEditIndex(idx)}
-                >
-                  {f.optionRef
-                    ? `已启用引用选项${f.optionRef.conditions.length ? `（${f.optionRef.conditions.length} 个条件）` : ''}`
-                    : '引用选项…'}
-                </Button>
+                {canUniqueCheck(f.fieldType) && (
+                  <label
+                    className="f-toggle"
+                    title="输入完成（失焦）时全量校验该值在数据表中是否已存在，并在输入框右侧提示；重复时阻止提交"
+                  >
+                    <Switch
+                      size="small"
+                      checked={!!f.unique?.enabled}
+                      disabled={!f.visible}
+                      onChange={(v: boolean) =>
+                        update(idx, { unique: { ...(f.unique ?? { enabled: false }), enabled: v } })
+                      }
+                    />
+                    唯一性校验
+                  </label>
+                )}
+                {isDateField(f.fieldType) && (
+                  <Button
+                    size="small"
+                    theme="borderless"
+                    type={f.dateAutoFill ? 'primary' : 'tertiary'}
+                    icon={<IconCalendar />}
+                    onClick={() => setDateEditIndex(idx)}
+                  >
+                    {f.dateAutoFill
+                      ? `联动预填 ${describeOffset(f.dateAutoFill)}`
+                      : '联动预填…'}
+                  </Button>
+                )}
+                {isSelectField(f.fieldType) && (
+                  <Button
+                    size="small"
+                    theme="borderless"
+                    type={f.optionRef ? 'primary' : 'tertiary'}
+                    icon={<IconLink />}
+                    onClick={() => setRefEditIndex(idx)}
+                  >
+                    {f.optionRef
+                      ? `已启用引用选项${f.optionRef.conditions.length ? `（${f.optionRef.conditions.length} 个条件）` : ''}`
+                      : '引用选项…'}
+                  </Button>
+                )}
               </div>
             )}
           </div>
@@ -172,6 +217,18 @@ export function FieldConfigList({ fields, onChange }: Props) {
       <Typography.Text type="tertiary" style={{ display: 'block', marginTop: 8, fontSize: 12 }}>
         拖拽左侧把手可调整字段显示顺序 · 隐藏字段不参与录入与必填校验
       </Typography.Text>
+      {dateEditIndex !== null && fields[dateEditIndex] && (
+        <DateAutoFillEditor
+          visible
+          field={fields[dateEditIndex]}
+          siblingFields={fields}
+          onCancel={() => setDateEditIndex(null)}
+          onSave={(cfg: DateAutoFillConfig | undefined) => {
+            update(dateEditIndex, { dateAutoFill: cfg });
+            setDateEditIndex(null);
+          }}
+        />
+      )}
       {refEditIndex !== null && fields[refEditIndex] && (
         <OptionRefEditor
           visible

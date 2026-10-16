@@ -1,6 +1,6 @@
 import React from 'react';
 import { FieldType } from '@lark-base-open/js-sdk';
-import { FormPluginConfig, FormValues, ConditionalState, FieldError } from '../../types';
+import { FormPluginConfig, FormValues, ConditionalState, FieldError, UniqueFieldState } from '../../types';
 import { isFieldRequired, isHiddenField } from '../../utils/validator';
 import { getOptionRefDependencies } from '../../utils/optionRef';
 import { FieldRenderer } from './FieldRenderer';
@@ -12,9 +12,21 @@ interface Props {
   cond: ConditionalState;
   /** 提交校验后的字段级错误（字段下方红字提示） */
   errors?: FieldError[];
+  /** 唯一性校验状态，key = fieldId */
+  uniqueState?: Record<string, UniqueFieldState>;
+  /** 字段失焦回调（触发唯一性校验） */
+  onFieldBlur?: (fieldId: string) => void;
 }
 
-export function MainForm({ config, values, onChange, cond, errors }: Props) {
+export function MainForm({
+  config,
+  values,
+  onChange,
+  cond,
+  errors,
+  uniqueState,
+  onFieldBlur,
+}: Props) {
   const setField = (fieldId: string, v: unknown) => {
     const next: FormValues = { ...values, [fieldId]: v };
     // 级联清空：凡是引用选项依赖了被改字段的字段（如下级「市」依赖「省」），
@@ -52,6 +64,11 @@ export function MainForm({ config, values, onChange, cond, errors }: Props) {
                 onChange={(v) => setField(f.fieldId, v)}
                 disabled={f.readonly}
                 formValues={values}
+                onBlur={onFieldBlur ? () => onFieldBlur(f.fieldId) : undefined}
+                uniqueStatus={
+                  f.unique?.enabled ? (uniqueState?.[f.fieldId]?.status ?? 'idle') : undefined
+                }
+                uniqueHint={uniqueState?.[f.fieldId]?.detail}
               />
               {err && <div className="field-err">{err.message}</div>}
             </div>

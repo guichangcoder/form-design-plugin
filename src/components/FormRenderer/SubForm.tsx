@@ -1,6 +1,6 @@
 import React from 'react';
 import { FieldType } from '@lark-base-open/js-sdk';
-import { SubTableConfig, FormValues, ConditionalState, FieldError } from '../../types';
+import { SubTableConfig, FormValues, ConditionalState, FieldError, UniqueFieldState } from '../../types';
 import { isFieldRequired, isHiddenField } from '../../utils/validator';
 import { getOptionRefDependencies } from '../../utils/optionRef';
 import { toast } from '../../utils/toast';
@@ -15,9 +15,13 @@ interface Props {
   cond: ConditionalState;
   /** 提交校验后的字段级错误（按行 + 字段下方红字提示） */
   errors?: FieldError[];
+  /** 唯一性校验状态，key = `<rowIndex>:<fieldId>` */
+  uniqueState?: Record<string, UniqueFieldState>;
+  /** 字段失焦回调（触发唯一性校验），需带行索引 */
+  onFieldBlur?: (fieldId: string, rowIndex: number) => void;
 }
 
-export function SubForm({ sub, rows, onChange, cond, errors }: Props) {
+export function SubForm({ sub, rows, onChange, cond, errors, uniqueState, onFieldBlur }: Props) {
   const updateRow = (idx: number, fieldId: string, v: unknown) =>
     onChange(
       rows.map((r, i) => {
@@ -98,6 +102,13 @@ export function SubForm({ sub, rows, onChange, cond, errors }: Props) {
                   onChange={(v) => updateRow(idx, f.fieldId, v)}
                   disabled={f.readonly}
                   formValues={row}
+                  onBlur={onFieldBlur ? () => onFieldBlur(f.fieldId, idx) : undefined}
+                  uniqueStatus={
+                    f.unique?.enabled
+                      ? (uniqueState?.[`${idx}:${f.fieldId}`]?.status ?? 'idle')
+                      : undefined
+                  }
+                  uniqueHint={uniqueState?.[`${idx}:${f.fieldId}`]?.detail}
                 />
                 {err && <div className="field-err">{err.message}</div>}
               </div>

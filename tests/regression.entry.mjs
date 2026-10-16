@@ -13,6 +13,17 @@ import { submitForm } from '../src/services/recordService';
 import { __setAppForTest as selectBaseForTest } from '../src/services/appContext';
 import { serializeConfig, hydrateConfig } from '../src/services/configSize';
 import { resolveRefOptions, getOptionRefDependencies, hasOptionRef } from '../src/utils/optionRef';
+import { applyDateOffset, isSameInstant, describeOffset, toDateOrNull } from '../src/utils/dateCalc';
+import { applyAutoFill, markManualEdits } from '../src/utils/dateAutoFill';
+import {
+  checkDuplicates,
+  checkOneValue,
+  loadAllExistingValues,
+  normalizeForCompare,
+  invalidateExistingCache,
+  noteSubmittedValues,
+} from '../src/services/uniqueCheck';
+import { classifySdkError } from '../src/utils/permError';
 
 const results = [];
 function log(line) { process.stdout.write(line + '\n'); }
@@ -462,6 +473,263 @@ async function run() {
     const hf = hydrated.forms[0].mainTable.fields.find((f) => f.fieldId === 'fldMCity');
     check('F14 hydrate 后 optionRef 保留', JSON.stringify(hf?.optionRef) === JSON.stringify(refCascade), hf);
     check('F14 hydrate 后 fieldType 恢复', hf?.fieldType === FieldType.SingleSelect, hf);
+  }
+
+  // —— F15：日期联动预填（偏移计算 + 自动填/手动改后不覆盖/清空重填）——
+  {
+    const fmt = (x) =>
+      x
+        ? `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`
+        : 'null';
+    const d = (s) => new Date(`${s}T00:00:00`);
+    const plus1y = { sourceFieldId: 'fStart', direction: 'plus', amount: 1, unit: 'year' };
+
+    check('F15 +1 年（2026-03-01→2027-03-01）', fmt(applyDateOffset(d('2026-03-01'), plus1y)) === '2027-03-01');
+    check(
+      'F15 -1 年（2026-03-01→2025-03-01）',
+      fmt(applyDateOffset(d('2026-03-01'), { ...plus1y, direction: 'minus' })) === '2025-03-01'
+    );
+    check(
+      'F15 月偏移日溢出取月末（1/31 +1 月→2/28）',
+      fmt(applyDateOffset(d('2026-01-31'), { ...plus1y, amount: 1, unit: 'month' })) === '2026-02-28'
+    );
+    check(
+      'F15 闰年 2/29 +1 年→次年 2/28',
+      fmt(applyDateOffset(d('2024-02-29'), plus1y)) === '2025-02-28'
+    );
+    check(
+      'F15 按天偏移（+30 天）',
+      fmt(applyDateOffset(d('2026-01-01'), { ...plus1y, amount: 30, unit: 'day' })) === '2026-01-31'
+    );
+    check('F15 来源为空返回 null', applyDateOffset(null, plus1y) === null);
+    check('F15 非法来源值返回 null', applyDateOffset(new Date('bad'), plus1y) === null);
+    check('F15 未配置 sourceFieldId 返回 null', applyDateOffset(d('2026-01-01'), { ...plus1y, sourceFieldId: '' }) === null);
+    check('F15 描述文案', describeOffset(plus1y) === '+1 年' && describeOffset({ ...plus1y, direction: 'minus', amount: 3, unit: 'month' }) === '-3 个月');
+    check('F15 isSameInstant 同刻判定', isSameInstant(d('2026-03-01'), new Date('2026-03-01T00:00:00')) === true);
+    check('F15 isSameInstant 不同刻判定', isSameInstant(d('2026-03-01'), d('2026-03-02')) === false);
+    check('F15 toDateOrNull 支持时间戳', fmt(toDateOrNull(d('2026-05-06').getTime())) === '2026-05-06');
+
+    // 组件语义：自动预填 / 手动改后不覆盖 / 清空重填 / 来源清空清值
+    const fields = [
+      { fieldId: 'fStart', fieldName: '合同起始日', fieldType: FieldType.DateTime, visible: true, required: false },
+      {
+        fieldId: 'fEnd', fieldName: '合同到期日', fieldType: FieldType.DateTime, visible: true, required: false,
+        dateAutoFill: plus1y,
+      },
+    ];
+    const manual = new Set();
+    const auto = new Set();
+    const keyOf = (fid) => `main:${fid}`;
+
+    const v0 = { fStart: d('2026-03-01') };
+    const n1 = applyAutoFill(fields, v0, manual, auto, keyOf);
+    check('F15 来源有值时自动预填', n1 && fmt(n1.fEnd) === '2027-03-01', n1 && fmt(n1.fEnd));
+    check('F15 预填后标记为自动值', auto.has('main:fEnd'));
+    check('F15 值已正确时不重复写入', applyAutoFill(fields, n1, manual, auto, keyOf) === null);
+
+    const v2 = { ...n1, fStart: d('2027-05-06') };
+    const n2 = applyAutoFill(fields, v2, manual, auto, keyOf);
+    check('F15 未手动改过时来源变化会重算', n2 && fmt(n2.fEnd) === '2028-05-06', n2 && fmt(n2.fEnd));
+
+    const userEdited = { ...n2, fEnd: d('2027-12-31') };
+    markManualEdits(fields, n2, userEdited, manual, auto, keyOf);
+    check('F15 用户手动改后进入 manual', manual.has('main:fEnd'));
+    const v3 = { ...userEdited, fStart: d('2029-01-01') };
+    check(
+      'F15 手动改过后不再被覆盖',
+      applyAutoFill(fields, v3, manual, auto, keyOf) === null && fmt(v3.fEnd) === '2027-12-31',
+      fmt(v3.fEnd)
+    );
+
+    const cleared = { ...v3, fEnd: undefined };
+    markManualEdits(fields, v3, cleared, manual, auto, keyOf);
+    check('F15 清空目标字段撤销手动标记', !manual.has('main:fEnd'));
+    const n4 = applyAutoFill(fields, cleared, manual, auto, keyOf);
+    check('F15 清空后重新自动预填', n4 && fmt(n4.fEnd) === '2030-01-01', n4 && fmt(n4.fEnd));
+
+    const noSrc = { ...n4, fStart: undefined };
+    const n5 = applyAutoFill(fields, noSrc, manual, auto, keyOf);
+    check('F15 来源清空后清掉自动值', n5 && n5.fEnd === undefined, n5 && fmt(n5.fEnd));
+  }
+
+  // —— F16：唯一性校验（提交时查重：表内已有值 + 本次多行互查 + 权限失败不静默放行）——
+  {
+    const NO_PERM = 'tblNoPerm';
+    // 分页 mock：第 1 页 2 条 + hasMore，第 2 页 2 条（含跨页重复值）
+    const page1 = [{ fields: { fldM1: '已存在A' } }, { fields: { fldM1: '已存在B' } }];
+    const page2 = [{ fields: { fldM1: '跨页值C' } }, { fields: { fldM1: '已存在A' } }];
+    let readCalls = 0;
+    const dupBase = {
+      getTableById: async (id) => {
+        if (id === NO_PERM) throw new Error('permission denied: no access to this table');
+        return {
+          getRecords: async ({ pageToken } = {}) => {
+            readCalls += 1;
+            if (id === MAIN) {
+              if (!pageToken) return { records: page1, hasMore: true, pageToken: 'tok2' };
+              return { records: page2, hasMore: false };
+            }
+            return { records: [], hasMore: false };
+          },
+        };
+      },
+      getTableMetaList: async () => [{ id: MAIN, name: '主表' }],
+    };
+    selectBaseForTest({ base: dupBase });
+    // 唯一性校验现在有模块级缓存，测试之间必须显式清空，否则会命中上一个用例的缓存
+    invalidateExistingCache();
+
+    const emptyCond = {
+      hiddenFields: {}, forcedRequired: {}, forcedUnrequired: {},
+      rowHiddenFields: {}, rowForcedRequired: {}, rowForcedUnrequired: {},
+    };
+    const cfgDup = {
+      id: 'f1', version: '1.0.0', formTitle: '查重',
+      mainTable: {
+        tableId: MAIN, tableName: '主表',
+        fields: [
+          { fieldId: 'fldM1', fieldName: '合同号', fieldType: FieldType.Text, visible: true, required: false, unique: { enabled: true } },
+          { fieldId: 'fldM2', fieldName: '备注', fieldType: FieldType.Text, visible: true, required: false },
+        ],
+      },
+      subTables: [
+        {
+          tableId: SUB1, tableName: '子表1', linkFieldId: 'fldLink1',
+          fields: [
+            { fieldId: 'fldS1', fieldName: '子编号', fieldType: FieldType.Text, visible: true, required: false, unique: { enabled: true } },
+          ],
+          allowMultiple: true,
+        },
+      ],
+      conditionalRules: [],
+    };
+
+    const r1 = await checkDuplicates(cfgDup, { fldM1: '已存在A' }, { [SUB1]: [{}] }, emptyCond);
+    check('F16 与表内已有数据重复被拦截', r1.errors.length === 1 && r1.errors[0].fieldId === 'fldM1', r1.errors);
+
+    const r2 = await checkDuplicates(cfgDup, { fldM1: '  已存在a  ' }, { [SUB1]: [{}] }, emptyCond);
+    check('F16 忽略大小写与首尾空格后仍判重', r2.errors.length === 1, r2.errors);
+
+    const r3 = await checkDuplicates(cfgDup, { fldM1: 'NEW-001' }, { [SUB1]: [{}] }, emptyCond);
+    check('F16 未重复的值放行', r3.errors.length === 0 && r3.failures.length === 0, r3);
+
+    const r4 = await checkDuplicates(cfgDup, { fldM2: '已存在A' }, { [SUB1]: [{}] }, emptyCond);
+    check('F16 未开启查重的字段不校验', r4.errors.length === 0, r4.errors);
+
+    const r5 = await checkDuplicates(
+      cfgDup,
+      { fldM1: 'NEW-002' },
+      { [SUB1]: [{ fldS1: 'X-1' }, { fldS1: 'X-1' }, { fldS1: 'X-2' }] },
+      emptyCond
+    );
+    check(
+      'F16 子表本次提交多行互查（第 2 行报重复）',
+      r5.errors.length === 1 && r5.errors[0].rowIndex === 1 && /第 1 条/.test(r5.errors[0].message),
+      r5.errors
+    );
+
+    const cfgNoPerm = { ...cfgDup, mainTable: { ...cfgDup.mainTable, tableId: NO_PERM } };
+    const r6 = await checkDuplicates(cfgNoPerm, { fldM1: 'ANY' }, { [SUB1]: [{}] }, emptyCond);
+    check('F16 读取已有数据失败时不静默放行', r6.failures.length === 1 && r6.errors.length === 0, r6);
+    check(
+      'F16 失败原因带权限分类提示',
+      /权限/.test(r6.failures[0]?.reason ?? ''),
+      r6.failures[0]?.reason
+    );
+
+    check('F16 归一化：去空格转小写', normalizeForCompare('  ABC ') === 'abc');
+    check('F16 归一化：数字', normalizeForCompare(123) === '123');
+    check('F16 归一化：取对象 text', normalizeForCompare({ text: ' Hello ' }) === 'hello');
+
+    // —— 失焦实时校验（checkOneValue）：分页全量 + 缓存复用 + 提交后并入 ——
+    invalidateExistingCache();
+    readCalls = 0;
+
+    const c1 = await checkOneValue(MAIN, 'fldM1', '跨页值C');
+    check('F16 失焦校验命中第 2 页数据（分页全量）', c1.status === 'dup', c1);
+    check('F16 全量拉取确实翻了 2 页', readCalls === 2, readCalls);
+
+    const c2 = await checkOneValue(MAIN, 'fldM1', '已存在B');
+    check('F16 失焦校验命中第 1 页数据', c2.status === 'dup', c2);
+
+    const c3 = await checkOneValue(MAIN, 'fldM1', 'BRAND-NEW');
+    check('F16 新值提示可用', c3.status === 'ok' && c3.message === '可用', c3);
+    check('F16 缓存复用：后续校验不再拉表', readCalls === 2, readCalls);
+
+    const c4 = await checkOneValue(MAIN, 'fldM1', '');
+    check('F16 空值不提示也不判重', c4.status === 'ok' && c4.message === '', c4);
+
+    const c5 = await checkOneValue(NO_PERM, 'fldM1', 'ANY');
+    check('F16 无权限时返回 error 且不静默放行', c5.status === 'error' && /权限/.test(c5.detail ?? ''), c5);
+
+    // 提交成功后把新值并入缓存 → 再填相同值应判重（否则同会话内可重复提交）
+    noteSubmittedValues(MAIN, 'fldM1', ['BRAND-NEW']);
+    const c6 = await checkOneValue(MAIN, 'fldM1', 'BRAND-NEW');
+    check('F16 提交后并入缓存：相同值再填即判重', c6.status === 'dup', c6);
+
+    // 缓存失效后重新全量拉取
+    invalidateExistingCache(MAIN, 'fldM1');
+    readCalls = 0;
+    await loadAllExistingValues(MAIN, 'fldM1');
+    check('F16 失效缓存后重新分页全量拉取', readCalls === 2, readCalls);
+
+    // 截断保护：记录数超过上限时返回 truncated（用极小上限无法改常量，此处验证字段存在且不误判）
+    const set = await loadAllExistingValues(MAIN, 'fldM1');
+    check('F16 全量结果带扫描条数与去重值', set.scanned === 4 && set.values.size === 3, {
+      scanned: set.scanned,
+      size: set.values.size,
+    });
+  }
+
+  // —— F17：新配置的持久化往返 + 权限错误分类（发布后功能不失效的防线）——
+  {
+    const dateFill = { sourceFieldId: 'fldStart', direction: 'plus', amount: 1, unit: 'year' };
+    const cfg = {
+      id: 'form1', version: '1.0.0', formTitle: '新功能持久化',
+      mainTable: {
+        tableId: MAIN, tableName: '主表',
+        fields: [
+          { fieldId: 'fldM1', fieldName: '合同号', fieldType: FieldType.Text, visible: true, required: true, unique: { enabled: true } },
+          { fieldId: 'fldStart', fieldName: '起始日', fieldType: FieldType.DateTime, visible: true, required: false },
+          { fieldId: 'fldEnd', fieldName: '到期日', fieldType: FieldType.DateTime, visible: true, required: false, dateAutoFill: dateFill },
+        ],
+      },
+      subTables: [],
+      conditionalRules: [],
+    };
+    const thin = serializeConfig({ forms: [cfg], defaultFormId: 'form1' });
+    const stored = JSON.parse(JSON.stringify(thin));
+    const f1 = stored.forms[0].mainTable.fields.find((f) => f.fieldId === 'fldM1');
+    const f3 = stored.forms[0].mainTable.fields.find((f) => f.fieldId === 'fldEnd');
+    check('F17 序列化保留 unique（否则发布后配置静默丢失）', JSON.stringify(f1?.unique) === JSON.stringify({ enabled: true }), f1);
+    check('F17 序列化保留 dateAutoFill', JSON.stringify(f3?.dateAutoFill) === JSON.stringify(dateFill), f3);
+
+    const metaBase = {
+      getTableById: async () => ({
+        getFieldMetaList: async () => [
+          { id: 'fldM1', name: '合同号', type: FieldType.Text },
+          { id: 'fldStart', name: '起始日', type: FieldType.DateTime },
+          { id: 'fldEnd', name: '到期日', type: FieldType.DateTime },
+        ],
+      }),
+      getTableMetaList: async () => [{ id: MAIN, name: '主表' }],
+    };
+    selectBaseForTest({ base: metaBase });
+    const hydrated = await hydrateConfig(stored);
+    const h1 = hydrated.forms[0].mainTable.fields.find((f) => f.fieldId === 'fldM1');
+    const h3 = hydrated.forms[0].mainTable.fields.find((f) => f.fieldId === 'fldEnd');
+    check('F17 hydrate 后 unique 保留', h1?.unique?.enabled === true, h1);
+    check('F17 hydrate 后 dateAutoFill 保留', JSON.stringify(h3?.dateAutoFill) === JSON.stringify(dateFill), h3);
+    check('F17 hydrate 后日期字段类型恢复', h3?.fieldType === FieldType.DateTime, h3);
+
+    const ePerm = classifySdkError(new Error('permission denied'), '源数据表');
+    check('F17 权限错误分类', ePerm.kind === 'permission' && /权限/.test(ePerm.title), ePerm);
+    const eMissing = classifySdkError(new Error('table not found'), '源数据表');
+    check('F17 目标不存在分类', eMissing.kind === 'notfound', eMissing);
+    const eOther = classifySdkError(new Error('network timeout'), '源数据表');
+    check('F17 未知错误兜底', eOther.kind === 'unknown', eOther);
+    const eZh = classifySdkError(new Error('没有权限访问该数据表'), '源数据表');
+    check('F17 中文权限错误也能识别', eZh.kind === 'permission', eZh);
   }
 
   const failed = results.filter((r) => !r.pass);

@@ -49,6 +49,33 @@ export interface OptionReference {
   conditions: OptionRefCondition[];
 }
 
+/**
+ * 唯一性校验配置（提交时与数据表内已有数据比对）。
+ * 仅对「可转为文本比较的单值录入字段」开放（见 UNIQUE_CHECKABLE_TYPES）。
+ */
+export interface UniqueConfig {
+  /** 是否开启查重 */
+  enabled: boolean;
+  /** 重复时的提示文案（可选，缺省用默认文案） */
+  message?: string;
+}
+
+/**
+ * 日期联动预填配置：挂在「目标日期字段」上。
+ * 例：合同到期日配置 { sourceFieldId: 合同起始日, direction: plus, amount: 1, unit: year }
+ *     → 选了起始日后自动预填 +1 年，用户仍可手动改（改后不再被覆盖）。
+ */
+export interface DateAutoFillConfig {
+  /** 来源日期字段 ID（同一区块内的日期字段：主表→主表字段，子表→同行字段） */
+  sourceFieldId: string;
+  /** 方向：plus=之后，minus=之前 */
+  direction: 'plus' | 'minus';
+  /** 偏移量（非负整数） */
+  amount: number;
+  /** 偏移单位 */
+  unit: 'day' | 'month' | 'year';
+}
+
 /** 单个字段在表单中的配置 */
 export interface FieldConfig {
   fieldId: string;
@@ -72,7 +99,24 @@ export interface FieldConfig {
   linkTableId?: string;
   /** 选项引用（仅单选/多选）：配置后忽略固定 options，改为从源表动态取选项 */
   optionRef?: OptionReference;
+  /** 唯一性校验（提交时查重；仅 UNIQUE_CHECKABLE_TYPES 开放的字段类型生效） */
+  unique?: UniqueConfig;
+  /** 日期联动预填（仅日期字段，挂在被预填的目标字段上） */
+  dateAutoFill?: DateAutoFillConfig;
 }
+
+/**
+ * 支持「唯一性校验」的字段类型：可转为文本做相等比较的单值录入字段。
+ * 不含多选/附件/人员等结构复杂或多值字段（其单元格不是单一文本，比较语义不明确）。
+ */
+export const UNIQUE_CHECKABLE_TYPES: FieldType[] = [
+  FieldType.Text,
+  FieldType.Phone,
+  FieldType.Email,
+  FieldType.Url,
+  FieldType.Number,
+  FieldType.Currency,
+];
 
 /** 子表配置 */
 export interface SubTableConfig {
@@ -189,6 +233,16 @@ export interface PluginData {
    * 旧版配置无此字段视为本 base 配置，放行兼容。
    */
   baseId?: string;
+}
+
+/** 字段级唯一性校验的实时状态（失焦校验的结果，供输入框右侧展示） */
+export interface UniqueFieldState {
+  /** checking=校验中；ok=无重复；dup=已存在；error=无法校验（多为权限不足） */
+  status: 'checking' | 'ok' | 'dup' | 'error';
+  /** 展示文案（如「已存在，请更换」） */
+  message?: string;
+  /** error 状态下的详细原因 */
+  detail?: string;
 }
 
 /** 生成唯一 ID（优先 crypto.randomUUID，回退时间戳+随机） */

@@ -1,8 +1,9 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Select, Typography } from '@douyinfe/semi-ui';
-import { getBase } from '../../services/appContext';
+import { getBase, getBaseToken } from '../../services/appContext';
 import { FieldConfig, FormValues } from '../../types';
 import { hasOptionRef, resolveRefOptions, SourceRecordLite } from '../../utils/optionRef';
+import { classifySdkError, ClassifiedError } from '../../utils/permError';
 import { fuzzyOptionFilter } from './fuzzyOptionFilter';
 
 interface Props {
@@ -34,6 +35,7 @@ export function RefOptionSelect({ field, value, onChange, disabled, multiple, fo
   const [records, setRecords] = useState<SourceRecordLite[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [errorHelp, setErrorHelp] = useState<ClassifiedError | null>(null);
 
   useEffect(() => {
     if (!refOk) {
@@ -44,6 +46,7 @@ export function RefOptionSelect({ field, value, onChange, disabled, multiple, fo
     (async () => {
       setLoading(true);
       setError('');
+      setErrorHelp(null);
       try {
         const table = await getBase().getTableById(ref!.tableId);
         const list: SourceRecordLite[] = [];
@@ -59,9 +62,33 @@ export function RefOptionSelect({ field, value, onChange, disabled, multiple, fo
           }
           pageToken = res.hasMore ? (res.pageToken as string | undefined) : undefined;
         } while (pageToken && list.length < MAX_RECORDS);
+        if (list.length >= MAX_RECORDS) {
+          console.warn(
+            `[optionRef] 源表记录超过 ${MAX_RECORDS} 条，只加载前 ${MAX_RECORDS} 条，选项可能不完整`
+          );
+        }
         if (alive) setRecords(list);
       } catch (e) {
-        if (alive) setError(`加载引用源表记录失败：${(e as Error)?.message ?? String(e)}`);
+        // ★ 诊断留痕：权限/表缺失是最常见的「别人打不开报错」根因，
+        //   把上下文一次性打全，用户把控制台这段回传即可定位。
+        const token = (() => {
+          try {
+            return getBaseToken() ?? '';
+          } catch {
+            return '';
+          }
+        })();
+        console.error(
+          `[optionRef] 加载引用选项失败：field="${field.label || field.fieldName}" ` +
+            `sourceTableId=${ref?.tableId} sourceFieldId=${ref?.fieldId} ` +
+            `baseToken=${token ? `...${String(token).slice(-6)}` : '(无)'} ` +
+            `error=${(e as Error)?.message ?? String(e)}`
+        );
+        if (alive) {
+          const c = classifySdkError(e, '引用选项的源数据表');
+          setError(c.title);
+          setErrorHelp(c);
+        }
       } finally {
         if (alive) setLoading(false);
       }
@@ -87,7 +114,22 @@ export function RefOptionSelect({ field, value, onChange, disabled, multiple, fo
     return <Typography.Text type="warning">引用选项未配置完整，请重新编辑该字段的配置</Typography.Text>;
   }
   if (error) {
-    return <Typography.Text type="warning">{error}</Typography.Text>;
+    return (
+      <div
+        style={{
+          padding: '8px 10px',
+          border: '1px solid #fdba74',
+          background: '#fff7ed',
+          borderRadius: 6,
+          fontSize: 12,
+          lineHeight: 1.7,
+          color: '#9a3412',
+        }}
+      >
+        <div>⚠️ {error}</div>
+        {errorHelp?.action && <div style={{ marginTop: 2 }}>{errorHelp.action}</div>}
+      </div>
+    );
   }
 
   return (

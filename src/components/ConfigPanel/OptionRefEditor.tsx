@@ -225,6 +225,9 @@ export function OptionRefEditor({ visible, field, siblingFields, onCancel, onSav
           <Typography.Text type="tertiary" size="small" style={{ display: 'block' }}>
             启用后，字段原有的固定选项不再使用；条件选「表单字段」时，
             选项会随该字段的填写值实时过滤（如「省-市」级联）。
+            <br />
+            ⚠️ 发布后所有填写者都要能查看源数据表，否则他们看不到选项（插件以各自的账号权限读取）；
+            源表记录超过 2000 条时只取前 2000 条。
           </Typography.Text>
         </>
       ) : (
