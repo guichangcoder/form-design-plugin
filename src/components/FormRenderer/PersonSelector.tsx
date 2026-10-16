@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Select, Tag, Space, Typography } from '@douyinfe/semi-ui';
 import { getBase, getBridge } from '../../services/appContext';
 import { fuzzyOptionFilter } from './fuzzyOptionFilter';
@@ -17,6 +17,8 @@ interface Props {
   /** 字段所在表 ID（用于读取该字段已有人员作为候选） */
   tableId: string;
   fieldId: string;
+  /** 配置态预览：完全不加载数据 */
+  preview?: boolean;
 }
 
 interface Candidate extends BitableUser {
@@ -32,12 +34,34 @@ interface Candidate extends BitableUser {
  *   2) 始终提供「当前用户」选项（getUserId）。
  * 写入时按 IOpenUser 结构传 { id, name? }，由飞书解析展示名。
  */
-export function PersonSelector({ value, onChange, disabled, tableId, fieldId }: Props) {
+export function PersonSelector({ value, onChange, disabled, tableId, fieldId, preview }: Props) {
   const [candidates, setCandidates] = useState<Candidate[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
+  const [opened, setOpened] = useState(false);
+  const meRef = useRef<BitableUser | null>(null);
 
+  // 1) 打开即取「当前用户」（一次极轻调用，保证不开下拉也能选到自己）
   useEffect(() => {
+    if (preview) return;
     let alive = true;
+    (async () => {
+      try {
+        const meId = await getBridge().getUserId();
+        if (meId && alive) meRef.current = { id: meId, name: undefined };
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [preview]);
+
+  // 2) ★ 懒加载：下拉展开时才读「本字段历史人员」（去重候选），避免打开表单就拉整列。
+  useEffect(() => {
+    if (preview || !opened) return;
+    let alive = true;
+    setLoading(true);
     (async () => {
       const list: Candidate[] = [];
       const seen = new Set<string>();
@@ -48,9 +72,9 @@ export function PersonSelector({ value, onChange, disabled, tableId, fieldId }: 
         }
       };
 
-      // 1) 读取本字段历史人员（去重）。
-      //    优先分页取前列数据（候选人员是去重后的，前 1000 行足够覆盖团队），
-      //    避免在几万行的大表上用 getFieldValueList 整列拉取导致打开表单卡顿。
+      // 读取本字段历史人员（去重）。
+      // 优先分页取前列数据（候选人员是去重后的，前 1000 行足够覆盖团队），
+      // 避免在几万行的大表上用 getFieldValueList 整列拉取导致打开表单卡顿。
       try {
         const table = await getBase().getTableById(tableId);
         const field: any = await table.getField(fieldId);
@@ -83,15 +107,7 @@ export function PersonSelector({ value, onChange, disabled, tableId, fieldId }: 
       }
 
       // 2) 始终提供「当前用户」（不预置 name，让飞书按 open_id 解析真实名称）
-      try {
-        const meId = await getBridge().getUserId();
-        if (meId && !seen.has(meId)) {
-          seen.add(meId);
-          list.unshift({ id: meId, name: undefined, _label: '当前用户' });
-        }
-      } catch {
-        /* ignore */
-      }
+      if (meRef.current) push(meRef.current);
 
       if (alive) {
         setCandidates(list);
@@ -101,7 +117,19 @@ export function PersonSelector({ value, onChange, disabled, tableId, fieldId }: 
     return () => {
       alive = false;
     };
-  }, [tableId, fieldId]);
+  }, [tableId, fieldId, opened, preview]);
+
+  /** 下拉展开时才加载（懒加载入口）；同时保证「当前用户」始终在候选里 */
+  const ensureOpened = () => {
+    if (opened) return;
+    setOpened(true);
+    if (meRef.current && !candidates.some((c) => c.id === meRef.current!.id)) {
+      setCandidates((list) => [
+        { id: meRef.current!.id, name: undefined, _label: '当前用户' },
+        ...list,
+      ]);
+    }
+  };
 
   const labelMap = useMemo(() => {
     const map = new Map<string, string>();
@@ -152,11 +180,18 @@ export function PersonSelector({ value, onChange, disabled, tableId, fieldId }: 
         filter={fuzzyOptionFilter}
         disabled={disabled}
         loading={loading}
-        placeholder={loading ? '正在加载人员列表…' : '搜索并选择人员'}
+        onDropdownVisibleChange={(v: boolean) => v && ensureOpened()}
+        placeholder={opened ? '搜索并选择人员' : '点击展开以加载人员列表（下拉时才加载）'}
         value={selectedIds}
         onChange={(ids) => apply((ids as string[]) ?? [])}
         optionList={candidates.map((c) => ({ value: c.id, label: c._label }))}
-        emptyContent={loading ? '加载中…' : '暂无可选人员（填写后历史人员会自动出现）'}
+        emptyContent={
+          loading
+            ? '加载中…'
+            : opened
+              ? '暂无可选人员（填写后历史人员会自动出现）'
+              : '点击展开后将加载人员（含「当前用户」）'
+        }
       />
     </div>
   );

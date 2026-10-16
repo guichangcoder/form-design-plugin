@@ -1,10 +1,17 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Select, Typography } from '@douyinfe/semi-ui';
-import { getBase, getBaseToken } from '../../services/appContext';
+import { getBaseToken } from '../../services/appContext';
 import { FieldConfig, FormValues } from '../../types';
-import { hasOptionRef, resolveRefOptions, SourceRecordLite } from '../../utils/optionRef';
+import { hasOptionRef, resolveRefOptions } from '../../utils/optionRef';
 import { classifySdkError, ClassifiedError } from '../../utils/permError';
 import { fuzzyOptionFilter } from './fuzzyOptionFilter';
+import {
+  loadTableRows,
+  subscribeProgress,
+  getLoaded,
+  LoadProgress,
+  FullRow,
+} from '../../services/tableRecordCache';
 
 interface Props {
   /** 含完整 optionRef 的字段配置 */
@@ -16,89 +23,77 @@ interface Props {
   multiple?: boolean;
   /** 当前记录（主表值 / 子表当前行值）：联动条件据此实时过滤 */
   formValues: FormValues;
+  /** 配置态预览：完全不加载数据 */
+  preview?: boolean;
 }
-
-/** 源表记录加载上限（分页拉取，防止超大表拖垮面板） */
-const MAX_RECORDS = 2000;
-const PAGE_SIZE = 200; // SDK 单次上限就是 200，传更大值非法
 
 /**
  * 引用选项选择器（参考多维表格原生「引用选项」）：
- * - 选项 = 源表取值字段的记录值（去重），从源表分页加载后内存过滤；
- * - 引用条件全部满足的记录才纳入；条件引用当前记录其他字段时，
- *   随该字段值实时重筛（省-市级联；父字段未选则无选项）；
- * - 源表记录只加载一次，联动变化不重复拉表。
+ * - 选项 = 源表取值字段的记录值（去重）；
+ * - **懒加载**：下拉展开才启动加载；**全量加载**：分页翻到底，不再 2000 条截断；
+ * - **渐进式**：先出已加载部分并显示进度，后台继续翻页；
+ * - 联动条件引用当前记录其他字段时，随该字段值实时重筛（省-市级联；父字段未选则无选项）；
+ * - 权限：以当前打开者身份读源表，服务端只返回其有权限的记录。
  */
-export function RefOptionSelect({ field, value, onChange, disabled, multiple, formValues }: Props) {
+export function RefOptionSelect({
+  field,
+  value,
+  onChange,
+  disabled,
+  multiple,
+  formValues,
+  preview,
+}: Props) {
   const ref = field.optionRef;
   const refOk = hasOptionRef(field);
-  const [records, setRecords] = useState<SourceRecordLite[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [records, setRecords] = useState<FullRow[]>([]);
+  const [progress, setProgress] = useState<LoadProgress | null>(null);
   const [error, setError] = useState('');
   const [errorHelp, setErrorHelp] = useState<ClassifiedError | null>(null);
+  const [opened, setOpened] = useState(false);
+  const openedRef = useRef(false);
 
   useEffect(() => {
-    if (!refOk) {
-      setLoading(false);
-      return;
-    }
+    if (preview || !refOk || !ref?.tableId) return;
+    const key = `row:${ref.tableId}`;
+    // 命中缓存（本会话里别的同源字段已拉过）→ 直接可用，无需展开
+    const cached = getLoaded<FullRow>(key);
+    if (cached) setRecords(cached);
+    // ★ 懒加载：只有下拉展开过才真正启动加载
+    if (!opened) return;
     let alive = true;
-    (async () => {
-      setLoading(true);
-      setError('');
-      setErrorHelp(null);
-      try {
-        const table = await getBase().getTableById(ref!.tableId);
-        const list: SourceRecordLite[] = [];
-        let pageToken: string | undefined;
-        do {
-          const res = await table.getRecords({
-            pageSize: PAGE_SIZE,
-            ...(pageToken ? { pageToken: pageToken as any } : {}),
-          });
-          for (const rec of res.records ?? []) {
-            list.push({ fields: (rec.fields ?? {}) as Record<string, unknown> });
-            if (list.length >= MAX_RECORDS) break;
-          }
-          pageToken = res.hasMore ? (res.pageToken as string | undefined) : undefined;
-        } while (pageToken && list.length < MAX_RECORDS);
-        if (list.length >= MAX_RECORDS) {
-          console.warn(
-            `[optionRef] 源表记录超过 ${MAX_RECORDS} 条，只加载前 ${MAX_RECORDS} 条，选项可能不完整`
-          );
-        }
-        if (alive) setRecords(list);
-      } catch (e) {
-        // ★ 诊断留痕：权限/表缺失是最常见的「别人打不开报错」根因，
-        //   把上下文一次性打全，用户把控制台这段回传即可定位。
-        const token = (() => {
-          try {
-            return getBaseToken() ?? '';
-          } catch {
-            return '';
-          }
-        })();
+    loadTableRows(ref.tableId, { label: ref.tableId });
+    const apply = (data: FullRow[]) => {
+      if (alive) setRecords(data);
+    };
+    const unsub = subscribeProgress<FullRow>(key, (p, data) => {
+      if (!alive) return;
+      setProgress(p);
+      apply(data);
+      if (p.error) {
         console.error(
           `[optionRef] 加载引用选项失败：field="${field.label || field.fieldName}" ` +
             `sourceTableId=${ref?.tableId} sourceFieldId=${ref?.fieldId} ` +
-            `baseToken=${token ? `...${String(token).slice(-6)}` : '(无)'} ` +
-            `error=${(e as Error)?.message ?? String(e)}`
+            `baseToken=${(() => {
+              try {
+                const tok = getBaseToken();
+                return tok ? `...${String(tok).slice(-6)}` : '(无)';
+              } catch {
+                return '(无)';
+              }
+            })()} error=${p.error}`
         );
-        if (alive) {
-          const c = classifySdkError(e, '引用选项的源数据表');
-          setError(c.title);
-          setErrorHelp(c);
-        }
-      } finally {
-        if (alive) setLoading(false);
+        const c = classifySdkError(new Error(p.error), '引用选项的源数据表');
+        setError(c.title);
+        setErrorHelp(c);
       }
-    })();
+    });
     return () => {
       alive = false;
+      unsub();
     };
-    // 源表/源字段/静态条件变化才重拉；联动过滤走 useMemo 内存计算
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [refOk, ref?.tableId, ref?.fieldId, JSON.stringify(ref?.conditions)]);
+  }, [preview, refOk, ref?.tableId, ref?.fieldId, opened]);
 
   // 联动过滤：formValues 变化时实时重筛（内存计算，不重拉表）
   const options = useMemo(
@@ -112,6 +107,15 @@ export function RefOptionSelect({ field, value, onChange, disabled, multiple, fo
 
   if (!refOk) {
     return <Typography.Text type="warning">引用选项未配置完整，请重新编辑该字段的配置</Typography.Text>;
+  }
+  if (preview) {
+    return (
+      <input
+        disabled
+        placeholder="预览模式不加载数据"
+        style={{ width: '100%', height: 32, padding: '0 10px', borderRadius: 6, border: '1px solid #e5e6eb', background: '#f7f8fa', color: '#86909c' }}
+      />
+    );
   }
   if (error) {
     return (
@@ -132,6 +136,20 @@ export function RefOptionSelect({ field, value, onChange, disabled, multiple, fo
     );
   }
 
+  const done = progress?.done;
+  const loaded = progress?.loaded ?? 0;
+  const total = progress?.total;
+  const loadingText = !progress
+    ? '正在加载引用选项…'
+    : done
+      ? total
+        ? `已加载全部 ${loaded} 条源记录`
+        : `已加载 ${loaded} 条源记录`
+      : `正在加载…已 ${loaded}${total ? ` / ${total}` : ''} 条`;
+
+  // 未展开且已有缓存：直接可用；未展开且无缓存：显示提示（点开才加载）
+  const needOpenHint = !opened && !progress;
+
   return (
     <Select
       style={{ width: '100%' }}
@@ -139,14 +157,32 @@ export function RefOptionSelect({ field, value, onChange, disabled, multiple, fo
       optionList={options}
       value={multiple ? ((value as string[]) ?? []) : ((value as string) || undefined)}
       placeholder={
-        loading
-          ? '正在加载引用选项…'
+        needOpenHint
+          ? '点击展开以加载引用选项（下拉时才加载）'
           : (field.placeholder ?? '请选择（输入可搜索）')
       }
       disabled={disabled}
-      loading={loading}
+      loading={!done && opened}
       filter={fuzzyOptionFilter}
-      emptyContent={loading ? '加载中…' : '无满足条件的引用选项'}
+      onDropdownVisibleChange={(v: boolean) => {
+        if (v && !openedRef.current) {
+          openedRef.current = true;
+          setOpened(true);
+        }
+      }}
+      emptyContent={
+        needOpenHint
+          ? '点击展开后将加载引用选项'
+          : done
+            ? '无满足条件的引用选项'
+            : '加载中…'
+      }
+      virtualize={{ itemSize: 32 }}
+      outerBottomSlot={
+        opened ? (
+          <div style={{ padding: '6px 12px', fontSize: 12, color: '#86909c' }}>{loadingText}</div>
+        ) : undefined
+      }
       onChange={(v: any) => onChange(v)}
     />
   );

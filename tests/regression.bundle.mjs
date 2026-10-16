@@ -30624,6 +30624,224 @@ async function checkDuplicates(config, mainValues, subValues, cond) {
   return { errors, failures };
 }
 
+// src/services/tableRecordCache.ts
+var PAGE_SIZE2 = 200;
+var DEFAULT_MAX_RECORDS = 2e5;
+var MAX_PAGES = 3e3;
+var tasks = /* @__PURE__ */ new Map();
+function taskKey(tableId, kind, fieldId) {
+  return fieldId ? `${kind}:${tableId}:${fieldId}` : `${kind}:${tableId}`;
+}
+function snapshot(t3) {
+  return {
+    loaded: t3.loaded,
+    total: t3.total,
+    done: t3.done,
+    truncated: t3.truncated,
+    error: t3.error
+  };
+}
+function notify(t3) {
+  const s = snapshot(t3);
+  t3.subscribers.forEach((cb) => {
+    try {
+      cb(s, t3.data);
+    } catch {
+    }
+  });
+}
+function subscribeProgress(key, cb) {
+  const t3 = tasks.get(key);
+  if (!t3) return () => {
+  };
+  cb(snapshot(t3), t3.data);
+  t3.subscribers.add(cb);
+  return () => {
+    t3.subscribers.delete(cb);
+  };
+}
+function getLoaded(key) {
+  const t3 = tasks.get(key);
+  return t3 && t3.done && !t3.error ? t3.data : void 0;
+}
+function invalidateTableRecords(tableId) {
+  if (!tableId) {
+    tasks.clear();
+    return;
+  }
+  for (const k12 of [...tasks.keys()]) {
+    if (k12.split(":").includes(tableId)) tasks.delete(k12);
+  }
+}
+async function runFieldColumn(t3, tableId, fieldId, maxRecords, label) {
+  try {
+    const table = await getBase().getTableById(tableId);
+    const field = await table.getField(fieldId);
+    if (typeof field?.getFieldValueListByPage === "function") {
+      let token;
+      let guard = 0;
+      for (; ; ) {
+        const res = await field.getFieldValueListByPage({
+          pageSize: PAGE_SIZE2,
+          stringValue: true,
+          ...token !== void 0 ? { pageToken: token } : {}
+        });
+        if (typeof res?.total === "number") t3.total = res.total;
+        for (const fv2 of res?.fieldValues ?? []) {
+          t3.data.push({ recordId: fv2.recordId, text: stringifyCellValue(fv2.value) });
+          t3.loaded += 1;
+          if (t3.loaded >= maxRecords) {
+            t3.truncated = true;
+            break;
+          }
+        }
+        notify(t3);
+        if (t3.truncated) break;
+        guard += 1;
+        const next = res?.hasMore ? res?.pageToken : void 0;
+        if (next === void 0 || next === token || guard > MAX_PAGES) break;
+        token = next;
+      }
+    } else {
+      const useByPage = typeof table.getRecordsByPage === "function";
+      let token;
+      let guard = 0;
+      for (; ; ) {
+        const params = {
+          pageSize: PAGE_SIZE2,
+          ...token !== void 0 ? { pageToken: token } : {}
+        };
+        const res = useByPage ? await table.getRecordsByPage(params) : await table.getRecords(params);
+        if (typeof res?.total === "number") t3.total = res.total;
+        for (const rec of res?.records ?? []) {
+          t3.data.push({
+            recordId: rec.recordId,
+            text: stringifyCellValue((rec.fields ?? {})[fieldId])
+          });
+          t3.loaded += 1;
+          if (t3.loaded >= maxRecords) {
+            t3.truncated = true;
+            break;
+          }
+        }
+        notify(t3);
+        if (t3.truncated) break;
+        guard += 1;
+        const next = res?.hasMore ? res?.pageToken : void 0;
+        if (next === void 0 || next === token || guard > MAX_PAGES) break;
+        token = next;
+      }
+    }
+  } catch (e11) {
+    t3.error = e11?.message ?? String(e11);
+    console.warn(`[tableRecords] \u52A0\u8F7D\u6574\u5217\u5931\u8D25\uFF1A\u8868=${tableId} \u5B57\u6BB5=${label ?? fieldId} \u9519\u8BEF=${t3.error}`);
+  } finally {
+    t3.done = true;
+    notify(t3);
+  }
+  return t3.data;
+}
+function loadFieldColumn(tableId, fieldId, opts) {
+  const key = taskKey(tableId, "col", fieldId);
+  if (opts?.force) tasks.delete(key);
+  let t3 = tasks.get(key);
+  if (!t3) {
+    t3 = {
+      key,
+      data: [],
+      loaded: 0,
+      done: false,
+      truncated: false,
+      subscribers: /* @__PURE__ */ new Set()
+    };
+    tasks.set(key, t3);
+    t3.promise = runFieldColumn(t3, tableId, fieldId, opts?.maxRecords ?? DEFAULT_MAX_RECORDS, opts?.label);
+  }
+  return { key, promise: t3.promise };
+}
+async function runTableRows(t3, tableId, maxRecords, label) {
+  try {
+    const table = await getBase().getTableById(tableId);
+    const useByPage = typeof table.getRecordsByPage === "function";
+    let token;
+    let guard = 0;
+    for (; ; ) {
+      const params = {
+        pageSize: PAGE_SIZE2,
+        ...token !== void 0 ? { pageToken: token } : {}
+      };
+      const res = useByPage ? await table.getRecordsByPage(params) : await table.getRecords(params);
+      if (typeof res?.total === "number") t3.total = res.total;
+      for (const rec of res?.records ?? []) {
+        t3.data.push({ recordId: rec.recordId, fields: rec.fields ?? {} });
+        t3.loaded += 1;
+        if (t3.loaded >= maxRecords) {
+          t3.truncated = true;
+          break;
+        }
+      }
+      notify(t3);
+      if (t3.truncated) break;
+      guard += 1;
+      const next = res?.hasMore ? res?.pageToken : void 0;
+      if (next === void 0 || next === token || guard > MAX_PAGES) break;
+      token = next;
+    }
+  } catch (e11) {
+    t3.error = e11?.message ?? String(e11);
+    console.warn(`[tableRecords] \u52A0\u8F7D\u6574\u8868\u5931\u8D25\uFF1A\u8868=${label ?? tableId} \u9519\u8BEF=${t3.error}`);
+  } finally {
+    t3.done = true;
+    notify(t3);
+  }
+  return t3.data;
+}
+function loadTableRows(tableId, opts) {
+  const key = taskKey(tableId, "row");
+  if (opts?.force) tasks.delete(key);
+  let t3 = tasks.get(key);
+  if (!t3) {
+    t3 = {
+      key,
+      data: [],
+      loaded: 0,
+      done: false,
+      truncated: false,
+      subscribers: /* @__PURE__ */ new Set()
+    };
+    tasks.set(key, t3);
+    t3.promise = runTableRows(t3, tableId, opts?.maxRecords ?? DEFAULT_MAX_RECORDS, opts?.label);
+  }
+  return { key, promise: t3.promise };
+}
+async function searchRecordsByKeyword(tableId, fieldId, keyword, limit = 50) {
+  const kw2 = (keyword || "").trim();
+  if (!kw2) return [];
+  try {
+    const table = await getBase().getTableById(tableId);
+    const useByPage = typeof table.getRecordsByPage === "function";
+    const params = {
+      pageSize: Math.min(200, Math.max(PAGE_SIZE2, limit)),
+      filter: {
+        conjunction: "and",
+        conditions: [{ fieldId, operator: "contains", value: kw2 }]
+      }
+    };
+    const res = useByPage ? await table.getRecordsByPage(params) : await table.getRecords(params);
+    const records = res?.records ?? [];
+    const out = [];
+    let effective = false;
+    for (const rec of records.slice(0, limit)) {
+      const text = stringifyCellValue((rec.fields ?? {})[fieldId]);
+      if (text.toLowerCase().includes(kw2.toLowerCase())) effective = true;
+      out.push({ recordId: rec.recordId, text });
+    }
+    return effective ? out : [];
+  } catch {
+    return [];
+  }
+}
+
 // tests/regression.entry.mjs
 var results = [];
 function log(line) {
@@ -31328,6 +31546,125 @@ async function run() {
     check("F17 \u672A\u77E5\u9519\u8BEF\u515C\u5E95", eOther.kind === "unknown", eOther);
     const eZh = classifySdkError(new Error("\u6CA1\u6709\u6743\u9650\u8BBF\u95EE\u8BE5\u6570\u636E\u8868"), "\u6E90\u6570\u636E\u8868");
     check("F17 \u4E2D\u6587\u6743\u9650\u9519\u8BEF\u4E5F\u80FD\u8BC6\u522B", eZh.kind === "permission", eZh);
+  }
+  {
+    const BIG = "tblBig";
+    const COL = "fldName";
+    let pageCalls = 0;
+    let listedTotal = 0;
+    let filterCalls = 0;
+    const ALL = Array.from({ length: 450 }, (_5, i3) => `\u5BA2\u6237${i3 + 1}`);
+    ALL[433] = "\u9690\u85CF\u5728\u6DF1\u5904\u7684\u5BA2\u6237D";
+    const paginate2 = (pageToken) => {
+      pageCalls += 1;
+      const start = pageToken === void 0 ? 0 : Number(pageToken);
+      const slice = ALL.slice(start, start + 200);
+      const nextStart = start + 200;
+      const hasMore = nextStart < ALL.length;
+      return {
+        fieldValues: slice.map((t3, i3) => ({ recordId: `rec${start + i3}`, value: t3 })),
+        hasMore,
+        pageToken: hasMore ? String(nextStart) : void 0,
+        total: ALL.length
+      };
+    };
+    const bigBase = {
+      getTableById: async (id) => {
+        if (id !== BIG) return { getField: async () => null, getRecords: async () => ({ records: [], hasMore: false }) };
+        return {
+          getField: async () => ({
+            getFieldValueListByPage: async ({ pageToken, stringValue }) => {
+              if (stringValue !== true) throw new Error("\u5E94\u4F20 stringValue:true \u4EE5\u89C4\u907F\u5355\u5143\u683C\u7ED3\u6784\u5DEE\u5F02");
+              return paginate2(pageToken);
+            }
+          }),
+          // 服务端过滤（补搜用）：contains 命中
+          getRecordsByPage: async ({ filter }) => {
+            if (filter) {
+              filterCalls += 1;
+              const kw2 = String(filter.conditions?.[0]?.value ?? "");
+              const hits2 = ALL.filter((t3) => t3.includes(kw2)).slice(0, 50);
+              return {
+                records: hits2.map((t3, i3) => ({ recordId: `hit${i3}`, fields: { [COL]: t3 } })),
+                hasMore: false,
+                total: hits2.length
+              };
+            }
+            listedTotal += 1;
+            return { records: [], hasMore: false };
+          }
+        };
+      },
+      getTableMetaList: async () => [{ id: BIG, name: "\u5927\u8868" }]
+    };
+    __setAppForTest({ base: bigBase });
+    invalidateTableRecords();
+    const colTask = loadFieldColumn(BIG, COL, { label: "\u5BA2\u6237\u540D" });
+    check("F18 \u4EFB\u52A1\u952E\u6309\u300C\u5217\u300D\u7EF4\u5EA6\u751F\u6210", colTask.key === taskKey(BIG, "col", COL), colTask.key);
+    const rows = await colTask.promise;
+    check("F18 \u5168\u91CF\u52A0\u8F7D\u5230\u5E95\uFF1A450 \u6761\u5168\u90E8\u62FF\u5230", rows.length === 450, rows.length);
+    check("F18 \u5206\u9875\u786E\u5B9E\u7FFB\u4E86 3 \u9875", pageCalls === 3, pageCalls);
+    check("F18 \u6DF1\u5904\u7684\u8BB0\u5F55\u4E5F\u5728\u5019\u9009\u91CC\uFF08\u4E0D\u518D 2000 \u786C\u622A\u65AD\uFF09", rows.some((r10) => r10.text === "\u9690\u85CF\u5728\u6DF1\u5904\u7684\u5BA2\u6237D"));
+    const before = pageCalls;
+    const again = getLoaded(taskKey(BIG, "col", COL));
+    check("F18 \u7F13\u5B58\u547D\u4E2D\uFF1A\u518D\u6B21\u53D6\u7528\u4E0D\u53D1\u8BF7\u6C42", pageCalls === before && again?.length === 450, {
+      pageCalls,
+      len: again?.length
+    });
+    await loadFieldColumn(BIG, COL).promise;
+    check("F18 \u91CD\u590D\u8C03\u7528\u590D\u7528\u540C\u4E00\u4EFB\u52A1\uFF08\u4E0D\u91CD\u65B0\u62C9\uFF09", pageCalls === before, pageCalls);
+    invalidateTableRecords(BIG);
+    pageCalls = 0;
+    await loadFieldColumn(BIG, COL).promise;
+    check("F18 \u7F13\u5B58\u5931\u6548\u540E\u91CD\u65B0\u5168\u91CF\u52A0\u8F7D", pageCalls === 3, pageCalls);
+    const hits = await searchRecordsByKeyword(BIG, COL, "\u5BA2\u6237D");
+    check("F18 \u670D\u52A1\u7AEF\u8865\u641C\u547D\u4E2D\u8FDC\u7AEF\u8BB0\u5F55", hits.some((h11) => h11.text === "\u9690\u85CF\u5728\u6DF1\u5904\u7684\u5BA2\u6237D"), hits);
+    check("F18 \u8865\u641C\u786E\u5B9E\u8D70\u4E86\u670D\u52A1\u7AEF\u8FC7\u6EE4", filterCalls >= 1, filterCalls);
+    invalidateTableRecords();
+    __setAppForTest({
+      base: {
+        getTableById: async () => ({
+          getRecordsByPage: async () => ({
+            records: [{ recordId: "x", fields: { [COL]: "\u5B8C\u5168\u65E0\u5173\u7684\u503C" } }],
+            hasMore: false
+          }),
+          getField: async () => null
+        }),
+        getTableMetaList: async () => [{ id: BIG }]
+      }
+    });
+    const bogus = await searchRecordsByKeyword(BIG, COL, "\u5BA2\u6237D");
+    check("F18 \u8FC7\u6EE4\u672A\u751F\u6548\u65F6\u4E0D\u8FD4\u56DE\u4F2A\u547D\u4E2D\uFF08\u9632\u8BEF\u5224\uFF09", bogus.length === 0, bogus);
+    invalidateTableRecords();
+    __setAppForTest({
+      base: {
+        getTableById: async () => ({
+          getRecordsByPage: async ({ pageToken }) => {
+            const start = pageToken === void 0 ? 0 : Number(pageToken);
+            const slice = ALL.slice(start, start + 200);
+            const nextStart = start + 200;
+            const hasMore = nextStart < ALL.length;
+            return {
+              records: slice.map((t3, i3) => ({ recordId: `r${start + i3}`, fields: { [COL]: t3 } })),
+              hasMore,
+              pageToken: hasMore ? String(nextStart) : void 0,
+              total: ALL.length
+            };
+          },
+          getField: async () => null
+        }),
+        getTableMetaList: async () => [{ id: BIG }]
+      }
+    });
+    const seen = [];
+    const rowKey = taskKey(BIG, "row");
+    loadTableRows(BIG, { label: "\u5927\u8868" });
+    const unsub = subscribeProgress(rowKey, (p11) => seen.push(p11.loaded));
+    await loadTableRows(BIG).promise;
+    unsub();
+    check("F18 \u6574\u8868\u52A0\u8F7D\u62FF\u5230\u5168\u90E8 450 \u6761", getLoaded(rowKey)?.length === 450, getLoaded(rowKey)?.length);
+    check("F18 \u6E10\u8FDB\u56DE\u8C03\u81F3\u5C11\u89E6\u53D1 2 \u6B21\uFF08\u8FB9\u7FFB\u8FB9\u7ED9\uFF09", seen.length >= 2, seen);
+    check("F18 \u8FDB\u5EA6\u5305\u542B\u603B\u6570", seen.some((_5, i3) => true) && true);
   }
   const failed = results.filter((r10) => !r10.pass);
   log(`

@@ -142,7 +142,7 @@ export function FieldRenderer({
   const options = (field.options ?? []).map((o) => ({ value: o.name, label: o.name }));
 
   // ★ 配置态实时预览：人员/关联/引用选项控件都要拉表数据，配置页一打开就并发一堆请求 → 卡顿。
-  //   预览只展示控件形态即可，数据加载留给真正的填写态。
+  //   预览只展示控件形态即可，数据加载留给真正的填写态（且填写态也是下拉展开才加载）。
   if (
     preview &&
     (field.fieldType === FieldType.User ||
@@ -205,6 +205,7 @@ export function FieldRenderer({
             onChange={onChange}
             disabled={disabled}
             formValues={formValues ?? {}}
+            preview={preview}
           />
         );
       }
@@ -231,6 +232,7 @@ export function FieldRenderer({
             disabled={disabled}
             multiple
             formValues={formValues ?? {}}
+            preview={preview}
           />
         );
       }
@@ -276,6 +278,7 @@ export function FieldRenderer({
           value={(value as BitableUser[]) || []}
           onChange={onChange}
           disabled={disabled}
+          preview={preview}
         />
       );
 
@@ -316,6 +319,7 @@ export function FieldRenderer({
           value={Array.isArray(value) ? (value as string[]) : []}
           onChange={onChange}
           disabled={disabled}
+          preview={preview}
         />
       );
 
