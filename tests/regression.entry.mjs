@@ -558,24 +558,61 @@ async function run() {
     // 分页 mock：第 1 页 2 条 + hasMore，第 2 页 2 条（含跨页重复值）
     const page1 = [{ fields: { fldM1: '已存在A' } }, { fields: { fldM1: '已存在B' } }];
     const page2 = [{ fields: { fldM1: '跨页值C' } }, { fields: { fldM1: '已存在A' } }];
-    let readCalls = 0;
-    const dupBase = {
+    let readCalls = 0; // 全量分页调用次数
+    let filterCalls = 0; // 服务端过滤调用次数
+    const allRows = [...page1, ...page2];
+
+    /**
+     * 构造测试用 base：
+     * - supportFilter=true：getRecords 支持 filter（模拟服务端过滤可用，主路径）
+     * - supportFilter=false：filter 直接抛错 / 返回无关记录（模拟旧宿主，需回退整列分页）
+     */
+    const makeDupBase = ({ supportFilter = true, total } = {}) => ({
       getTableById: async (id) => {
         if (id === NO_PERM) throw new Error('permission denied: no access to this table');
         return {
-          getRecords: async ({ pageToken } = {}) => {
+          // 整列取值（兜底路径首选）：第 1 页 2 条 + hasMore，第 2 页 2 条
+          getField: async (fid) => ({
+            getFieldValueListByPage: async ({ pageToken } = {}) => {
+              readCalls += 1;
+              const rows = pageToken === undefined ? page1 : page2;
+              return {
+                fieldValues: rows.map((r, i) => ({ recordId: `r${i}`, value: r.fields[fid] })),
+                hasMore: pageToken === undefined,
+                pageToken: pageToken === undefined ? 1 : undefined,
+                total: total ?? allRows.length,
+              };
+            },
+          }),
+          getRecords: async (params = {}) => {
+            if (params.filter) {
+              filterCalls += 1;
+              if (!supportFilter) {
+                // 模拟过滤未生效：返回与本值无关的记录（应被自证逻辑识别并回退全量）
+                return { records: page1, hasMore: false, total: allRows.length };
+              }
+              const c = (params.filter.conditions ?? [])[0];
+              const target = String(c?.value ?? '').trim().toLowerCase();
+              const hits = allRows.filter(
+                (r) => String(r.fields[c.fieldId] ?? '').trim().toLowerCase() === target
+              );
+              return { records: hits, hasMore: false, total: hits.length };
+            }
             readCalls += 1;
             if (id === MAIN) {
-              if (!pageToken) return { records: page1, hasMore: true, pageToken: 'tok2' };
-              return { records: page2, hasMore: false };
+              if (!params.pageToken) {
+                return { records: page1, hasMore: true, pageToken: 'tok2', total: total ?? allRows.length };
+              }
+              return { records: page2, hasMore: false, total: total ?? allRows.length };
             }
             return { records: [], hasMore: false };
           },
         };
       },
       getTableMetaList: async () => [{ id: MAIN, name: '主表' }],
-    };
-    selectBaseForTest({ base: dupBase });
+    });
+
+    selectBaseForTest({ base: makeDupBase() });
     // 唯一性校验现在有模块级缓存，测试之间必须显式清空，否则会命中上一个用例的缓存
     invalidateExistingCache();
 
@@ -641,20 +678,49 @@ async function run() {
     check('F16 归一化：数字', normalizeForCompare(123) === '123');
     check('F16 归一化：取对象 text', normalizeForCompare({ text: ' Hello ' }) === 'hello');
 
-    // —— 失焦实时校验（checkOneValue）：分页全量 + 缓存复用 + 提交后并入 ——
+    // —— 失焦实时校验（checkOneValue）：服务端过滤优先 + 整列分页兜底 + 缓存复用 + 提交后并入 ——
     invalidateExistingCache();
     readCalls = 0;
+    filterCalls = 0;
 
-    const c1 = await checkOneValue(MAIN, 'fldM1', '跨页值C');
-    check('F16 失焦校验命中第 2 页数据（分页全量）', c1.status === 'dup', c1);
-    check('F16 全量拉取确实翻了 2 页', readCalls === 2, readCalls);
+    const c1 = await checkOneValue(MAIN, 'fldM1', '跨页值C', undefined, FieldType.Text);
+    check('F16 失焦校验命中跨页数据（第 2 页的值）', c1.status === 'dup', c1);
+    check('F16 走服务端过滤：只 1 次请求、未全量翻页', filterCalls === 1 && readCalls === 0, {
+      filterCalls,
+      readCalls,
+    });
 
-    const c2 = await checkOneValue(MAIN, 'fldM1', '已存在B');
-    check('F16 失焦校验命中第 1 页数据', c2.status === 'dup', c2);
+    const c2 = await checkOneValue(MAIN, 'fldM1', '已存在B', undefined, FieldType.Text);
+    check('F16 失焦校验命中已有值', c2.status === 'dup', c2);
 
-    const c3 = await checkOneValue(MAIN, 'fldM1', 'BRAND-NEW');
+    const c3 = await checkOneValue(MAIN, 'fldM1', 'BRAND-NEW', undefined, FieldType.Text);
     check('F16 新值提示可用', c3.status === 'ok' && c3.message === '可用', c3);
-    check('F16 缓存复用：后续校验不再拉表', readCalls === 2, readCalls);
+
+    const before = filterCalls;
+    await checkOneValue(MAIN, 'fldM1', 'BRAND-NEW', undefined, FieldType.Text);
+    check('F16 同一值复用过滤结果缓存，不重复请求', filterCalls === before, filterCalls);
+
+    // ★ 关键回归：过滤不可用（旧宿主 / 返回无关记录）→ 必须回退整列分页全量，且真的翻满 2 页
+    invalidateExistingCache();
+    selectBaseForTest({ base: makeDupBase({ supportFilter: false }) });
+    readCalls = 0;
+    const cFallback = await checkOneValue(MAIN, 'fldM1', '跨页值C', undefined, FieldType.Text);
+    check('F16 过滤不可用时回退全量并命中跨页值', cFallback.status === 'dup', cFallback);
+    check('F16 回退时整列分页确实翻了 2 页', readCalls === 2, readCalls);
+
+    // ★ 关键回归：超大表（超过预加载阈值）不再全量预拉，但判重依然准确（走服务端过滤）
+    invalidateExistingCache();
+    selectBaseForTest({ base: makeDupBase({ total: 200000 }) });
+    readCalls = 0;
+    const bigSet = await loadAllExistingValues(MAIN, 'fldM1', '合同号', { totalLimit: 3 });
+    check('F16 超大表跳过全量预拉（标记 skipped）', bigSet.ok && bigSet.skipped === true, bigSet);
+    const cBig = await checkOneValue(MAIN, 'fldM1', '跨页值C', undefined, FieldType.Text);
+    check('F16 超大表判重依然准确（服务端过滤）', cBig.status === 'dup', cBig);
+
+    // 回到正常 base 继续后续用例
+    invalidateExistingCache();
+    selectBaseForTest({ base: makeDupBase() });
+    readCalls = 0;
 
     const c4 = await checkOneValue(MAIN, 'fldM1', '');
     check('F16 空值不提示也不判重', c4.status === 'ok' && c4.message === '', c4);
@@ -662,10 +728,24 @@ async function run() {
     const c5 = await checkOneValue(NO_PERM, 'fldM1', 'ANY');
     check('F16 无权限时返回 error 且不静默放行', c5.status === 'error' && /权限/.test(c5.detail ?? ''), c5);
 
-    // 提交成功后把新值并入缓存 → 再填相同值应判重（否则同会话内可重复提交）
+    // 提交成功后把新值并入全量缓存 → 过滤不可用时，同一会话再填相同值仍判重
+    invalidateExistingCache();
+    selectBaseForTest({ base: makeDupBase({ supportFilter: false }) });
+    readCalls = 0;
+    const cPre = await checkOneValue(MAIN, 'fldM1', 'BRAND-NEW', undefined, FieldType.Text);
+    check('F16 提交前新值判定可用', cPre.status === 'ok', cPre);
     noteSubmittedValues(MAIN, 'fldM1', ['BRAND-NEW']);
-    const c6 = await checkOneValue(MAIN, 'fldM1', 'BRAND-NEW');
+    const c6 = await checkOneValue(MAIN, 'fldM1', 'BRAND-NEW', undefined, FieldType.Text);
     check('F16 提交后并入缓存：相同值再填即判重', c6.status === 'dup', c6);
+    check('F16 并入后不再重新翻表', readCalls === 2, readCalls);
+
+    // 服务端过滤路径：记录真正写进表后，过滤应能查到（模拟提交落库后的下一次填写）
+    invalidateExistingCache();
+    selectBaseForTest({ base: makeDupBase() });
+    allRows.push({ fields: { fldM1: 'BRAND-NEW' } });
+    const c7 = await checkOneValue(MAIN, 'fldM1', 'BRAND-NEW', undefined, FieldType.Text);
+    check('F16 服务端过滤能发现表内新增的同名记录', c7.status === 'dup', c7);
+    allRows.pop();
 
     // 缓存失效后重新全量拉取
     invalidateExistingCache(MAIN, 'fldM1');
@@ -673,7 +753,6 @@ async function run() {
     await loadAllExistingValues(MAIN, 'fldM1');
     check('F16 失效缓存后重新分页全量拉取', readCalls === 2, readCalls);
 
-    // 截断保护：记录数超过上限时返回 truncated（用极小上限无法改常量，此处验证字段存在且不误判）
     const set = await loadAllExistingValues(MAIN, 'fldM1');
     check('F16 全量结果带扫描条数与去重值', set.scanned === 4 && set.values.size === 3, {
       scanned: set.scanned,

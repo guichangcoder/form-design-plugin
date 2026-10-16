@@ -30275,11 +30275,15 @@ function classifySdkError(e11, target) {
 }
 
 // src/services/uniqueCheck.ts
-var PAGE_SIZE = 500;
-var MAX_RECORDS = 2e4;
+var PAGE_SIZE = 200;
+var MAX_RECORDS = 2e5;
 var cache = /* @__PURE__ */ new Map();
+var filterCache = /* @__PURE__ */ new Map();
+var FILTER_CACHE_MAX = 500;
 var cacheKey = (tableId, fieldId) => `${tableId}::${fieldId}`;
+var filterCacheKey = (tableId, fieldId, n11) => `${tableId}::${fieldId}::${n11}`;
 function invalidateExistingCache(tableId, fieldId) {
+  filterCache.clear();
   if (!tableId) {
     cache.clear();
     return;
@@ -30293,6 +30297,9 @@ function invalidateExistingCache(tableId, fieldId) {
   }
 }
 function noteSubmittedValues(tableId, fieldId, raws) {
+  for (const k12 of [...filterCache.keys()]) {
+    if (k12.startsWith(`${tableId}::${fieldId}::`)) filterCache.delete(k12);
+  }
   const p11 = cache.get(cacheKey(tableId, fieldId));
   if (!p11) return;
   p11.then((s) => {
@@ -30315,6 +30322,7 @@ function normalizeForCompare(v11) {
     const o11 = v11;
     if (typeof o11.text === "string") return o11.text.trim().toLowerCase();
     if (typeof o11.name === "string") return o11.name.trim().toLowerCase();
+    if (typeof o11.value === "string") return o11.value.trim().toLowerCase();
     return "";
   }
   return String(v11).trim().toLowerCase();
@@ -30325,46 +30333,154 @@ function isUniqueChecked(field, cond, tableId, rowIndex) {
   if (isHiddenField(cond, tableId, field.fieldId, rowIndex)) return false;
   return true;
 }
-function loadAllExistingValues(tableId, fieldId, label) {
+var FILTERABLE_TYPES = [
+  j5.Text,
+  j5.Phone,
+  j5.Email,
+  j5.Url,
+  j5.Barcode
+];
+function supportsFilter(fieldType) {
+  if (!fieldType) return true;
+  return FILTERABLE_TYPES.includes(fieldType);
+}
+function filterValueOf(raw, fieldType) {
+  if (fieldType === j5.Number || fieldType === j5.Currency) {
+    const num = typeof raw === "number" ? raw : Number(String(raw ?? "").trim());
+    return Number.isFinite(num) ? num : null;
+  }
+  return String(raw ?? "");
+}
+async function filterFindDup(tableId, fieldId, n11, raw, fieldType) {
+  const fv2 = filterValueOf(raw, fieldType);
+  if (fv2 === null) return void 0;
+  try {
+    const table = await getBase().getTableById(tableId);
+    const res = await table.getRecords({
+      pageSize: 20,
+      filter: {
+        conjunction: "and",
+        conditions: [{ fieldId, operator: "is", value: fv2 }]
+      }
+    });
+    const records = res?.records ?? [];
+    if (records.length === 0) return false;
+    let contains = false;
+    for (const rec of records) {
+      const v11 = normalizeForCompare(rec?.fields?.[fieldId]);
+      if (v11 === n11) return true;
+      if (n11 && v11.includes(n11)) contains = true;
+    }
+    return contains ? false : void 0;
+  } catch (e11) {
+    console.warn(
+      `[uniqueCheck] \u670D\u52A1\u7AEF\u8FC7\u6EE4\u67E5\u91CD\u4E0D\u53EF\u7528\uFF0C\u56DE\u9000\u5168\u91CF\u626B\u63CF\uFF1A${e11?.message ?? String(e11)}`
+    );
+    return void 0;
+  }
+}
+async function paginate(fetchPage, collect) {
+  let scanned = 0;
+  let truncated = false;
+  let total;
+  let pageToken;
+  let guard = 0;
+  do {
+    const res = await fetchPage(pageToken);
+    if (typeof res.total === "number") total = res.total;
+    const items = res.items ?? [];
+    if (items.length === 0) break;
+    for (const it3 of items) {
+      scanned += 1;
+      collect(it3);
+      if (scanned >= MAX_RECORDS) {
+        truncated = true;
+        break;
+      }
+    }
+    const next = res.hasMore && !truncated ? res.pageToken : void 0;
+    guard += 1;
+    if (next !== void 0 && (next === pageToken || guard > 1e3)) {
+      truncated = true;
+      console.warn("[uniqueCheck] \u5206\u9875\u6E38\u6807\u672A\u63A8\u8FDB\uFF0C\u5DF2\u63D0\u524D\u7ED3\u675F\u626B\u63CF\uFF08\u6821\u9A8C\u53EF\u80FD\u4E0D\u5B8C\u6574\uFF09");
+      break;
+    }
+    pageToken = next;
+  } while (pageToken);
+  return { scanned, truncated, total };
+}
+function loadAllExistingValues(tableId, fieldId, label, opts) {
   const key = cacheKey(tableId, fieldId);
-  const hit = cache.get(key);
-  if (hit) return hit;
+  if (!opts?.force) {
+    const hit = cache.get(key);
+    if (hit) return hit;
+  }
   const p11 = (async () => {
-    try {
-      const table = await getBase().getTableById(tableId);
-      const values = /* @__PURE__ */ new Set();
-      let scanned = 0;
-      let truncated = false;
-      let pageToken;
-      do {
-        const res = await table.getRecords({
-          pageSize: PAGE_SIZE,
-          ...pageToken ? { pageToken } : {}
-        });
-        const records = res.records ?? [];
-        if (records.length === 0 && !res.hasMore) break;
-        for (const rec of records) {
-          scanned += 1;
-          const n11 = normalizeForCompare(
-            rec.fields?.[fieldId]
-          );
-          if (n11) values.add(n11);
-          if (scanned >= MAX_RECORDS) {
-            truncated = true;
-            break;
-          }
-        }
-        pageToken = res.hasMore && !truncated ? res.pageToken : void 0;
-      } while (pageToken);
-      if (truncated) {
-        console.warn(
-          `[uniqueCheck] \u5B57\u6BB5\u300C${label ?? fieldId}\u300D\u5DF2\u6709\u8BB0\u5F55\u8D85\u8FC7 ${MAX_RECORDS} \u6761\uFF0C\u53EA\u626B\u63CF\u524D ${MAX_RECORDS} \u6761\uFF0C\u552F\u4E00\u6027\u6821\u9A8C\u53EF\u80FD\u4E0D\u5B8C\u6574`
+    const values = /* @__PURE__ */ new Set();
+    const finish = (scanned, truncated, total) => {
+      if (opts?.totalLimit && typeof total === "number" && total > opts.totalLimit) {
+        console.log(
+          `[uniqueCheck] \u5B57\u6BB5\u300C${label ?? fieldId}\u300D\u5171 ${total} \u6761\u8BB0\u5F55\uFF0C\u8D85\u8FC7\u9884\u52A0\u8F7D\u9608\u503C ${opts.totalLimit}\uFF0C\u6539\u7528\u670D\u52A1\u7AEF\u8FC7\u6EE4\u5224\u5B9A`
         );
+        return { ok: true, values: /* @__PURE__ */ new Set(), scanned: 0, truncated: false, skipped: true };
       }
       console.log(
-        `[uniqueCheck] \u5168\u91CF\u626B\u63CF\u5B8C\u6210\uFF1A\u5B57\u6BB5\u300C${label ?? fieldId}\u300D\u5171 ${scanned} \u6761\u8BB0\u5F55\uFF0C${values.size} \u4E2A\u4E0D\u540C\u53D6\u503C${truncated ? "\uFF08\u5DF2\u622A\u65AD\uFF09" : ""}`
+        `[uniqueCheck] \u5168\u91CF\u626B\u63CF\u5B8C\u6210\uFF1A\u5B57\u6BB5\u300C${label ?? fieldId}\u300D\u5171\u626B\u63CF ${scanned} \u6761\uFF0C${values.size} \u4E2A\u4E0D\u540C\u53D6\u503C${truncated ? "\uFF08\u5DF2\u622A\u65AD\uFF0C\u6821\u9A8C\u53EF\u80FD\u4E0D\u5B8C\u6574\uFF09" : ""}`
       );
       return { ok: true, values, scanned, truncated };
+    };
+    try {
+      const table = await getBase().getTableById(tableId);
+      try {
+        const field = await table.getField(fieldId);
+        if (field?.getFieldValueListByPage) {
+          const r11 = await paginate(
+            async (token) => {
+              const res = await field.getFieldValueListByPage({
+                pageSize: PAGE_SIZE,
+                stringValue: true,
+                ...token !== void 0 ? { pageToken: token } : {}
+              });
+              return {
+                items: res?.fieldValues ?? [],
+                hasMore: !!res?.hasMore,
+                pageToken: res?.pageToken,
+                total: typeof res?.total === "number" ? res.total : void 0
+              };
+            },
+            (item) => {
+              const n11 = normalizeForCompare(item?.value);
+              if (n11) values.add(n11);
+            }
+          );
+          return finish(r11.scanned, r11.truncated, r11.total);
+        }
+      } catch (e11) {
+        console.warn(
+          `[uniqueCheck] \u6574\u5217\u53D6\u503C\u63A5\u53E3\u4E0D\u53EF\u7528\uFF0C\u56DE\u9000\u8BB0\u5F55\u5206\u9875\uFF1A${e11?.message ?? String(e11)}`
+        );
+      }
+      const byPage = typeof table.getRecordsByPage === "function";
+      const r10 = await paginate(
+        async (token) => {
+          const params = {
+            pageSize: PAGE_SIZE,
+            ...token !== void 0 ? { pageToken: token } : {}
+          };
+          const res = byPage ? await table.getRecordsByPage(params) : await table.getRecords(params);
+          return {
+            items: res?.records ?? [],
+            hasMore: !!res?.hasMore,
+            pageToken: res?.pageToken,
+            total: typeof res?.total === "number" ? res.total : void 0
+          };
+        },
+        (rec) => {
+          const n11 = normalizeForCompare(rec?.fields?.[fieldId]);
+          if (n11) values.add(n11);
+        }
+      );
+      return finish(r10.scanned, r10.truncated, r10.total);
     } catch (e11) {
       const c11 = classifySdkError(e11, label || "\u8BE5\u5B57\u6BB5\u7684\u5DF2\u6709\u6570\u636E");
       cache.delete(key);
@@ -30381,26 +30497,51 @@ function loadAllExistingValues(tableId, fieldId, label) {
   cache.set(key, p11);
   return p11;
 }
-async function checkOneValue(tableId, fieldId, raw, message) {
-  if (isEmptyValue2(raw)) return { status: "ok", message: "" };
+async function isDuplicate(tableId, fieldId, raw, fieldType) {
   const n11 = normalizeForCompare(raw);
-  if (!n11) return { status: "ok", message: "" };
-  const set = await loadAllExistingValues(tableId, fieldId);
+  if (!n11) return { dup: false };
+  if (supportsFilter(fieldType)) {
+    const fk2 = filterCacheKey(tableId, fieldId, n11);
+    let fp2 = filterCache.get(fk2);
+    if (!fp2) {
+      fp2 = filterFindDup(tableId, fieldId, n11, raw, fieldType);
+      if (filterCache.size >= FILTER_CACHE_MAX) filterCache.clear();
+      filterCache.set(fk2, fp2);
+    }
+    const r10 = await fp2.catch(() => void 0);
+    if (r10 === true) return { dup: true };
+    if (r10 === false) return { dup: false };
+  }
+  let set = await loadAllExistingValues(tableId, fieldId);
+  if (set.ok && set.skipped) {
+    set = await loadAllExistingValues(tableId, fieldId, void 0, { force: true });
+  }
   if (!set.ok) {
+    return {
+      dup: false,
+      error: { reason: set.reason ?? "\u8BFB\u53D6\u5DF2\u6709\u6570\u636E\u5931\u8D25", action: set.action }
+    };
+  }
+  return { dup: set.values.has(n11), truncated: set.truncated };
+}
+async function checkOneValue(tableId, fieldId, raw, message, fieldType) {
+  if (isEmptyValue2(raw)) return { status: "ok", message: "" };
+  const r10 = await isDuplicate(tableId, fieldId, raw, fieldType);
+  if (r10.error) {
     return {
       status: "error",
       message: "\u65E0\u6CD5\u6821\u9A8C",
-      detail: `${set.reason ?? "\u8BFB\u53D6\u5DF2\u6709\u6570\u636E\u5931\u8D25"}${set.action ? `\u3002${set.action}` : ""}`
+      detail: `${r10.error.reason}${r10.error.action ? `\u3002${r10.error.action}` : ""}`
     };
   }
-  if (set.values.has(n11)) {
+  if (r10.dup) {
     return {
       status: "dup",
       message: message?.trim() || "\u5DF2\u5B58\u5728\uFF0C\u8BF7\u66F4\u6362",
-      truncated: set.truncated
+      truncated: r10.truncated
     };
   }
-  return { status: "ok", message: "\u53EF\u7528", truncated: set.truncated };
+  return { status: "ok", message: "\u53EF\u7528", truncated: r10.truncated };
 }
 async function checkDuplicates(config, mainValues, subValues, cond) {
   const errors = [];
@@ -30411,18 +30552,17 @@ async function checkDuplicates(config, mainValues, subValues, cond) {
     if (!isUniqueChecked(field, cond, mainTableId)) continue;
     const raw = mainValues[field.fieldId];
     if (isEmptyValue2(raw)) continue;
-    const set = await loadAllExistingValues(mainTableId, field.fieldId, labelOf(field));
-    if (!set.ok) {
+    const r10 = await isDuplicate(mainTableId, field.fieldId, raw, field.fieldType);
+    if (r10.error) {
       failures.push({
         tableId: mainTableId,
         fieldId: field.fieldId,
         label: labelOf(field),
-        reason: `${set.reason ?? "\u8BFB\u53D6\u5DF2\u6709\u6570\u636E\u5931\u8D25"}${set.action ? `\u3002${set.action}` : ""}`
+        reason: `${r10.error.reason}${r10.error.action ? `\u3002${r10.error.action}` : ""}`
       });
       continue;
     }
-    const n11 = normalizeForCompare(raw);
-    if (n11 && set.values.has(n11)) {
+    if (r10.dup) {
       errors.push({
         tableId: mainTableId,
         fieldId: field.fieldId,
@@ -30452,19 +30592,19 @@ async function checkDuplicates(config, mainValues, subValues, cond) {
           continue;
         }
         pending.set(field.fieldId, { value: n11, rowIndex });
-        const set = await loadAllExistingValues(sub.tableId, field.fieldId, labelOf(field));
-        if (!set.ok) {
+        const r10 = await isDuplicate(sub.tableId, field.fieldId, raw, field.fieldType);
+        if (r10.error) {
           if (!failures.some((f12) => f12.tableId === sub.tableId && f12.fieldId === field.fieldId)) {
             failures.push({
               tableId: sub.tableId,
               fieldId: field.fieldId,
               label: labelOf(field),
-              reason: `${set.reason ?? "\u8BFB\u53D6\u5DF2\u6709\u6570\u636E\u5931\u8D25"}${set.action ? `\u3002${set.action}` : ""}`
+              reason: `${r10.error.reason}${r10.error.action ? `\u3002${r10.error.action}` : ""}`
             });
           }
           continue;
         }
-        if (set.values.has(n11)) {
+        if (r10.dup) {
           errors.push({
             tableId: sub.tableId,
             fieldId: field.fieldId,
@@ -30961,23 +31101,52 @@ async function run() {
     const page1 = [{ fields: { fldM1: "\u5DF2\u5B58\u5728A" } }, { fields: { fldM1: "\u5DF2\u5B58\u5728B" } }];
     const page2 = [{ fields: { fldM1: "\u8DE8\u9875\u503CC" } }, { fields: { fldM1: "\u5DF2\u5B58\u5728A" } }];
     let readCalls = 0;
-    const dupBase = {
+    let filterCalls = 0;
+    const allRows = [...page1, ...page2];
+    const makeDupBase = ({ supportFilter = true, total } = {}) => ({
       getTableById: async (id) => {
         if (id === NO_PERM) throw new Error("permission denied: no access to this table");
         return {
-          getRecords: async ({ pageToken } = {}) => {
+          // 整列取值（兜底路径首选）：第 1 页 2 条 + hasMore，第 2 页 2 条
+          getField: async (fid) => ({
+            getFieldValueListByPage: async ({ pageToken } = {}) => {
+              readCalls += 1;
+              const rows = pageToken === void 0 ? page1 : page2;
+              return {
+                fieldValues: rows.map((r10, i3) => ({ recordId: `r${i3}`, value: r10.fields[fid] })),
+                hasMore: pageToken === void 0,
+                pageToken: pageToken === void 0 ? 1 : void 0,
+                total: total ?? allRows.length
+              };
+            }
+          }),
+          getRecords: async (params = {}) => {
+            if (params.filter) {
+              filterCalls += 1;
+              if (!supportFilter) {
+                return { records: page1, hasMore: false, total: allRows.length };
+              }
+              const c11 = (params.filter.conditions ?? [])[0];
+              const target = String(c11?.value ?? "").trim().toLowerCase();
+              const hits = allRows.filter(
+                (r10) => String(r10.fields[c11.fieldId] ?? "").trim().toLowerCase() === target
+              );
+              return { records: hits, hasMore: false, total: hits.length };
+            }
             readCalls += 1;
             if (id === MAIN) {
-              if (!pageToken) return { records: page1, hasMore: true, pageToken: "tok2" };
-              return { records: page2, hasMore: false };
+              if (!params.pageToken) {
+                return { records: page1, hasMore: true, pageToken: "tok2", total: total ?? allRows.length };
+              }
+              return { records: page2, hasMore: false, total: total ?? allRows.length };
             }
             return { records: [], hasMore: false };
           }
         };
       },
       getTableMetaList: async () => [{ id: MAIN, name: "\u4E3B\u8868" }]
-    };
-    __setAppForTest({ base: dupBase });
+    });
+    __setAppForTest({ base: makeDupBase() });
     invalidateExistingCache();
     const emptyCond = {
       hiddenFields: {},
@@ -31044,21 +31213,55 @@ async function run() {
     check("F16 \u5F52\u4E00\u5316\uFF1A\u53D6\u5BF9\u8C61 text", normalizeForCompare({ text: " Hello " }) === "hello");
     invalidateExistingCache();
     readCalls = 0;
-    const c1 = await checkOneValue(MAIN, "fldM1", "\u8DE8\u9875\u503CC");
-    check("F16 \u5931\u7126\u6821\u9A8C\u547D\u4E2D\u7B2C 2 \u9875\u6570\u636E\uFF08\u5206\u9875\u5168\u91CF\uFF09", c1.status === "dup", c1);
-    check("F16 \u5168\u91CF\u62C9\u53D6\u786E\u5B9E\u7FFB\u4E86 2 \u9875", readCalls === 2, readCalls);
-    const c22 = await checkOneValue(MAIN, "fldM1", "\u5DF2\u5B58\u5728B");
-    check("F16 \u5931\u7126\u6821\u9A8C\u547D\u4E2D\u7B2C 1 \u9875\u6570\u636E", c22.status === "dup", c22);
-    const c32 = await checkOneValue(MAIN, "fldM1", "BRAND-NEW");
+    filterCalls = 0;
+    const c1 = await checkOneValue(MAIN, "fldM1", "\u8DE8\u9875\u503CC", void 0, j5.Text);
+    check("F16 \u5931\u7126\u6821\u9A8C\u547D\u4E2D\u8DE8\u9875\u6570\u636E\uFF08\u7B2C 2 \u9875\u7684\u503C\uFF09", c1.status === "dup", c1);
+    check("F16 \u8D70\u670D\u52A1\u7AEF\u8FC7\u6EE4\uFF1A\u53EA 1 \u6B21\u8BF7\u6C42\u3001\u672A\u5168\u91CF\u7FFB\u9875", filterCalls === 1 && readCalls === 0, {
+      filterCalls,
+      readCalls
+    });
+    const c22 = await checkOneValue(MAIN, "fldM1", "\u5DF2\u5B58\u5728B", void 0, j5.Text);
+    check("F16 \u5931\u7126\u6821\u9A8C\u547D\u4E2D\u5DF2\u6709\u503C", c22.status === "dup", c22);
+    const c32 = await checkOneValue(MAIN, "fldM1", "BRAND-NEW", void 0, j5.Text);
     check("F16 \u65B0\u503C\u63D0\u793A\u53EF\u7528", c32.status === "ok" && c32.message === "\u53EF\u7528", c32);
-    check("F16 \u7F13\u5B58\u590D\u7528\uFF1A\u540E\u7EED\u6821\u9A8C\u4E0D\u518D\u62C9\u8868", readCalls === 2, readCalls);
+    const before = filterCalls;
+    await checkOneValue(MAIN, "fldM1", "BRAND-NEW", void 0, j5.Text);
+    check("F16 \u540C\u4E00\u503C\u590D\u7528\u8FC7\u6EE4\u7ED3\u679C\u7F13\u5B58\uFF0C\u4E0D\u91CD\u590D\u8BF7\u6C42", filterCalls === before, filterCalls);
+    invalidateExistingCache();
+    __setAppForTest({ base: makeDupBase({ supportFilter: false }) });
+    readCalls = 0;
+    const cFallback = await checkOneValue(MAIN, "fldM1", "\u8DE8\u9875\u503CC", void 0, j5.Text);
+    check("F16 \u8FC7\u6EE4\u4E0D\u53EF\u7528\u65F6\u56DE\u9000\u5168\u91CF\u5E76\u547D\u4E2D\u8DE8\u9875\u503C", cFallback.status === "dup", cFallback);
+    check("F16 \u56DE\u9000\u65F6\u6574\u5217\u5206\u9875\u786E\u5B9E\u7FFB\u4E86 2 \u9875", readCalls === 2, readCalls);
+    invalidateExistingCache();
+    __setAppForTest({ base: makeDupBase({ total: 2e5 }) });
+    readCalls = 0;
+    const bigSet = await loadAllExistingValues(MAIN, "fldM1", "\u5408\u540C\u53F7", { totalLimit: 3 });
+    check("F16 \u8D85\u5927\u8868\u8DF3\u8FC7\u5168\u91CF\u9884\u62C9\uFF08\u6807\u8BB0 skipped\uFF09", bigSet.ok && bigSet.skipped === true, bigSet);
+    const cBig = await checkOneValue(MAIN, "fldM1", "\u8DE8\u9875\u503CC", void 0, j5.Text);
+    check("F16 \u8D85\u5927\u8868\u5224\u91CD\u4F9D\u7136\u51C6\u786E\uFF08\u670D\u52A1\u7AEF\u8FC7\u6EE4\uFF09", cBig.status === "dup", cBig);
+    invalidateExistingCache();
+    __setAppForTest({ base: makeDupBase() });
+    readCalls = 0;
     const c42 = await checkOneValue(MAIN, "fldM1", "");
     check("F16 \u7A7A\u503C\u4E0D\u63D0\u793A\u4E5F\u4E0D\u5224\u91CD", c42.status === "ok" && c42.message === "", c42);
     const c52 = await checkOneValue(NO_PERM, "fldM1", "ANY");
     check("F16 \u65E0\u6743\u9650\u65F6\u8FD4\u56DE error \u4E14\u4E0D\u9759\u9ED8\u653E\u884C", c52.status === "error" && /权限/.test(c52.detail ?? ""), c52);
+    invalidateExistingCache();
+    __setAppForTest({ base: makeDupBase({ supportFilter: false }) });
+    readCalls = 0;
+    const cPre = await checkOneValue(MAIN, "fldM1", "BRAND-NEW", void 0, j5.Text);
+    check("F16 \u63D0\u4EA4\u524D\u65B0\u503C\u5224\u5B9A\u53EF\u7528", cPre.status === "ok", cPre);
     noteSubmittedValues(MAIN, "fldM1", ["BRAND-NEW"]);
-    const c62 = await checkOneValue(MAIN, "fldM1", "BRAND-NEW");
+    const c62 = await checkOneValue(MAIN, "fldM1", "BRAND-NEW", void 0, j5.Text);
     check("F16 \u63D0\u4EA4\u540E\u5E76\u5165\u7F13\u5B58\uFF1A\u76F8\u540C\u503C\u518D\u586B\u5373\u5224\u91CD", c62.status === "dup", c62);
+    check("F16 \u5E76\u5165\u540E\u4E0D\u518D\u91CD\u65B0\u7FFB\u8868", readCalls === 2, readCalls);
+    invalidateExistingCache();
+    __setAppForTest({ base: makeDupBase() });
+    allRows.push({ fields: { fldM1: "BRAND-NEW" } });
+    const c72 = await checkOneValue(MAIN, "fldM1", "BRAND-NEW", void 0, j5.Text);
+    check("F16 \u670D\u52A1\u7AEF\u8FC7\u6EE4\u80FD\u53D1\u73B0\u8868\u5185\u65B0\u589E\u7684\u540C\u540D\u8BB0\u5F55", c72.status === "dup", c72);
+    allRows.pop();
     invalidateExistingCache(MAIN, "fldM1");
     readCalls = 0;
     await loadAllExistingValues(MAIN, "fldM1");

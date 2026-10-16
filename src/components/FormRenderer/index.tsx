@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { FieldType } from '@lark-base-open/js-sdk';
 import {
   ConditionalState,
   FieldConfig,
@@ -16,6 +17,7 @@ import {
   checkOneValue,
   loadAllExistingValues,
   noteSubmittedValues,
+  FULL_SCAN_TOTAL_LIMIT,
 } from '../../services/uniqueCheck';
 import { applyAutoFill, markManualEdits } from '../../utils/dateAutoFill';
 import { toast } from '../../utils/toast';
@@ -118,11 +120,13 @@ export function FormRenderer({ config, onBackToConfig, preview, metaStale, onRel
     [config]
   );
 
-  // ★ 后台静默预加载：打开表单时就把这些字段的已有取值「分页全量」拉好并缓存，
-  //   用户第一次失焦即可秒出结果（不阻塞首屏渲染）。
+  // ★ 后台静默预加载：小表直接把已有取值全量拉好并缓存（第一次失焦秒出）；
+  //   大表（超过阈值）不预拉，避免上百次翻页卡页面 —— 判重改由服务端过滤完成，同样准确。
   useEffect(() => {
     uniqueFields.forEach((x) => {
-      loadAllExistingValues(x.tableId, x.fieldId, x.label).catch(() => {
+      loadAllExistingValues(x.tableId, x.fieldId, x.label, {
+        totalLimit: FULL_SCAN_TOTAL_LIMIT,
+      }).catch(() => {
         /* 预加载失败不影响使用，失焦时会再次尝试并提示 */
       });
     });
@@ -134,7 +138,8 @@ export function FormRenderer({ config, onBackToConfig, preview, metaStale, onRel
     tableId: string,
     fieldId: string,
     raw: unknown,
-    message?: string
+    message?: string,
+    fieldType?: FieldType
   ) => {
     if (isEmptyValue(raw)) {
       // 清空后不显示任何提示
@@ -148,9 +153,12 @@ export function FormRenderer({ config, onBackToConfig, preview, metaStale, onRel
     }
     const seq = (blurSeq.current += 1);
     setUniqueState((s) => ({ ...s, [key]: { status: 'checking' } }));
-    checkOneValue(tableId, fieldId, raw, message)
+    checkOneValue(tableId, fieldId, raw, message, fieldType)
       .then((res) => {
         if (seq !== blurSeq.current) return; // 已有更新的失焦，丢弃本次结果
+        console.log(
+          `[uniqueCheck] ${tableId}/${fieldId} 判定「${String(raw).slice(0, 30)}」→ ${res.status}${res.detail ? `（${res.detail}）` : ''}`
+        );
         setUniqueState((s) => ({
           ...s,
           [key]: { status: res.status, message: res.message, detail: res.detail },
@@ -173,7 +181,8 @@ export function FormRenderer({ config, onBackToConfig, preview, metaStale, onRel
       config.mainTable.tableId,
       fieldId,
       mainValues[fieldId],
-      f.unique.message
+      f.unique.message,
+      f.fieldType
     );
   };
 
@@ -187,7 +196,8 @@ export function FormRenderer({ config, onBackToConfig, preview, metaStale, onRel
       tableId,
       fieldId,
       row[fieldId],
-      f.unique.message
+      f.unique.message,
+      f.fieldType
     );
   };
 
