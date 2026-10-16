@@ -271,7 +271,16 @@ export function RefOptionSelect({
     <Select
       style={{ width: '100%' }}
       multiple={multiple}
+      /**
+       * filter 必须为真值：Semi 以 `filterable = Boolean(filter)` 决定是否渲染搜索输入框
+       * （select/index.js 的 renderTriggerInput 与 foundation 的 _isFilterable）。
+       * 之前写 `filter={undefined}` 会判定「不可搜索」→ 输入框根本不渲染 → onSearch 永不触发。
+       * 传 `filter` 渲染输入框；用 `remote` 跳过 Semi 本地过滤，改由我们走服务端搜索。
+       */
+      filter
       remote
+      /** 选中后保留关键字，便于连续多选 */
+      autoClearSearchValue={false}
       optionList={options}
       value={multiple ? ((value as string[]) ?? []) : ((value as string) || undefined)}
       placeholder={
@@ -281,7 +290,6 @@ export function RefOptionSelect({
       }
       disabled={disabled}
       loading={opened && !headDone && !head.length}
-      filter={undefined}
       onSearch={handleSearch}
       onDropdownVisibleChange={(v: boolean) => {
         if (v && !openedRef.current) {

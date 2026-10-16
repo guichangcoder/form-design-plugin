@@ -31879,6 +31879,33 @@ async function run() {
       );
     }
   }
+  {
+    const fs2 = await import("node:fs");
+    const targets = [
+      "../src/components/FormRenderer/LinkSelector.tsx",
+      "../src/components/FormRenderer/RefOptionSelect.tsx"
+    ];
+    for (const rel of targets) {
+      const url = new URL(rel, import.meta.url);
+      let src = "";
+      try {
+        src = fs2.readFileSync(url, "utf8");
+      } catch (e11) {
+        check(`F19 ${rel} \u53EF\u8BFB\u53D6`, false, String(e11?.message ?? e11));
+        continue;
+      }
+      const file = rel.split("/").pop();
+      const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "").replace(/([^:])\/\/.*$/gm, "$1");
+      const hasRemote = /(^|\s)remote(\s|$|\n)/m.test(code);
+      check(`F19 ${file} \u4F7F\u7528 remote\uFF08\u8DF3\u8FC7\u672C\u5730\u8FC7\u6EE4\uFF09`, hasRemote);
+      const badFilter = /filter=\{(?:undefined|false)\}/.test(code);
+      check(`F19 ${file} \u672A\u628A filter \u7F6E\u4E3A\u5047\u503C\uFF08\u5426\u5219\u641C\u7D22\u6846\u4E0D\u6E32\u67D3\uFF09`, !badFilter);
+      const truthyFilter = /(^|\s)filter(\s*$|\s*\n)/m.test(code);
+      check(`F19 ${file} \u58F0\u660E\u4E86\u771F\u503C filter\uFF08\u4FDD\u8BC1\u6E32\u67D3\u641C\u7D22\u8F93\u5165\u6846\uFF09`, truthyFilter);
+      check(`F19 ${file} \u7ED1\u5B9A\u4E86 onSearch`, /onSearch=/.test(code));
+      check(`F19 ${file} \u4FDD\u7559\u5173\u952E\u5B57\uFF08autoClearSearchValue=false\uFF09`, /autoClearSearchValue=\{false\}/.test(code));
+    }
+  }
   const failed = results.filter((r10) => !r10.pass);
   log(`
 === ${results.length - failed.length}/${results.length} \u901A\u8FC7 ===`);

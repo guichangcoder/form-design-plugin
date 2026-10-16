@@ -278,8 +278,16 @@ export function LinkSelector({
       <Select
         style={{ width: '100%' }}
         multiple
+        /**
+         * filter 必须为真值：Semi 以 `filterable = Boolean(filter)` 决定是否渲染搜索输入框
+         * （select/index.js 的 renderTriggerInput 与 foundation 的 _isFilterable）。
+         * 之前写 `filter={undefined}` 会直接判定「不可搜索」→根本不渲染输入框 → onSearch 永不触发。
+         * 传 `filter` 渲染输入框；同时用 `remote` 跳过 Semi 的本地过滤，改由我们走服务端搜索。
+         */
+        filter
         remote
-        filter={undefined}
+        /** 选中一项后不清空关键字，便于连续多选（搜索状态保留） */
+        autoClearSearchValue={false}
         onSearch={handleSearch}
         onDropdownVisibleChange={(v: boolean) => {
           if (v) setOpened(true);

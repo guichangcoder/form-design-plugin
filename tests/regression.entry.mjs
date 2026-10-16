@@ -1080,6 +1080,51 @@ async function run() {
     }
   }
 
+  // —— F19：Semi Select「可搜索性」静态防回归 ——
+  // 踩过的坑：`filter={undefined}` 会让 Semi 判定 filterable=false，
+  // **连搜索输入框都不渲染**，onSearch 永不触发 → 用户"只能选，没法模糊搜索"。
+  // 这里直接扫源码断言：凡是用 remote 的 Select，必须同时给出真值 filter。
+  {
+    const fs = await import('node:fs');
+    const targets = [
+      '../src/components/FormRenderer/LinkSelector.tsx',
+      '../src/components/FormRenderer/RefOptionSelect.tsx',
+    ];
+    for (const rel of targets) {
+      const url = new URL(rel, import.meta.url);
+      let src = '';
+      try {
+        src = fs.readFileSync(url, 'utf8');
+      } catch (e) {
+        check(`F19 ${rel} 可读取`, false, String(e?.message ?? e));
+        continue;
+      }
+      const file = rel.split('/').pop();
+      // 先剥掉注释，避免"注释里提到坏写法"被误判为坏写法
+      const code = src
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/^\s*\/\/.*$/gm, '')
+        .replace(/([^:])\/\/.*$/gm, '$1');
+
+      const hasRemote = /(^|\s)remote(\s|$|\n)/m.test(code);
+      check(`F19 ${file} 使用 remote（跳过本地过滤）`, hasRemote);
+
+      // 不得出现 filter={undefined} / filter={false} —— 会关闭搜索框渲染
+      const badFilter = /filter=\{(?:undefined|false)\}/.test(code);
+      check(`F19 ${file} 未把 filter 置为假值（否则搜索框不渲染）`, !badFilter);
+
+      // 必须出现独立的真值 `filter` 属性（不是 filter={...} 的表达式形式）
+      const truthyFilter = /(^|\s)filter(\s*$|\s*\n)/m.test(code);
+      check(`F19 ${file} 声明了真值 filter（保证渲染搜索输入框）`, truthyFilter);
+
+      // onSearch 必须绑定（否则输入后不会触发服务端搜索）
+      check(`F19 ${file} 绑定了 onSearch`, /onSearch=/.test(code));
+
+      // 选中后不清空关键字，便于连续多选
+      check(`F19 ${file} 保留关键字（autoClearSearchValue=false）`, /autoClearSearchValue=\{false\}/.test(code));
+    }
+  }
+
   const failed = results.filter((r) => !r.pass);
   log(`\n=== ${results.length - failed.length}/${results.length} 通过 ===`);
   if (failed.length) process.exit(1);
