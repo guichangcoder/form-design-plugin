@@ -73,13 +73,12 @@ export function PersonSelector({ value, onChange, disabled, tableId, fieldId, pr
       };
 
       // 读取本字段历史人员（去重）。
-      // 优先分页取前列数据（候选人员是去重后的，前 1000 行足够覆盖团队），
-      // 避免在几万行的大表上用 getFieldValueList 整列拉取导致打开表单卡顿。
+      // 只取最新的一页（200 行）即可覆盖团队常见人员：人员字段取值高度重复，
+      // 首屏 1 次请求 ≈ 秒出；不再翻 5 页，避免「仅等加载就要等很久」。
       try {
         const table = await getBase().getTableById(tableId);
         const field: any = await table.getField(fieldId);
-        const PAGE_SIZE = 200; // SDK 单次上限
-        const MAX_PAGES = 5; // 最多取前 1000 行
+        const HEAD_ROWS = 200; // 与 SDK 单次上限一致，1 次请求
         const collect = (items: Array<{ value?: unknown }>) => {
           for (const item of items) {
             const v = item?.value;
@@ -87,17 +86,8 @@ export function PersonSelector({ value, onChange, disabled, tableId, fieldId, pr
           }
         };
         if (typeof field.getFieldValueListByPage === 'function') {
-          let pageToken: number | undefined;
-          let pages = 0;
-          do {
-            const res: any = await field.getFieldValueListByPage({
-              pageSize: PAGE_SIZE,
-              ...(pageToken !== undefined ? { pageToken } : {}),
-            });
-            collect((res?.fieldValues ?? []) as Array<{ value?: unknown }>);
-            pages += 1;
-            pageToken = res?.hasMore && pages < MAX_PAGES ? res?.pageToken : undefined;
-          } while (pageToken);
+          const res: any = await field.getFieldValueListByPage({ pageSize: HEAD_ROWS });
+          collect((res?.fieldValues ?? []) as Array<{ value?: unknown }>);
         } else {
           // 旧宿主无分页接口：回退整列取值
           collect((await field.getFieldValueList()) as Array<{ value?: unknown }>);

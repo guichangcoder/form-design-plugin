@@ -7755,9 +7755,9 @@ var require_react_development = __commonJS({
             var thenable = ctor();
             thenable.then(function(moduleObject2) {
               if (payload._status === Pending || payload._status === Uninitialized) {
-                var resolved = payload;
-                resolved._status = Resolved;
-                resolved._result = moduleObject2;
+                var resolved2 = payload;
+                resolved2._status = Resolved;
+                resolved2._result = moduleObject2;
               }
             }, function(error2) {
               if (payload._status === Pending || payload._status === Uninitialized) {
@@ -30379,14 +30379,14 @@ async function filterFindDup(tableId, fieldId, n11, raw, fieldType) {
     return void 0;
   }
 }
-async function paginate(fetchPage, collect, opts) {
+async function paginate(fetchPage2, collect, opts) {
   let scanned = 0;
   let truncated = false;
   let total;
   let pageToken;
   let guard = 0;
   do {
-    const res = await fetchPage(pageToken);
+    const res = await fetchPage2(pageToken);
     if (typeof res.total === "number") total = res.total;
     if (opts?.shouldAbort?.(total)) {
       return { scanned, truncated: false, total, aborted: true };
@@ -30626,220 +30626,330 @@ async function checkDuplicates(config, mainValues, subValues, cond) {
 
 // src/services/tableRecordCache.ts
 var PAGE_SIZE2 = 200;
-var DEFAULT_MAX_RECORDS = 2e5;
-var MAX_PAGES = 3e3;
-var tasks = /* @__PURE__ */ new Map();
-function taskKey(tableId, kind, fieldId) {
-  return fieldId ? `${kind}:${tableId}:${fieldId}` : `${kind}:${tableId}`;
-}
-function snapshot(t3) {
-  return {
-    loaded: t3.loaded,
-    total: t3.total,
-    done: t3.done,
-    truncated: t3.truncated,
-    error: t3.error
-  };
-}
-function notify(t3) {
-  const s = snapshot(t3);
-  t3.subscribers.forEach((cb) => {
-    try {
-      cb(s, t3.data);
-    } catch {
+var HEAD_SIZE = 200;
+var SEARCH_MAX_PAGES = 1e3;
+var SEARCH_MAX_HITS = 2e3;
+var headCache = /* @__PURE__ */ new Map();
+var taskKey = (tableId, kind, fieldId) => fieldId ? `${kind}:${tableId}:${fieldId}` : `${kind}:${tableId}`;
+async function fetchPage(table, params, useByPage) {
+  const call = (p11) => useByPage ? table.getRecordsByPage(p11) : table.getRecords(p11);
+  try {
+    return await call(params);
+  } catch (e11) {
+    if (params?.sort) {
+      const { sort: _s2, ...rest } = params;
+      console.warn("[tableRecords] \u6392\u5E8F\u53C2\u6570\u4E0D\u88AB\u5BBF\u4E3B\u652F\u6301\uFF0C\u964D\u7EA7\u4E3A\u9ED8\u8BA4\u987A\u5E8F\u91CD\u8BD5");
+      return await call(rest);
     }
-  });
-}
-function subscribeProgress(key, cb) {
-  const t3 = tasks.get(key);
-  if (!t3) return () => {
-  };
-  cb(snapshot(t3), t3.data);
-  t3.subscribers.add(cb);
-  return () => {
-    t3.subscribers.delete(cb);
-  };
-}
-function getLoaded(key) {
-  const t3 = tasks.get(key);
-  return t3 && t3.done && !t3.error ? t3.data : void 0;
+    throw e11;
+  }
 }
 function invalidateTableRecords(tableId) {
   if (!tableId) {
-    tasks.clear();
+    headCache.clear();
     return;
   }
-  for (const k12 of [...tasks.keys()]) {
-    if (k12.split(":").includes(tableId)) tasks.delete(k12);
+  for (const k12 of [...headCache.keys()]) {
+    if (k12.split(":").includes(tableId)) headCache.delete(k12);
   }
 }
-async function runFieldColumn(t3, tableId, fieldId, maxRecords, label) {
-  try {
-    const table = await getBase().getTableById(tableId);
-    const field = await table.getField(fieldId);
-    if (typeof field?.getFieldValueListByPage === "function") {
-      let token;
-      let guard = 0;
-      for (; ; ) {
-        const res = await field.getFieldValueListByPage({
-          pageSize: PAGE_SIZE2,
-          stringValue: true,
-          ...token !== void 0 ? { pageToken: token } : {}
-        });
-        if (typeof res?.total === "number") t3.total = res.total;
-        for (const fv2 of res?.fieldValues ?? []) {
-          t3.data.push({ recordId: fv2.recordId, text: stringifyCellValue(fv2.value) });
-          t3.loaded += 1;
-          if (t3.loaded >= maxRecords) {
-            t3.truncated = true;
-            break;
-          }
-        }
-        notify(t3);
-        if (t3.truncated) break;
-        guard += 1;
-        const next = res?.hasMore ? res?.pageToken : void 0;
-        if (next === void 0 || next === token || guard > MAX_PAGES) break;
-        token = next;
+function getHeadCache(key) {
+  const p11 = headCache.get(key);
+  if (!p11) return void 0;
+  const box = resolved.get(key);
+  return box;
+}
+var resolved = /* @__PURE__ */ new Map();
+var sortFieldCache = /* @__PURE__ */ new Map();
+function findSortFieldId(table, tableId) {
+  let p11 = sortFieldCache.get(tableId);
+  if (!p11) {
+    p11 = (async () => {
+      try {
+        const metas = await table.getFieldMetaList();
+        const m10 = metas.find(
+          (x11) => x11?.type === 1002 || x11?.type === 1001
+          /* CreatedTime */
+        );
+        return m10?.id;
+      } catch {
+        return void 0;
       }
-    } else {
+    })();
+    sortFieldCache.set(tableId, p11);
+  }
+  return p11;
+}
+function loadHeadColumn(tableId, fieldId, opts) {
+  const key = taskKey(tableId, "col", fieldId);
+  if (opts?.force) {
+    headCache.delete(key);
+    resolved.delete(key);
+  }
+  let p11 = headCache.get(key);
+  if (!p11) {
+    p11 = (async () => {
+      try {
+        const table = await getBase().getTableById(tableId);
+        const sortFieldId = await findSortFieldId(table, tableId);
+        const params = {
+          pageSize: HEAD_SIZE,
+          ...sortFieldId ? { sort: [{ fieldId: sortFieldId, desc: true }] } : {}
+        };
+        const useByPage = typeof table.getRecordsByPage === "function";
+        const res = await fetchPage(table, params, useByPage);
+        const rows = (res?.records ?? []).map((rec) => ({
+          recordId: rec.recordId,
+          text: stringifyCellValue((rec.fields ?? {})[fieldId])
+        }));
+        const out = {
+          rows,
+          total: typeof res?.total === "number" ? res.total : void 0,
+          hasMore: !!res?.hasMore
+        };
+        resolved.set(key, out);
+        return out;
+      } catch (e11) {
+        headCache.delete(key);
+        const err = e11?.message ?? String(e11);
+        console.warn(`[tableRecords] \u9996\u5C4F\u52A0\u8F7D\u5931\u8D25\uFF1A\u8868=${tableId} \u5B57\u6BB5=${opts?.label ?? fieldId} \u9519\u8BEF=${err}`);
+        return { rows: [], hasMore: false, error: err };
+      }
+    })();
+    headCache.set(key, p11);
+  }
+  return { key, promise: p11 };
+}
+function loadHeadRows(tableId, opts) {
+  const key = taskKey(tableId, "row");
+  if (opts?.force) {
+    headCache.delete(key);
+    resolved.delete(key);
+  }
+  let p11 = headCache.get(key);
+  if (!p11) {
+    p11 = (async () => {
+      try {
+        const table = await getBase().getTableById(tableId);
+        const sortFieldId = await findSortFieldId(table, tableId);
+        const params = {
+          pageSize: HEAD_SIZE,
+          ...sortFieldId ? { sort: [{ fieldId: sortFieldId, desc: true }] } : {}
+        };
+        const useByPage = typeof table.getRecordsByPage === "function";
+        const res = await fetchPage(table, params, useByPage);
+        const rows = (res?.records ?? []).map((rec) => ({
+          recordId: rec.recordId,
+          fields: rec.fields ?? {}
+        }));
+        const out = {
+          rows,
+          total: typeof res?.total === "number" ? res.total : void 0,
+          hasMore: !!res?.hasMore
+        };
+        resolved.set(key, out);
+        return out;
+      } catch (e11) {
+        headCache.delete(key);
+        const err = e11?.message ?? String(e11);
+        console.warn(`[tableRecords] \u9996\u5C4F\u52A0\u8F7D\u5931\u8D25\uFF1A\u8868=${opts?.label ?? tableId} \u9519\u8BEF=${err}`);
+        return { rows: [], hasMore: false, error: err };
+      }
+    })();
+    headCache.set(key, p11);
+  }
+  return { key, promise: p11 };
+}
+function loadRowsByConditions(tableId, conditions, opts) {
+  const key = taskKey(tableId, "cond", conditions.map((c11) => `${c11.fieldId}=${c11.text}`).join("&"));
+  let p11 = headCache.get(key);
+  if (!p11) {
+    p11 = (async () => {
+      const maxPages = opts?.maxPages ?? 50;
+      try {
+        const table = await getBase().getTableById(tableId);
+        const useByPage = typeof table.getRecordsByPage === "function";
+        const rows = [];
+        let token;
+        let guard = 0;
+        let filterEffective = false;
+        for (; ; ) {
+          const params = {
+            pageSize: PAGE_SIZE2,
+            filter: {
+              conjunction: "and",
+              conditions: conditions.map((c11) => ({
+                fieldId: c11.fieldId,
+                operator: "is",
+                value: c11.text
+              }))
+            },
+            ...token !== void 0 ? { pageToken: token } : {}
+          };
+          const res = useByPage ? await table.getRecordsByPage(params) : await table.getRecords(params);
+          const records = res?.records ?? [];
+          for (const rec of records) {
+            const fields = rec.fields ?? {};
+            const ok2 = conditions.every(
+              (c11) => stringifyCellValue(fields[c11.fieldId]).trim() === c11.text.trim()
+            );
+            if (ok2) filterEffective = true;
+            rows.push({ recordId: rec.recordId, fields });
+          }
+          guard += 1;
+          const next = res?.hasMore ? res?.pageToken : void 0;
+          if (next === void 0 || next === token || guard >= maxPages) break;
+          token = next;
+        }
+        if (rows.length > 0 && !filterEffective) {
+          console.warn("[tableRecords] \u6761\u4EF6\u8FC7\u6EE4\u672A\u751F\u6548\uFF08\u8FD4\u56DE\u8BB0\u5F55\u4E0D\u6EE1\u8DB3\u6761\u4EF6\uFF09");
+        }
+        const out = { rows, hasMore: false, filterEffective, total: rows.length };
+        resolved.set(key, out);
+        return out;
+      } catch (e11) {
+        headCache.delete(key);
+        const err = e11?.message ?? String(e11);
+        console.warn(
+          `[tableRecords] \u6761\u4EF6\u52A0\u8F7D\u5931\u8D25\uFF1A\u8868=${tableId} \u6761\u4EF6=${opts?.label ?? conditions.length} \u9519\u8BEF=${err}`
+        );
+        return { rows: [], hasMore: false, filterEffective: false, error: err, total: 0 };
+      }
+    })();
+    headCache.set(key, p11);
+  }
+  return { key, promise: p11 };
+}
+function extraCondToFilter(extra) {
+  return (extra ?? []).filter((c11) => c11 && c11.fieldId && (c11.text ?? "") !== "").map((c11) => ({ fieldId: c11.fieldId, operator: "is", value: c11.text }));
+}
+function searchAllPages(tableId, fieldId, keyword, opts) {
+  const kw2 = (keyword || "").trim();
+  let cancelled = false;
+  const maxPages = opts.maxPages ?? SEARCH_MAX_PAGES;
+  const extraFilter = extraCondToFilter(opts.extraConditions);
+  const done = (async () => {
+    if (!kw2) return;
+    let token;
+    let guard = 0;
+    let scanned = 0;
+    let hits = 0;
+    let sawEffective = false;
+    try {
+      const table = await getBase().getTableById(tableId);
       const useByPage = typeof table.getRecordsByPage === "function";
-      let token;
-      let guard = 0;
       for (; ; ) {
+        if (cancelled) return;
         const params = {
           pageSize: PAGE_SIZE2,
+          filter: {
+            conjunction: "and",
+            conditions: [
+              { fieldId, operator: "contains", value: kw2 },
+              ...extraFilter
+            ]
+          },
           ...token !== void 0 ? { pageToken: token } : {}
         };
         const res = useByPage ? await table.getRecordsByPage(params) : await table.getRecords(params);
-        if (typeof res?.total === "number") t3.total = res.total;
-        for (const rec of res?.records ?? []) {
-          t3.data.push({
-            recordId: rec.recordId,
-            text: stringifyCellValue((rec.fields ?? {})[fieldId])
-          });
-          t3.loaded += 1;
-          if (t3.loaded >= maxRecords) {
-            t3.truncated = true;
-            break;
-          }
+        if (cancelled) return;
+        const records = res?.records ?? [];
+        const batch = [];
+        let effectiveThisPage = false;
+        for (const rec of records) {
+          const text = stringifyCellValue((rec.fields ?? {})[fieldId]);
+          if (text.toLowerCase().includes(kw2.toLowerCase())) effectiveThisPage = true;
+          batch.push({ recordId: rec.recordId, text });
         }
-        notify(t3);
-        if (t3.truncated) break;
+        scanned += records.length;
+        if (records.length > 0 && effectiveThisPage) {
+          sawEffective = true;
+          opts.onHits(batch);
+          hits += batch.length;
+        } else if (records.length > 0 && !sawEffective) {
+          console.warn("[tableRecords] \u670D\u52A1\u7AEF\u8FC7\u6EE4\u672A\u751F\u6548\uFF08\u8FD4\u56DE\u8BB0\u5F55\u4E0D\u542B\u5173\u952E\u5B57\uFF09\uFF0C\u5DF2\u505C\u6B62\u641C\u7D22");
+          return;
+        }
+        opts.onProgress?.(scanned, typeof res?.total === "number" ? res.total : void 0);
+        if (hits >= SEARCH_MAX_HITS) return;
         guard += 1;
         const next = res?.hasMore ? res?.pageToken : void 0;
-        if (next === void 0 || next === token || guard > MAX_PAGES) break;
+        if (next === void 0 || next === token || guard >= maxPages) return;
         token = next;
       }
+    } catch (e11) {
+      console.warn(`[tableRecords] \u641C\u7D22\u5931\u8D25\uFF1A\u8868=${tableId} \u5B57\u6BB5=${fieldId} \u9519\u8BEF=${e11?.message ?? e11}`);
     }
-  } catch (e11) {
-    t3.error = e11?.message ?? String(e11);
-    console.warn(`[tableRecords] \u52A0\u8F7D\u6574\u5217\u5931\u8D25\uFF1A\u8868=${tableId} \u5B57\u6BB5=${label ?? fieldId} \u9519\u8BEF=${t3.error}`);
-  } finally {
-    t3.done = true;
-    notify(t3);
-  }
-  return t3.data;
+  })();
+  return { cancel: () => {
+    cancelled = true;
+  }, done };
 }
-function loadFieldColumn(tableId, fieldId, opts) {
-  const key = taskKey(tableId, "col", fieldId);
-  if (opts?.force) tasks.delete(key);
-  let t3 = tasks.get(key);
-  if (!t3) {
-    t3 = {
-      key,
-      data: [],
-      loaded: 0,
-      done: false,
-      truncated: false,
-      subscribers: /* @__PURE__ */ new Set()
-    };
-    tasks.set(key, t3);
-    t3.promise = runFieldColumn(t3, tableId, fieldId, opts?.maxRecords ?? DEFAULT_MAX_RECORDS, opts?.label);
-  }
-  return { key, promise: t3.promise };
-}
-async function runTableRows(t3, tableId, maxRecords, label) {
-  try {
-    const table = await getBase().getTableById(tableId);
-    const useByPage = typeof table.getRecordsByPage === "function";
+function searchAllRows(tableId, fieldId, keyword, opts) {
+  const kw2 = (keyword || "").trim();
+  let cancelled = false;
+  const maxPages = opts.maxPages ?? SEARCH_MAX_PAGES;
+  const extraFilter = extraCondToFilter(opts.extraConditions);
+  const done = (async () => {
+    if (!kw2) return;
     let token;
     let guard = 0;
-    for (; ; ) {
-      const params = {
-        pageSize: PAGE_SIZE2,
-        ...token !== void 0 ? { pageToken: token } : {}
-      };
-      const res = useByPage ? await table.getRecordsByPage(params) : await table.getRecords(params);
-      if (typeof res?.total === "number") t3.total = res.total;
-      for (const rec of res?.records ?? []) {
-        t3.data.push({ recordId: rec.recordId, fields: rec.fields ?? {} });
-        t3.loaded += 1;
-        if (t3.loaded >= maxRecords) {
-          t3.truncated = true;
-          break;
+    let scanned = 0;
+    let hits = 0;
+    let sawEffective = false;
+    try {
+      const table = await getBase().getTableById(tableId);
+      const useByPage = typeof table.getRecordsByPage === "function";
+      for (; ; ) {
+        if (cancelled) return;
+        const params = {
+          pageSize: PAGE_SIZE2,
+          filter: {
+            conjunction: "and",
+            conditions: [
+              { fieldId, operator: "contains", value: kw2 },
+              ...extraFilter
+            ]
+          },
+          ...token !== void 0 ? { pageToken: token } : {}
+        };
+        const res = useByPage ? await table.getRecordsByPage(params) : await table.getRecords(params);
+        if (cancelled) return;
+        const records = res?.records ?? [];
+        const batch = [];
+        let effectiveThisPage = false;
+        for (const rec of records) {
+          const fields = rec.fields ?? {};
+          const text = stringifyCellValue(fields[fieldId]);
+          const condOk = (opts.extraConditions ?? []).every(
+            (c11) => stringifyCellValue(fields[c11.fieldId]).trim() === c11.text.trim()
+          );
+          if (text.toLowerCase().includes(kw2.toLowerCase()) && condOk) effectiveThisPage = true;
+          batch.push({ recordId: rec.recordId, fields });
         }
+        scanned += records.length;
+        if (records.length > 0 && effectiveThisPage) {
+          sawEffective = true;
+          opts.onHits(batch);
+          hits += batch.length;
+        } else if (records.length > 0 && !sawEffective) {
+          console.warn("[tableRecords] \u670D\u52A1\u7AEF\u8FC7\u6EE4\u672A\u751F\u6548\uFF08\u8FD4\u56DE\u8BB0\u5F55\u4E0D\u542B\u5173\u952E\u5B57\uFF09\uFF0C\u5DF2\u505C\u6B62\u641C\u7D22");
+          return;
+        }
+        opts.onProgress?.(scanned, typeof res?.total === "number" ? res.total : void 0);
+        if (hits >= SEARCH_MAX_HITS) return;
+        guard += 1;
+        const next = res?.hasMore ? res?.pageToken : void 0;
+        if (next === void 0 || next === token || guard >= maxPages) return;
+        token = next;
       }
-      notify(t3);
-      if (t3.truncated) break;
-      guard += 1;
-      const next = res?.hasMore ? res?.pageToken : void 0;
-      if (next === void 0 || next === token || guard > MAX_PAGES) break;
-      token = next;
+    } catch (e11) {
+      console.warn(`[tableRecords] \u641C\u7D22\u5931\u8D25\uFF1A\u8868=${tableId} \u9519\u8BEF=${e11?.message ?? e11}`);
     }
-  } catch (e11) {
-    t3.error = e11?.message ?? String(e11);
-    console.warn(`[tableRecords] \u52A0\u8F7D\u6574\u8868\u5931\u8D25\uFF1A\u8868=${label ?? tableId} \u9519\u8BEF=${t3.error}`);
-  } finally {
-    t3.done = true;
-    notify(t3);
-  }
-  return t3.data;
-}
-function loadTableRows(tableId, opts) {
-  const key = taskKey(tableId, "row");
-  if (opts?.force) tasks.delete(key);
-  let t3 = tasks.get(key);
-  if (!t3) {
-    t3 = {
-      key,
-      data: [],
-      loaded: 0,
-      done: false,
-      truncated: false,
-      subscribers: /* @__PURE__ */ new Set()
-    };
-    tasks.set(key, t3);
-    t3.promise = runTableRows(t3, tableId, opts?.maxRecords ?? DEFAULT_MAX_RECORDS, opts?.label);
-  }
-  return { key, promise: t3.promise };
-}
-async function searchRecordsByKeyword(tableId, fieldId, keyword, limit = 50) {
-  const kw2 = (keyword || "").trim();
-  if (!kw2) return [];
-  try {
-    const table = await getBase().getTableById(tableId);
-    const useByPage = typeof table.getRecordsByPage === "function";
-    const params = {
-      pageSize: Math.min(200, Math.max(PAGE_SIZE2, limit)),
-      filter: {
-        conjunction: "and",
-        conditions: [{ fieldId, operator: "contains", value: kw2 }]
-      }
-    };
-    const res = useByPage ? await table.getRecordsByPage(params) : await table.getRecords(params);
-    const records = res?.records ?? [];
-    const out = [];
-    let effective = false;
-    for (const rec of records.slice(0, limit)) {
-      const text = stringifyCellValue((rec.fields ?? {})[fieldId]);
-      if (text.toLowerCase().includes(kw2.toLowerCase())) effective = true;
-      out.push({ recordId: rec.recordId, text });
-    }
-    return effective ? out : [];
-  } catch {
-    return [];
-  }
+  })();
+  return { cancel: () => {
+    cancelled = true;
+  }, done };
 }
 
 // tests/regression.entry.mjs
@@ -31550,48 +31660,48 @@ async function run() {
   {
     const BIG = "tblBig";
     const COL = "fldName";
-    let pageCalls = 0;
-    let listedTotal = 0;
+    let headCalls = 0;
     let filterCalls = 0;
     const ALL = Array.from({ length: 450 }, (_5, i3) => `\u5BA2\u6237${i3 + 1}`);
     ALL[433] = "\u9690\u85CF\u5728\u6DF1\u5904\u7684\u5BA2\u6237D";
-    const paginate2 = (pageToken) => {
-      pageCalls += 1;
-      const start = pageToken === void 0 ? 0 : Number(pageToken);
-      const slice = ALL.slice(start, start + 200);
-      const nextStart = start + 200;
-      const hasMore = nextStart < ALL.length;
-      return {
-        fieldValues: slice.map((t3, i3) => ({ recordId: `rec${start + i3}`, value: t3 })),
-        hasMore,
-        pageToken: hasMore ? String(nextStart) : void 0,
-        total: ALL.length
-      };
-    };
+    const recOf = (start, slice) => slice.map((t3, i3) => ({ recordId: `rec${start + i3}`, fields: { [COL]: t3 } }));
     const bigBase = {
       getTableById: async (id) => {
-        if (id !== BIG) return { getField: async () => null, getRecords: async () => ({ records: [], hasMore: false }) };
+        if (id !== BIG) {
+          return {
+            getField: async () => null,
+            getRecords: async () => ({ records: [], hasMore: false }),
+            getRecordsByPage: async () => ({ records: [], hasMore: false }),
+            getFieldMetaList: async () => []
+          };
+        }
         return {
-          getField: async () => ({
-            getFieldValueListByPage: async ({ pageToken, stringValue }) => {
-              if (stringValue !== true) throw new Error("\u5E94\u4F20 stringValue:true \u4EE5\u89C4\u907F\u5355\u5143\u683C\u7ED3\u6784\u5DEE\u5F02");
-              return paginate2(pageToken);
-            }
-          }),
-          // 服务端过滤（补搜用）：contains 命中
-          getRecordsByPage: async ({ filter }) => {
+          getFieldMetaList: async () => [{ id: "fldMod", name: "\u66F4\u65B0\u65F6\u95F4", type: 1002, isPrimary: false }],
+          getRecordsByPage: async ({ filter, pageToken, pageSize }) => {
             if (filter) {
               filterCalls += 1;
               const kw2 = String(filter.conditions?.[0]?.value ?? "");
-              const hits2 = ALL.filter((t3) => t3.includes(kw2)).slice(0, 50);
+              const hits2 = ALL.filter((t3) => t3.includes(kw2));
+              const start = pageToken === void 0 ? 0 : Number(pageToken);
+              const slice2 = hits2.slice(start, start + (pageSize || 200));
+              const nextStart = start + (pageSize || 200);
+              const hasMore2 = nextStart < hits2.length;
               return {
-                records: hits2.map((t3, i3) => ({ recordId: `hit${i3}`, fields: { [COL]: t3 } })),
-                hasMore: false,
+                records: slice2.map((t3) => ({ recordId: `hit:${t3}`, fields: { [COL]: t3 } })),
+                hasMore: hasMore2,
+                pageToken: hasMore2 ? String(nextStart) : void 0,
                 total: hits2.length
               };
             }
-            listedTotal += 1;
-            return { records: [], hasMore: false };
+            headCalls += 1;
+            const slice = ALL.slice(0, pageSize || 200);
+            const hasMore = (pageSize || 200) < ALL.length;
+            return {
+              records: recOf(0, slice),
+              hasMore,
+              pageToken: hasMore ? String(pageSize || 200) : void 0,
+              total: ALL.length
+            };
           }
         };
       },
@@ -31599,72 +31709,175 @@ async function run() {
     };
     __setAppForTest({ base: bigBase });
     invalidateTableRecords();
-    const colTask = loadFieldColumn(BIG, COL, { label: "\u5BA2\u6237\u540D" });
-    check("F18 \u4EFB\u52A1\u952E\u6309\u300C\u5217\u300D\u7EF4\u5EA6\u751F\u6210", colTask.key === taskKey(BIG, "col", COL), colTask.key);
-    const rows = await colTask.promise;
-    check("F18 \u5168\u91CF\u52A0\u8F7D\u5230\u5E95\uFF1A450 \u6761\u5168\u90E8\u62FF\u5230", rows.length === 450, rows.length);
-    check("F18 \u5206\u9875\u786E\u5B9E\u7FFB\u4E86 3 \u9875", pageCalls === 3, pageCalls);
-    check("F18 \u6DF1\u5904\u7684\u8BB0\u5F55\u4E5F\u5728\u5019\u9009\u91CC\uFF08\u4E0D\u518D 2000 \u786C\u622A\u65AD\uFF09", rows.some((r10) => r10.text === "\u9690\u85CF\u5728\u6DF1\u5904\u7684\u5BA2\u6237D"));
-    const before = pageCalls;
-    const again = getLoaded(taskKey(BIG, "col", COL));
-    check("F18 \u7F13\u5B58\u547D\u4E2D\uFF1A\u518D\u6B21\u53D6\u7528\u4E0D\u53D1\u8BF7\u6C42", pageCalls === before && again?.length === 450, {
-      pageCalls,
-      len: again?.length
+    const headTask = loadHeadColumn(BIG, COL, { label: "\u5BA2\u6237\u540D" });
+    check("F18 \u4EFB\u52A1\u952E\u6309\u300C\u5217\u300D\u7EF4\u5EA6\u751F\u6210", headTask.key === taskKey(BIG, "col", COL), headTask.key);
+    const head = await headTask.promise;
+    check("F18 \u5C55\u5F00\u53EA\u53D6\u6700\u65B0 200 \u6761", head.rows.length === 200, head.rows.length);
+    check("F18 \u9996\u5C4F\u53EA\u53D1 1 \u6B21\u8BF7\u6C42\uFF08\u4E0D\u518D\u5168\u91CF\u7FFB\u9875\uFF09", headCalls === 1, headCalls);
+    check("F18 \u9996\u5C4F\u5E26\u56DE\u603B\u6570\u4E0E hasMore", head.total === 450 && head.hasMore === true, {
+      total: head.total,
+      hasMore: head.hasMore
     });
-    await loadFieldColumn(BIG, COL).promise;
-    check("F18 \u91CD\u590D\u8C03\u7528\u590D\u7528\u540C\u4E00\u4EFB\u52A1\uFF08\u4E0D\u91CD\u65B0\u62C9\uFF09", pageCalls === before, pageCalls);
+    const before = headCalls;
+    const cachedHead = getHeadCache(taskKey(BIG, "col", COL));
+    check("F18 \u9996\u5C4F\u7F13\u5B58\u547D\u4E2D\uFF1A\u96F6\u8BF7\u6C42", headCalls === before && cachedHead?.rows.length === 200, {
+      headCalls,
+      len: cachedHead?.rows.length
+    });
+    await loadHeadColumn(BIG, COL).promise;
+    check("F18 \u91CD\u590D\u8C03\u7528\u590D\u7528\u540C\u4E00\u4EFB\u52A1", headCalls === before, headCalls);
     invalidateTableRecords(BIG);
-    pageCalls = 0;
-    await loadFieldColumn(BIG, COL).promise;
-    check("F18 \u7F13\u5B58\u5931\u6548\u540E\u91CD\u65B0\u5168\u91CF\u52A0\u8F7D", pageCalls === 3, pageCalls);
-    const hits = await searchRecordsByKeyword(BIG, COL, "\u5BA2\u6237D");
-    check("F18 \u670D\u52A1\u7AEF\u8865\u641C\u547D\u4E2D\u8FDC\u7AEF\u8BB0\u5F55", hits.some((h11) => h11.text === "\u9690\u85CF\u5728\u6DF1\u5904\u7684\u5BA2\u6237D"), hits);
-    check("F18 \u8865\u641C\u786E\u5B9E\u8D70\u4E86\u670D\u52A1\u7AEF\u8FC7\u6EE4", filterCalls >= 1, filterCalls);
+    headCalls = 0;
+    await loadHeadColumn(BIG, COL).promise;
+    check("F18 \u7F13\u5B58\u5931\u6548\u540E\u91CD\u65B0\u52A0\u8F7D\u9996\u5C4F", headCalls === 1, headCalls);
+    filterCalls = 0;
+    const hits = [];
+    let scanned = 0;
+    const sh2 = searchAllPages(BIG, COL, "\u5BA2\u6237D", {
+      onHits: (rows) => hits.push(...rows),
+      onProgress: (s) => {
+        scanned = s;
+      }
+    });
+    await sh2.done;
+    check("F18 \u641C\u7D22\u547D\u4E2D\u6DF1\u5904\u7684\u8BB0\u5F55\uFF08\u9996\u5C4F 200 \u6761\u4E4B\u5916\uFF09", hits.some((h11) => h11.text === "\u9690\u85CF\u5728\u6DF1\u5904\u7684\u5BA2\u6237D"), hits.length);
+    check("F18 \u641C\u7D22\u8D70\u4E86\u670D\u52A1\u7AEF\u8FC7\u6EE4", filterCalls >= 1, filterCalls);
+    check('F18 \u641C\u7D22"\u547D\u4E2D\u5373\u6B62"\uFF1A\u672A\u628A\u5168\u8868\u5F53\u547D\u4E2D\u5237\u5B8C', hits.length < 450, hits.length);
+    const sh22 = searchAllPages(BIG, COL, "\u5BA2\u6237", { onHits: () => {
+    } });
+    sh22.cancel();
+    await sh22.done;
+    check("F18 \u641C\u7D22\u53EF\u53D6\u6D88\uFF08\u4E0D\u629B\u9519\uFF09", true);
     invalidateTableRecords();
     __setAppForTest({
       base: {
         getTableById: async () => ({
+          getFieldMetaList: async () => [],
           getRecordsByPage: async () => ({
             records: [{ recordId: "x", fields: { [COL]: "\u5B8C\u5168\u65E0\u5173\u7684\u503C" } }],
             hasMore: false
-          }),
-          getField: async () => null
+          })
         }),
         getTableMetaList: async () => [{ id: BIG }]
       }
     });
-    const bogus = await searchRecordsByKeyword(BIG, COL, "\u5BA2\u6237D");
-    check("F18 \u8FC7\u6EE4\u672A\u751F\u6548\u65F6\u4E0D\u8FD4\u56DE\u4F2A\u547D\u4E2D\uFF08\u9632\u8BEF\u5224\uFF09", bogus.length === 0, bogus);
+    const bogus = [];
+    await searchAllPages(BIG, COL, "\u5BA2\u6237D", { onHits: (r10) => bogus.push(...r10) }).done;
+    check("F18 \u8FC7\u6EE4\u672A\u751F\u6548\u65F6\u4E0D\u8FD4\u56DE\u4F2A\u547D\u4E2D\uFF08\u9632\u8BEF\u5224\uFF09", bogus.length === 0, bogus.length);
     invalidateTableRecords();
-    __setAppForTest({
-      base: {
+    __setAppForTest({ base: bigBase });
+    const rowHits = [];
+    await searchAllRows(BIG, COL, "\u9690\u85CF\u5728\u6DF1\u5904", { onHits: (r10) => rowHits.push(...r10) }).done;
+    check("F18 \u6574\u884C\u641C\u7D22\u547D\u4E2D\u5F15\u7528\u9009\u9879\u6E90\u8BB0\u5F55", rowHits.some((r10) => r10.fields[COL] === "\u9690\u85CF\u5728\u6DF1\u5904\u7684\u5BA2\u6237D"), rowHits.length);
+    invalidateTableRecords();
+    headCalls = 0;
+    const headRows = await loadHeadRows(BIG, { label: "\u5927\u8868" }).promise;
+    check("F18 \u5F15\u7528\u9009\u9879\u9996\u5C4F\u53EA\u53D6 200 \u6761", headRows.rows.length === 200, headRows.rows.length);
+    check("F18 \u5F15\u7528\u9009\u9879\u9996\u5C4F\u53EA\u53D1 1 \u6B21\u8BF7\u6C42", headCalls === 1, headCalls);
+    {
+      const CITY = "fldCity";
+      const PROV = "fldProv";
+      const provRows = [
+        ...Array.from({ length: 3e3 }, (_5, i3) => ({ [PROV]: "\u6D59\u6C5F\u7701", [CITY]: `\u6D59\u57CE\u5E02${i3 + 1}` })),
+        ...Array.from({ length: 7e3 }, (_5, i3) => ({ [PROV]: "\u6C5F\u82CF\u7701", [CITY]: `\u82CF\u57CE\u5E02${i3 + 1}` }))
+      ];
+      let condFilterCalls = 0;
+      const condBase = {
         getTableById: async () => ({
-          getRecordsByPage: async ({ pageToken }) => {
+          getFieldMetaList: async () => [],
+          getRecordsByPage: async ({ filter, pageToken, pageSize }) => {
+            const conds = filter?.conditions ?? [];
+            condFilterCalls += 1;
+            const hits2 = provRows.filter((r10) => conds.every((c11) => String(r10[c11.fieldId] ?? "") === String(c11.value)));
             const start = pageToken === void 0 ? 0 : Number(pageToken);
-            const slice = ALL.slice(start, start + 200);
-            const nextStart = start + 200;
-            const hasMore = nextStart < ALL.length;
+            const ps2 = pageSize || 200;
+            const slice = hits2.slice(start, start + ps2);
+            const nextStart = start + ps2;
+            const hasMore = nextStart < hits2.length;
             return {
-              records: slice.map((t3, i3) => ({ recordId: `r${start + i3}`, fields: { [COL]: t3 } })),
+              records: slice.map((f12, i3) => ({ recordId: `c${start + i3}`, fields: f12 })),
               hasMore,
-              pageToken: hasMore ? String(nextStart) : void 0,
-              total: ALL.length
+              pageToken: hasMore ? String(nextStart) : void 0
             };
-          },
-          getField: async () => null
+          }
+        }),
+        getTableMetaList: async () => [{ id: "tblCity" }]
+      };
+      __setAppForTest({ base: condBase });
+      invalidateTableRecords();
+      const got = [];
+      const condHits = await loadRowsByConditions("tblCity", [{ fieldId: PROV, text: "\u6D59\u6C5F\u7701" }]).promise;
+      check("F18 \u6761\u4EF6\u52A0\u8F7D\u53D6\u56DE\u8BE5\u7236\u7EA7\u4E0B\u5168\u90E8\u8BB0\u5F55\uFF08\u7A81\u7834\u9996\u5C4F 200 \u9650\u5236\uFF09", condHits.rows.length === 3e3, condHits.rows.length);
+      check("F18 \u6761\u4EF6\u52A0\u8F7D\u8D70\u670D\u52A1\u7AEF\u8FC7\u6EE4", condFilterCalls > 0, condFilterCalls);
+      check("F18 \u6761\u4EF6\u52A0\u8F7D\u81EA\u8BC1\u901A\u8FC7\uFF08filterEffective\uFF09", condHits.filterEffective === true, condHits.filterEffective);
+      check(
+        "F18 \u6761\u4EF6\u52A0\u8F7D\u7ED3\u679C\u5168\u90E8\u6EE1\u8DB3\u6761\u4EF6\uFF08\u65E0\u4E32\u6863\uFF09",
+        condHits.rows.every((r10) => r10.fields[PROV] === "\u6D59\u6C5F\u7701"),
+        condHits.rows.slice(0, 3)
+      );
+      const callsBefore = condFilterCalls;
+      await loadRowsByConditions("tblCity", [{ fieldId: PROV, text: "\u6D59\u6C5F\u7701" }]).promise;
+      check("F18 \u76F8\u540C\u6761\u4EF6\u547D\u4E2D\u7F13\u5B58\uFF1A\u96F6\u8BF7\u6C42", condFilterCalls === callsBefore, condFilterCalls);
+      const weird = await loadRowsByConditions("tblCity", [{ fieldId: PROV, text: "\u6D59=\u6C5F&\u7701" }]).promise;
+      check("F18 \u6761\u4EF6\u6587\u672C\u542B = / & \u65F6\u4ECD\u5B89\u5168\uFF08\u65E0\u5339\u914D\u8FD4\u56DE\u7A7A\uFF09", weird.rows.length === 0, weird.rows.length);
+      const bogusBase = {
+        getTableById: async () => ({
+          getFieldMetaList: async () => [],
+          getRecordsByPage: async () => ({
+            records: [{ recordId: "z", fields: { [PROV]: "\u5E7F\u4E1C\u7701", [CITY]: "\u7CA4\u57CE\u5E021" } }],
+            hasMore: false
+          })
+        }),
+        getTableMetaList: async () => [{ id: "tblCity" }]
+      };
+      __setAppForTest({ base: bogusBase });
+      invalidateTableRecords();
+      const ignored = await loadRowsByConditions("tblCity", [{ fieldId: PROV, text: "\u6D59\u6C5F\u7701" }]).promise;
+      check("F18 \u6761\u4EF6\u8FC7\u6EE4\u88AB\u5BBF\u4E3B\u5FFD\u7565\u65F6\u6807\u8BB0 filterEffective=false", ignored.filterEffective === false, {
+        n: ignored.rows.length,
+        eff: ignored.filterEffective
+      });
+      __setAppForTest({ base: condBase });
+      invalidateTableRecords();
+      const bothHits = [];
+      await searchAllRows("tblCity", CITY, "\u6D59\u57CE\u5E021", {
+        extraConditions: [{ fieldId: PROV, text: "\u6D59\u6C5F\u7701" }],
+        onHits: (rs2) => bothHits.push(...rs2)
+      }).done;
+      check("F18 \u641C\u7D22\u53E0\u52A0\u8054\u52A8\u6761\u4EF6\uFF1A\u547D\u4E2D\u5747\u6EE1\u8DB3\u7236\u7EA7\u6761\u4EF6", bothHits.length > 0 && bothHits.every((r10) => r10.fields[PROV] === "\u6D59\u6C5F\u7701"), bothHits.length);
+      const wrongProv = [];
+      await searchAllRows("tblCity", CITY, "\u6D59\u57CE\u5E021", {
+        extraConditions: [{ fieldId: PROV, text: "\u6C5F\u82CF\u7701" }],
+        onHits: (rs2) => wrongProv.push(...rs2)
+      }).done;
+      check("F18 \u641C\u7D22\u53E0\u52A0\u4E0D\u5339\u914D\u7684\u7236\u7EA7\u6761\u4EF6\uFF1A\u96F6\u547D\u4E2D\uFF08\u4E0D\u4E32\u6863\uFF09", wrongProv.length === 0, wrongProv.length);
+    }
+    {
+      let attempts = 0;
+      const noSortBase = {
+        getTableById: async () => ({
+          getFieldMetaList: async () => [{ id: "fldMod", name: "\u66F4\u65B0\u65F6\u95F4", type: 1002 }],
+          getRecordsByPage: async (p11) => {
+            attempts += 1;
+            if (p11 && p11.sort) throw new Error("unsupported param: sort");
+            return {
+              records: [{ recordId: "r1", fields: { [COL]: "\u964D\u7EA7\u540E\u7684\u5BA2\u6237" } }],
+              hasMore: false,
+              total: 1
+            };
+          }
         }),
         getTableMetaList: async () => [{ id: BIG }]
-      }
-    });
-    const seen = [];
-    const rowKey = taskKey(BIG, "row");
-    loadTableRows(BIG, { label: "\u5927\u8868" });
-    const unsub = subscribeProgress(rowKey, (p11) => seen.push(p11.loaded));
-    await loadTableRows(BIG).promise;
-    unsub();
-    check("F18 \u6574\u8868\u52A0\u8F7D\u62FF\u5230\u5168\u90E8 450 \u6761", getLoaded(rowKey)?.length === 450, getLoaded(rowKey)?.length);
-    check("F18 \u6E10\u8FDB\u56DE\u8C03\u81F3\u5C11\u89E6\u53D1 2 \u6B21\uFF08\u8FB9\u7FFB\u8FB9\u7ED9\uFF09", seen.length >= 2, seen);
-    check("F18 \u8FDB\u5EA6\u5305\u542B\u603B\u6570", seen.some((_5, i3) => true) && true);
+      };
+      __setAppForTest({ base: noSortBase });
+      invalidateTableRecords();
+      const degraded = await loadHeadColumn(BIG, COL, { label: "\u5BA2\u6237\u540D" }).promise;
+      check(
+        "F18 sort \u4E0D\u88AB\u652F\u6301\u65F6\u81EA\u52A8\u964D\u7EA7\u4E14\u4ECD\u6709\u6570\u636E",
+        attempts >= 2 && degraded.rows.length === 1 && !degraded.error,
+        { attempts, n: degraded.rows.length, err: degraded.error }
+      );
+    }
   }
   const failed = results.filter((r10) => !r10.pass);
   log(`

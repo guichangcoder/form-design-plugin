@@ -25,12 +25,13 @@ import {
 } from '../src/services/uniqueCheck';
 import { classifySdkError } from '../src/utils/permError';
 import {
-  loadFieldColumn,
-  loadTableRows,
-  subscribeProgress,
-  getLoaded,
+  loadHeadColumn,
+  loadHeadRows,
+  loadRowsByConditions,
+  searchAllPages,
+  searchAllRows,
+  getHeadCache,
   invalidateTableRecords,
-  searchRecordsByKeyword,
   taskKey,
 } from '../src/services/tableRecordCache';
 
@@ -821,55 +822,58 @@ async function run() {
     check('F17 中文权限错误也能识别', eZh.kind === 'permission', eZh);
   }
 
-  // —— F18：表记录加载服务（懒加载 / 全量分页到底 / 渐进回调 / 缓存复用 / 服务端补搜）——
+  // —— F18：表记录加载服务（展开只取最新 200 / 搜索才逐页翻 / 缓存 / 自证）——
   {
     const BIG = 'tblBig';
     const COL = 'fldName';
-    let pageCalls = 0;
-    let listedTotal = 0;
+    let headCalls = 0;
     let filterCalls = 0;
 
-    // 造 450 条（3 页：200/200/50），第 400 条之后有一条「隐藏在深处的客户D」
+    // 造 450 条（3 页：200/200/50），深处有一条「隐藏在深处的客户D」（第 434 条）
     const ALL = Array.from({ length: 450 }, (_, i) => `客户${i + 1}`);
-    ALL[433] = '隐藏在深处的客户D'; // 第 434 条，远超旧版 2000 不会漏，但用于验证全量到底
-    const paginate = (pageToken) => {
-      pageCalls += 1;
-      const start = pageToken === undefined ? 0 : Number(pageToken);
-      const slice = ALL.slice(start, start + 200);
-      const nextStart = start + 200;
-      const hasMore = nextStart < ALL.length;
-      return {
-        fieldValues: slice.map((t, i) => ({ recordId: `rec${start + i}`, value: t })),
-        hasMore,
-        pageToken: hasMore ? String(nextStart) : undefined,
-        total: ALL.length,
-      };
-    };
+    ALL[433] = '隐藏在深处的客户D';
+    const recOf = (start, slice) =>
+      slice.map((t, i) => ({ recordId: `rec${start + i}`, fields: { [COL]: t } }));
 
     const bigBase = {
       getTableById: async (id) => {
-        if (id !== BIG) return { getField: async () => null, getRecords: async () => ({ records: [], hasMore: false }) };
+        if (id !== BIG) {
+          return {
+            getField: async () => null,
+            getRecords: async () => ({ records: [], hasMore: false }),
+            getRecordsByPage: async () => ({ records: [], hasMore: false }),
+            getFieldMetaList: async () => [],
+          };
+        }
         return {
-          getField: async () => ({
-            getFieldValueListByPage: async ({ pageToken, stringValue }) => {
-              if (stringValue !== true) throw new Error('应传 stringValue:true 以规避单元格结构差异');
-              return paginate(pageToken);
-            },
-          }),
-          // 服务端过滤（补搜用）：contains 命中
-          getRecordsByPage: async ({ filter }) => {
+          getFieldMetaList: async () => [{ id: 'fldMod', name: '更新时间', type: 1002, isPrimary: false }],
+          getRecordsByPage: async ({ filter, pageToken, pageSize }) => {
             if (filter) {
+              // 服务端 contains 过滤：逐页返回命中
               filterCalls += 1;
               const kw = String(filter.conditions?.[0]?.value ?? '');
-              const hits = ALL.filter((t) => t.includes(kw)).slice(0, 50);
+              const hits = ALL.filter((t) => t.includes(kw));
+              const start = pageToken === undefined ? 0 : Number(pageToken);
+              const slice = hits.slice(start, start + (pageSize || 200));
+              const nextStart = start + (pageSize || 200);
+              const hasMore = nextStart < hits.length;
               return {
-                records: hits.map((t, i) => ({ recordId: `hit${i}`, fields: { [COL]: t } })),
-                hasMore: false,
+                records: slice.map((t) => ({ recordId: `hit:${t}`, fields: { [COL]: t } })),
+                hasMore,
+                pageToken: hasMore ? String(nextStart) : undefined,
                 total: hits.length,
               };
             }
-            listedTotal += 1;
-            return { records: [], hasMore: false };
+            // 无过滤：首屏最新 200（这里按数组前 200 模拟）
+            headCalls += 1;
+            const slice = ALL.slice(0, pageSize || 200);
+            const hasMore = (pageSize || 200) < ALL.length;
+            return {
+              records: recOf(0, slice),
+              hasMore,
+              pageToken: hasMore ? String(pageSize || 200) : undefined,
+              total: ALL.length,
+            };
           },
         };
       },
@@ -878,83 +882,202 @@ async function run() {
     selectBaseForTest({ base: bigBase });
     invalidateTableRecords();
 
-    // 1) 全量加载：真的翻满 3 页并拿到 450 条
-    const colTask = loadFieldColumn(BIG, COL, { label: '客户名' });
-    check('F18 任务键按「列」维度生成', colTask.key === taskKey(BIG, 'col', COL), colTask.key);
-    const rows = await colTask.promise;
-    check('F18 全量加载到底：450 条全部拿到', rows.length === 450, rows.length);
-    check('F18 分页确实翻了 3 页', pageCalls === 3, pageCalls);
-    check('F18 深处的记录也在候选里（不再 2000 硬截断）', rows.some((r) => r.text === '隐藏在深处的客户D'));
-
-    // 2) 缓存复用：再次加载不再发请求
-    const before = pageCalls;
-    const again = getLoaded(taskKey(BIG, 'col', COL));
-    check('F18 缓存命中：再次取用不发请求', pageCalls === before && again?.length === 450, {
-      pageCalls,
-      len: again?.length,
+    // 1) 首屏：只发 1 次请求、只拿 200 条（不再是全量翻页）
+    const headTask = loadHeadColumn(BIG, COL, { label: '客户名' });
+    check('F18 任务键按「列」维度生成', headTask.key === taskKey(BIG, 'col', COL), headTask.key);
+    const head = await headTask.promise;
+    check('F18 展开只取最新 200 条', head.rows.length === 200, head.rows.length);
+    check('F18 首屏只发 1 次请求（不再全量翻页）', headCalls === 1, headCalls);
+    check('F18 首屏带回总数与 hasMore', head.total === 450 && head.hasMore === true, {
+      total: head.total,
+      hasMore: head.hasMore,
     });
-    await loadFieldColumn(BIG, COL).promise;
-    check('F18 重复调用复用同一任务（不重新拉）', pageCalls === before, pageCalls);
+
+    // 2) 缓存复用：再次取首屏零请求
+    const before = headCalls;
+    const cachedHead = getHeadCache(taskKey(BIG, 'col', COL));
+    check('F18 首屏缓存命中：零请求', headCalls === before && cachedHead?.rows.length === 200, {
+      headCalls,
+      len: cachedHead?.rows.length,
+    });
+    await loadHeadColumn(BIG, COL).promise;
+    check('F18 重复调用复用同一任务', headCalls === before, headCalls);
 
     // 3) 失效后重新加载
     invalidateTableRecords(BIG);
-    pageCalls = 0;
-    await loadFieldColumn(BIG, COL).promise;
-    check('F18 缓存失效后重新全量加载', pageCalls === 3, pageCalls);
+    headCalls = 0;
+    await loadHeadColumn(BIG, COL).promise;
+    check('F18 缓存失效后重新加载首屏', headCalls === 1, headCalls);
 
-    // 4) 服务端补搜：关键字命中
-    const hits = await searchRecordsByKeyword(BIG, COL, '客户D');
-    check('F18 服务端补搜命中远端记录', hits.some((h) => h.text === '隐藏在深处的客户D'), hits);
-    check('F18 补搜确实走了服务端过滤', filterCalls >= 1, filterCalls);
+    // 4) 搜索：逐页翻，命中深处的记录，且耗时与表大小无关（服务端过滤）
+    filterCalls = 0;
+    const hits = [];
+    let scanned = 0;
+    const sh = searchAllPages(BIG, COL, '客户D', {
+      onHits: (rows) => hits.push(...rows),
+      onProgress: (s) => { scanned = s; },
+    });
+    await sh.done;
+    check('F18 搜索命中深处的记录（首屏 200 条之外）', hits.some((h) => h.text === '隐藏在深处的客户D'), hits.length);
+    check('F18 搜索走了服务端过滤', filterCalls >= 1, filterCalls);
+    check('F18 搜索"命中即止"：未把全表当命中刷完', hits.length < 450, hits.length);
 
-    // 5) 服务端补搜自证：宿主忽略 filter（返回无关记录）时不采用结果
+    // 5) 搜索可取消
+    const sh2 = searchAllPages(BIG, COL, '客户', { onHits: () => {} });
+    sh2.cancel();
+    await sh2.done;
+    check('F18 搜索可取消（不抛错）', true);
+
+    // 6) 自证：宿主忽略 filter（返回不含关键字的记录）→ 停止、不返回伪命中
     invalidateTableRecords();
     selectBaseForTest({
       base: {
         getTableById: async () => ({
+          getFieldMetaList: async () => [],
           getRecordsByPage: async () => ({
             records: [{ recordId: 'x', fields: { [COL]: '完全无关的值' } }],
             hasMore: false,
           }),
-          getField: async () => null,
         }),
         getTableMetaList: async () => [{ id: BIG }],
       },
     });
-    const bogus = await searchRecordsByKeyword(BIG, COL, '客户D');
-    check('F18 过滤未生效时不返回伪命中（防误判）', bogus.length === 0, bogus);
+    const bogus = [];
+    await searchAllPages(BIG, COL, '客户D', { onHits: (r) => bogus.push(...r) }).done;
+    check('F18 过滤未生效时不返回伪命中（防误判）', bogus.length === 0, bogus.length);
 
-    // 6) 整表加载（引用选项用）：渐进回调能被触发
+    // 7) 整行搜索（引用选项用）：命中即并入
     invalidateTableRecords();
-    selectBaseForTest({
-      base: {
+    selectBaseForTest({ base: bigBase });
+    const rowHits = [];
+    await searchAllRows(BIG, COL, '隐藏在深处', { onHits: (r) => rowHits.push(...r) }).done;
+    check('F18 整行搜索命中引用选项源记录', rowHits.some((r) => r.fields[COL] === '隐藏在深处的客户D'), rowHits.length);
+
+    // 8) 首屏整行（引用选项展开用）：只 1 次请求
+    invalidateTableRecords();
+    headCalls = 0;
+    const headRows = await loadHeadRows(BIG, { label: '大表' }).promise;
+    check('F18 引用选项首屏只取 200 条', headRows.rows.length === 200, headRows.rows.length);
+    check('F18 引用选项首屏只发 1 次请求', headCalls === 1, headCalls);
+
+    // 9) 条件加载（引用选项联动用）：服务端精确过滤，取回「该父级下的全部」
+    {
+      const CITY = 'fldCity';
+      const PROV = 'fldProv';
+      // 造 1 万行城市表：浙江省 3000 行（远超首屏 200），江苏省 7000 行
+      const provRows = [
+        ...Array.from({ length: 3000 }, (_, i) => ({ [PROV]: '浙江省', [CITY]: `浙城市${i + 1}` })),
+        ...Array.from({ length: 7000 }, (_, i) => ({ [PROV]: '江苏省', [CITY]: `苏城市${i + 1}` })),
+      ];
+      let condFilterCalls = 0;
+      const condBase = {
         getTableById: async () => ({
-          getRecordsByPage: async ({ pageToken }) => {
+          getFieldMetaList: async () => [],
+          getRecordsByPage: async ({ filter, pageToken, pageSize }) => {
+            const conds = filter?.conditions ?? [];
+            condFilterCalls += 1;
+            const hits = provRows.filter((r) => conds.every((c) => String(r[c.fieldId] ?? '') === String(c.value)));
             const start = pageToken === undefined ? 0 : Number(pageToken);
-            const slice = ALL.slice(start, start + 200);
-            const nextStart = start + 200;
-            const hasMore = nextStart < ALL.length;
+            const ps = pageSize || 200;
+            const slice = hits.slice(start, start + ps);
+            const nextStart = start + ps;
+            const hasMore = nextStart < hits.length;
             return {
-              records: slice.map((t, i) => ({ recordId: `r${start + i}`, fields: { [COL]: t } })),
+              records: slice.map((f, i) => ({ recordId: `c${start + i}`, fields: f })),
               hasMore,
               pageToken: hasMore ? String(nextStart) : undefined,
-              total: ALL.length,
             };
           },
-          getField: async () => null,
+        }),
+        getTableMetaList: async () => [{ id: 'tblCity' }],
+      };
+      selectBaseForTest({ base: condBase });
+      invalidateTableRecords();
+
+      const got = [];
+      const condHits = await loadRowsByConditions('tblCity', [{ fieldId: PROV, text: '浙江省' }]).promise;
+      check('F18 条件加载取回该父级下全部记录（突破首屏 200 限制）', condHits.rows.length === 3000, condHits.rows.length);
+      check('F18 条件加载走服务端过滤', condFilterCalls > 0, condFilterCalls);
+      check('F18 条件加载自证通过（filterEffective）', condHits.filterEffective === true, condHits.filterEffective);
+      check(
+        'F18 条件加载结果全部满足条件（无串档）',
+        condHits.rows.every((r) => r.fields[PROV] === '浙江省'),
+        condHits.rows.slice(0, 3)
+      );
+
+      // 缓存复用：相同条件再取零请求
+      const callsBefore = condFilterCalls;
+      await loadRowsByConditions('tblCity', [{ fieldId: PROV, text: '浙江省' }]).promise;
+      check('F18 相同条件命中缓存：零请求', condFilterCalls === callsBefore, condFilterCalls);
+
+      // 含 = / & 的文本不应破坏条件（此前用字符串拼接 key 会解析错位）
+      const weird = await loadRowsByConditions('tblCity', [{ fieldId: PROV, text: '浙=江&省' }]).promise;
+      check('F18 条件文本含 = / & 时仍安全（无匹配返回空）', weird.rows.length === 0, weird.rows.length);
+
+      // 过滤未生效（宿主忽略 filter 返回无关记录）→ filterEffective=false，调用方可回退
+      const bogusBase = {
+        getTableById: async () => ({
+          getFieldMetaList: async () => [],
+          getRecordsByPage: async () => ({
+            records: [{ recordId: 'z', fields: { [PROV]: '广东省', [CITY]: '粤城市1' } }],
+            hasMore: false,
+          }),
+        }),
+        getTableMetaList: async () => [{ id: 'tblCity' }],
+      };
+      selectBaseForTest({ base: bogusBase });
+      invalidateTableRecords();
+      const ignored = await loadRowsByConditions('tblCity', [{ fieldId: PROV, text: '浙江省' }]).promise;
+      check('F18 条件过滤被宿主忽略时标记 filterEffective=false', ignored.filterEffective === false, {
+        n: ignored.rows.length,
+        eff: ignored.filterEffective,
+      });
+
+      // 搜索叠加联动条件：命中必须同时满足关键字与父级条件（不串档）
+      selectBaseForTest({ base: condBase });
+      invalidateTableRecords();
+      const bothHits = [];
+      await searchAllRows('tblCity', CITY, '浙城市1', {
+        extraConditions: [{ fieldId: PROV, text: '浙江省' }],
+        onHits: (rs) => bothHits.push(...rs),
+      }).done;
+      check('F18 搜索叠加联动条件：命中均满足父级条件', bothHits.length > 0 && bothHits.every((r) => r.fields[PROV] === '浙江省'), bothHits.length);
+
+      const wrongProv = [];
+      await searchAllRows('tblCity', CITY, '浙城市1', {
+        extraConditions: [{ fieldId: PROV, text: '江苏省' }],
+        onHits: (rs) => wrongProv.push(...rs),
+      }).done;
+      check('F18 搜索叠加不匹配的父级条件：零命中（不串档）', wrongProv.length === 0, wrongProv.length);
+    }
+
+    // 10) sort 不被宿主支持时自动降级（否则首屏会整个失败变空）
+    {
+      let attempts = 0;
+      const noSortBase = {
+        getTableById: async () => ({
+          getFieldMetaList: async () => [{ id: 'fldMod', name: '更新时间', type: 1002 }],
+          getRecordsByPage: async (p) => {
+            attempts += 1;
+            if (p && p.sort) throw new Error('unsupported param: sort');
+            return {
+              records: [{ recordId: 'r1', fields: { [COL]: '降级后的客户' } }],
+              hasMore: false,
+              total: 1,
+            };
+          },
         }),
         getTableMetaList: async () => [{ id: BIG }],
-      },
-    });
-    const seen = [];
-    const rowKey = taskKey(BIG, 'row');
-    loadTableRows(BIG, { label: '大表' });
-    const unsub = subscribeProgress(rowKey, (p) => seen.push(p.loaded));
-    await loadTableRows(BIG).promise;
-    unsub();
-    check('F18 整表加载拿到全部 450 条', getLoaded(rowKey)?.length === 450, getLoaded(rowKey)?.length);
-    check('F18 渐进回调至少触发 2 次（边翻边给）', seen.length >= 2, seen);
-    check('F18 进度包含总数', seen.some((_, i) => true) && true);
+      };
+      selectBaseForTest({ base: noSortBase });
+      invalidateTableRecords();
+      const degraded = await loadHeadColumn(BIG, COL, { label: '客户名' }).promise;
+      check(
+        'F18 sort 不被支持时自动降级且仍有数据',
+        attempts >= 2 && degraded.rows.length === 1 && !degraded.error,
+        { attempts, n: degraded.rows.length, err: degraded.error }
+      );
+    }
   }
 
   const failed = results.filter((r) => !r.pass);

@@ -1,13 +1,12 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Select, Tag, Space, Typography } from '@douyinfe/semi-ui';
 import { getLinkTargetTableId } from '../../services/baseService';
-import { fuzzyOptionFilter } from './fuzzyOptionFilter';
+import { getBase } from '../../services/appContext';
 import {
-  loadFieldColumn,
-  subscribeProgress,
-  getLoaded,
-  searchRecordsByKeyword,
-  LoadProgress,
+  loadHeadColumn,
+  getHeadCache,
+  searchAllPages,
+  SearchHandle,
   FieldRow,
 } from '../../services/tableRecordCache';
 
@@ -32,11 +31,10 @@ interface Candidate {
 
 /**
  * 关联字段（单向/双向）选择器：
- * - **懒加载**：下拉展开时才启动加载（不再打开表单就并发拉表）；
- * - **全量加载**：分页一直翻到底，不再有「第 2000 条之后搜不到」的硬截断；
- * - **渐进式**：第一页秒出可用，后台继续翻页并显示「已加载 x/y 条」；
- * - **服务端补搜**：全量未完成时输入关键字，额外走服务端 contains 过滤补齐远端命中；
- * - 权限：一律以当前打开者身份读表，服务端只返回其有权限的记录（与多维表格权限体系一致）。
+ * - **展开只取最新 200 条**（1 次请求，秒出）——不再展开就全量翻页等半天；
+ * - **输入关键字才逐页查询**：按 200/页 向服务端发起 contains 过滤，命中立即并进候选，
+ *   可随时停止（更换关键字/关闭下拉即取消），保留 20 万安全上限；
+ * - 权限：以当前打开者身份读表，服务端只返回其有权限的记录（与多维表格权限体系一致）。
  */
 export function LinkSelector({
   value,
@@ -47,38 +45,42 @@ export function LinkSelector({
   linkTableId,
   preview,
 }: Props) {
-  const [candidates, setCandidates] = useState<Candidate[]>([]);
-  const [progress, setProgress] = useState<LoadProgress | null>(null);
+  const [head, setHead] = useState<Candidate[]>([]);
+  const [headDone, setHeadDone] = useState(false);
+  const [headHasMore, setHeadHasMore] = useState(false);
+  const [headTotal, setHeadTotal] = useState<number | undefined>(undefined);
   const [error, setError] = useState('');
-  const [primaryFieldId, setPrimaryFieldId] = useState<string>('');
-  // 服务端补搜命中的额外记录（recordId → 标签）
-  const extraRef = useRef<Map<string, string>>(new Map());
-  const [extraTick, setExtraTick] = useState(0);
   const [opened, setOpened] = useState(false);
+  const [searchHits, setSearchHits] = useState<Candidate[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [searchScanned, setSearchScanned] = useState(0);
+  // 关键字防抖定时器 & 当前搜索句柄（用于取消上一次）
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // 展开前也要能显示已选标签（否则只显示 recordId）
-  const [preselectedLabels, setPreselectedLabels] = useState<Map<string, string>>(new Map());
+  const handleRef = useRef<SearchHandle<FieldRow> | null>(null);
+  const keywordRef = useRef('');
+  const [targetTableId, setTargetTableId] = useState('');
+  const [primaryFieldId, setPrimaryFieldId] = useState('');
+  // 已选值的标签（未加载到候选时用 getRecordsByIds 补全）
+  const [selectedLabels, setSelectedLabels] = useState<Map<string, string>>(new Map());
 
-  const targetTableIdRef = useRef<string>('');
-
-  /** 解析关联目标表主字段 id（仅元信息，代价极小） */
+  /** 解析关联目标表与主字段（仅元信息，代价极小） */
   useEffect(() => {
     if (preview) return;
     let alive = true;
     (async () => {
       try {
-        const { getBase } = await import('../../services/appContext');
-        const targetTableId =
-          linkTableId || (await getLinkTargetTableId(tableId, fieldId)) || '';
-        if (!targetTableId) {
+        const tid = linkTableId || (await getLinkTargetTableId(tableId, fieldId)) || '';
+        if (!tid) {
           if (alive) setError('未找到关联目标表，请重新保存配置');
           return;
         }
-        targetTableIdRef.current = targetTableId;
-        const table = await getBase().getTableById(targetTableId);
+        const table = await getBase().getTableById(tid);
         const metas = await table.getFieldMetaList();
         const primary = metas.find((m) => (m as { isPrimary?: boolean }).isPrimary) ?? metas[0];
-        if (alive) setPrimaryFieldId(primary?.id ?? '');
+        if (alive) {
+          setTargetTableId(tid);
+          setPrimaryFieldId(primary?.id ?? '');
+        }
       } catch (e) {
         if (alive) setError(`加载关联表信息失败：${(e as Error)?.message ?? String(e)}`);
       }
@@ -88,64 +90,56 @@ export function LinkSelector({
     };
   }, [tableId, fieldId, linkTableId, preview]);
 
-  /** 展开时才真正启动全量加载（懒加载 + 缓存复用 + 进度订阅） */
+  /** 展开时：只拉最新 200 条（1 次请求）；命中缓存则零等待 */
   useEffect(() => {
-    if (preview || !opened || !primaryFieldId) return;
-    const targetTableId = targetTableIdRef.current;
-    if (!targetTableId) return;
-
+    if (preview || !opened || !targetTableId || !primaryFieldId) return;
     let alive = true;
-    const key = loadFieldColumn(targetTableId, primaryFieldId, {
+    const key = `col:${targetTableId}:${primaryFieldId}`;
+    const cached = getHeadCache<FieldRow>(key);
+    if (cached) {
+      setHead(cached.rows.map((r) => ({ recordId: r.recordId, label: r.text || r.recordId })));
+      setHeadHasMore(cached.hasMore);
+      setHeadTotal(cached.total);
+      setHeadDone(true);
+      return;
+    }
+    setHeadDone(false);
+    const { promise } = loadHeadColumn(targetTableId, primaryFieldId, {
       label: `${targetTableId}/${primaryFieldId}`,
-    }).key;
-
-    const apply = (data: FieldRow[]) => {
+    });
+    promise.then((res) => {
       if (!alive) return;
-      setCandidates(data.map((r) => ({ recordId: r.recordId, label: r.text || r.recordId })));
-    };
-
-    // 已有缓存立即用（再次展开零等待）
-    const cached = getLoaded<FieldRow>(key);
-    if (cached) apply(cached);
-
-    const unsub = subscribeProgress<FieldRow>(key, (p, data) => {
-      if (!alive) return;
-      setProgress(p);
-      apply(data);
-      if (p.error) setError(`加载关联表记录失败：${p.error}`);
-      if (p.truncated) {
-        console.warn('[linkSelector] 记录数达到加载上限，候选可能不完整');
-      }
+      setHead(res.rows.map((r) => ({ recordId: r.recordId, label: r.text || r.recordId })));
+      setHeadHasMore(res.hasMore);
+      setHeadTotal(res.total);
+      setHeadDone(true);
+      if (res.error) setError(`加载关联表记录失败：${res.error}`);
     });
     return () => {
       alive = false;
-      unsub();
     };
-  }, [opened, primaryFieldId, preview]);
+  }, [opened, targetTableId, primaryFieldId, preview]);
 
-  /** 下拉展开时，把已选但未加载到的记录标签补全（保证标签可读） */
+  /** 已选值标签补全（展开后，候选里没有的用 getRecordsByIds 取回） */
   useEffect(() => {
-    const targetTableId = targetTableIdRef.current;
-    if (!opened || !targetTableId || preview) return;
+    if (!opened || !targetTableId || !primaryFieldId || preview) return;
     const ids = Array.isArray(value) ? value : [];
-    const known = new Set(candidates.map((c) => c.recordId));
-    const missing = ids.filter((id) => !known.has(id) && !preselectedLabels.has(id));
+    const known = new Set([
+      ...head.map((c) => c.recordId),
+      ...searchHits.map((c) => c.recordId),
+    ]);
+    const missing = ids.filter((id) => !known.has(id) && !selectedLabels.has(id));
     if (missing.length === 0) return;
     let alive = true;
     (async () => {
       try {
-        const { getBase } = await import('../../services/appContext');
         const table = await getBase().getTableById(targetTableId);
         const recs: any[] = await (table as any).getRecordsByIds(missing.slice(0, 200));
         const map = new Map<string, string>();
-        const fid = primaryFieldId;
         for (const r of recs ?? []) {
-          const t = fid
-            ? String((r?.fields ?? {})[fid] ?? '')
-            : '';
-          map.set(r.recordId, t || r.recordId);
+          map.set(r.recordId, stringify((r.fields ?? {})[primaryFieldId]) || r.recordId);
         }
-        if (alive && map.size) setPreselectedLabels((m) => new Map([...m, ...map]));
+        if (alive && map.size) setSelectedLabels((m) => new Map([...m, ...map]));
       } catch {
         /* 标签补全失败则退回显示 id */
       }
@@ -153,37 +147,69 @@ export function LinkSelector({
     return () => {
       alive = false;
     };
-  }, [opened, value, candidates, primaryFieldId, preselectedLabels, preview]);
+  }, [opened, value, head, searchHits, primaryFieldId, selectedLabels, targetTableId, preview]);
 
-  /** 搜索：本地过滤由 Semi 的 filter 负责；这里额外做服务端补搜（防全量未完成时搜不到） */
+  /** 关键字输入：取消上一次搜索 → 逐页查询，命中即时并入 */
   const handleSearch = useCallback(
     (kw: string) => {
-      const q = (kw || '').trim();
+      keywordRef.current = kw;
       if (searchTimer.current) clearTimeout(searchTimer.current);
-      if (!q || q.length < 1) return;
-      const targetTableId = targetTableIdRef.current;
-      if (!targetTableId || !primaryFieldId) return;
-      searchTimer.current = setTimeout(async () => {
-        const hits = await searchRecordsByKeyword(targetTableId, primaryFieldId, q);
-        if (hits.length === 0) return;
-        let changed = false;
-        for (const h of hits) {
-          if (!extraRef.current.has(h.recordId)) {
-            extraRef.current.set(h.recordId, h.text || h.recordId);
-            changed = true;
+      // 立即取消上一次仍在跑的搜索
+      handleRef.current?.cancel();
+      handleRef.current = null;
+      setSearching(false);
+
+      const q = (kw || '').trim();
+      if (!q || q.length < 1 || !targetTableId || !primaryFieldId) {
+        setSearchHits([]);
+        setSearchScanned(0);
+        return;
+      }
+      // 防抖 250ms，避免每个按键都触发翻页
+      searchTimer.current = setTimeout(() => {
+        const my = q;
+        setSearchHits([]);
+        setSearchScanned(0);
+        setSearching(true);
+        const h = searchAllPages(targetTableId, primaryFieldId, my, {
+          onHits: (rows) => {
+            if (keywordRef.current.trim() !== my) return; // 关键字已变，丢弃旧结果
+            setSearchHits((prev) => {
+              const map = new Map(prev.map((c) => [c.recordId, c]));
+              rows.forEach((r) => map.set(r.recordId, { recordId: r.recordId, label: r.text || r.recordId }));
+              return [...map.values()];
+            });
+          },
+          onProgress: (scanned) => {
+            if (keywordRef.current.trim() !== my) return;
+            setSearchScanned(scanned);
+          },
+        });
+        handleRef.current = h;
+        h.done.then(() => {
+          if (handleRef.current === h) {
+            setSearching(false);
+            handleRef.current = null;
           }
-        }
-        if (changed) setExtraTick((t) => t + 1);
-      }, 300);
+        });
+      }, 250);
     },
-    [primaryFieldId]
+    [targetTableId, primaryFieldId]
   );
+
+  /** 关闭下拉时取消正在进行的搜索 */
+  useEffect(() => {
+    return () => {
+      handleRef.current?.cancel();
+      if (searchTimer.current) clearTimeout(searchTimer.current);
+    };
+  }, []);
 
   const selectedIds = Array.isArray(value) ? value : [];
   const labelOf = (id: string) =>
-    candidates.find((c) => c.recordId === id)?.label ||
-    preselectedLabels.get(id) ||
-    extraRef.current.get(id) ||
+    head.find((c) => c.recordId === id)?.label ||
+    searchHits.find((c) => c.recordId === id)?.label ||
+    selectedLabels.get(id) ||
     id;
 
   const apply = (ids: string[]) => onChange(ids);
@@ -204,35 +230,33 @@ export function LinkSelector({
     return <Typography.Text type="warning">{error}</Typography.Text>;
   }
 
-  // 候选去重合并：全量候选 + 服务端补搜候选
+  // 候选 = 最新 200 条 + 搜索命中（去重）
   const merged: Candidate[] = (() => {
     const map = new Map<string, Candidate>();
-    candidates.forEach((c) => map.set(c.recordId, c));
-    extraRef.current.forEach((label, recordId) => {
-      if (!map.has(recordId)) map.set(recordId, { recordId, label });
-    });
-    // 已选值的标签也纳入，保证多选回显
+    // 有搜索关键字时，优先展示搜索结果（避免 200 条噪声干扰）
+    if (searchHits.length) {
+      searchHits.forEach((c) => map.set(c.recordId, c));
+    } else {
+      head.forEach((c) => map.set(c.recordId, c));
+    }
     selectedIds.forEach((id) => {
       if (!map.has(id)) {
-        const lbl = preselectedLabels.get(id);
+        const lbl = selectedLabels.get(id) || head.find((c) => c.recordId === id)?.label;
         if (lbl) map.set(id, { recordId: id, label: lbl });
       }
     });
     return [...map.values()];
-    // extraTick 用于触发重组（extraRef 是 ref，变更不触发渲染）
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   })();
 
-  const done = progress?.done;
-  const total = progress?.total;
-  const loaded = progress?.loaded ?? 0;
-  const loadingText = !progress
-    ? '正在加载关联表记录…'
-    : done
-      ? total
-        ? `已加载全部 ${loaded} 条记录`
-        : `已加载 ${loaded} 条记录`
-      : `正在加载…已 ${loaded}${total ? ` / ${total}` : ''} 条`;
+  const footerText = searching
+    ? `正在按关键字翻页查询…已扫描 ${searchScanned} 条`
+    : searchHits.length
+      ? `搜索命中 ${searchHits.length} 条（已扫描 ${searchScanned} 条）`
+      : headDone
+        ? headTotal
+          ? `已加载最新 ${head.length} 条 / 共 ${headTotal} 条${headHasMore ? '，输入关键字可搜索全部' : ''}`
+          : `已加载最新 ${head.length} 条${headHasMore ? '，输入关键字可搜索全部' : ''}`
+        : '正在加载最新记录…';
 
   return (
     <div>
@@ -255,29 +279,49 @@ export function LinkSelector({
         style={{ width: '100%' }}
         multiple
         remote
-        filter={fuzzyOptionFilter}
+        filter={undefined}
         onSearch={handleSearch}
-        onDropdownVisibleChange={(v: boolean) => v && setOpened(true)}
+        onDropdownVisibleChange={(v: boolean) => {
+          if (v) setOpened(true);
+        }}
         disabled={disabled}
-        loading={!done && opened}
-        placeholder={
-          !opened
-            ? '点击展开以加载关联记录（下拉时才加载）'
-            : '搜索并选择关联记录'
-        }
+        loading={opened && !headDone && !head.length}
+        placeholder="点击展开（默认显示最新记录），或直接输入关键字搜索全部"
         value={selectedIds}
         onChange={(ids) => apply((ids as string[]) ?? [])}
         optionList={merged.map((c) => ({ value: c.recordId, label: c.label }))}
         emptyContent={
-          !opened ? '点击展开后将加载关联记录' : done ? '无匹配记录' : '加载中…'
+          !opened
+            ? '点击展开后将加载最新记录'
+            : searching
+              ? '正在搜索…'
+              : keywordRef.current.trim()
+                ? '未找到匹配记录'
+                : headDone
+                  ? '暂无记录'
+                  : '加载中…'
         }
         virtualize={{ itemSize: 32 }}
         outerBottomSlot={
           opened ? (
-            <div style={{ padding: '6px 12px', fontSize: 12, color: '#86909c' }}>{loadingText}</div>
+            <div style={{ padding: '6px 12px', fontSize: 12, color: '#86909c' }}>{footerText}</div>
           ) : undefined
         }
       />
     </div>
   );
+}
+
+/** 本地小工具：与 cellText 同源（避免额外依赖） */
+function stringify(v: unknown): string {
+  if (v === null || v === undefined) return '';
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number') return String(v);
+  if (Array.isArray(v)) return v.map(stringify).filter(Boolean).join(' ');
+  if (typeof v === 'object') {
+    const o = v as Record<string, unknown>;
+    if (typeof o.text === 'string' && o.text) return o.text;
+    if (typeof o.name === 'string' && o.name) return o.name;
+  }
+  return '';
 }
