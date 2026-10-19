@@ -4,6 +4,9 @@
   "version": "0.1.0",
   "type": "module",
   "description": "飞书多维表格表单设计插件：主子表联动录入、必填控制、条件显示",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",
