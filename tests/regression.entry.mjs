@@ -1821,6 +1821,63 @@ async function run() {
     );
   }
 
+  // —— F24：应用模式「数据源 ≠ 宿主所在多维表格」时，重新打开配置不得丢失 ——
+  // 踩过的坑（真实缺陷，用户实测「第一次配置启用日期联动预填，再次打开配置模式后配置消失」）：
+  //   loadConfig 里先做「跨 base 归属校验」、后绑定配置声明的数据源 base，顺序反了。
+  //   isForeignConfig 用 baseId 判归属，而应用模式允许数据源 ≠ 宿主 base
+  //   → 校验时 getBaseId() 拿到的是「宿主默认 base」的 ID → 合法配置被判为外来配置
+  //   → 静默 return null → 界面表现为「配置凭空消失」。
+  // 断言方式：直接扫源码，要求 dashboard / bridge / localStorage 三条读取分支
+  // 都满足「ensureBaseBound 出现在 isForeignConfig 之前」。
+  {
+    const fs = await import('node:fs');
+    const src = fs
+      .readFileSync(new URL('../src/services/configService.ts', import.meta.url), 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*\/\/.*$/gm, '')
+      .replace(/([^:])\/\/.*$/gm, '$1');
+
+    // 取 loadConfig 函数体（从定义到文件内下一个顶层 export/函数）
+    const loadStart = src.indexOf('export async function loadConfig');
+    const loadBody = loadStart >= 0 ? src.slice(loadStart, loadStart + 6000) : '';
+
+    // 每个分支：ensureBaseBound(...) 的索引必须早于同分支的 isForeignConfig(...)
+    const orderOk = (chunk) => {
+      const bound = chunk.indexOf('ensureBaseBound(parsed)');
+      const foreign = chunk.indexOf('isForeignConfig(parsed)');
+      if (bound < 0 || foreign < 0) return false; // 两者都必须存在
+      return bound < foreign;
+    };
+
+    // 按「分支起点」切块：dashboard(getConfig) / bridge / localStorage
+    const dashChunk = loadBody.slice(0, loadBody.indexOf('try {\n    let data: unknown = await getBridge()'));
+    const bridgeChunk = loadBody.slice(
+      loadBody.indexOf('let data: unknown = await getBridge()'),
+      loadBody.indexOf('if (LS_OK)')
+    );
+    const lsChunk = loadBody.slice(loadBody.indexOf('if (LS_OK)'));
+
+    check('F24 dashboard 读取分支：先绑定数据源 base，再判归属', orderOk(dashChunk), {
+      hasEnsureBaseBound: dashChunk.includes('ensureBaseBound(parsed)'),
+      hasIsForeign: dashChunk.includes('isForeignConfig(parsed)'),
+    });
+    check('F24 bridge 读取分支：先绑定数据源 base，再判归属', orderOk(bridgeChunk), null);
+    check('F24 localStorage 读取分支：先绑定数据源 base，再判归属', orderOk(lsChunk), null);
+
+    // ensureBaseBound 必须返回「是否绑定成功」，且调用方用「无 baseToken 或绑定失败」才做归属校验
+    check(
+      'F24 ensureBaseBound 回传绑定结果（供调用方判断配置能否自证归属）',
+      /async function ensureBaseBound\([\s\S]*?\): Promise<boolean>/.test(src) &&
+        /return true;/.test(src.slice(src.indexOf('async function ensureBaseBound'))),
+      null
+    );
+    check(
+      'F24 带 baseToken 且绑定成功的配置不做跨 base 丢弃（自描述配置）',
+      /\(!parsed\.baseToken \|\| !bound\)/.test(src),
+      null
+    );
+  }
+
   const failed = results.filter((r) => !r.pass);
   log(`\n=== ${results.length - failed.length}/${results.length} 通过 ===`);
   if (failed.length) process.exit(1);

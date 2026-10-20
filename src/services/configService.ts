@@ -238,21 +238,27 @@ export interface SaveResult {
 }
 
 /**
- * 配置里带 baseToken 时，先通过 Workspace 绑定到对应的多维表格实例（P0-1）。
+ * 配置里带 baseToken 时，通过 Workspace 绑定到对应的多维表格实例（P0-1）。
  * 之后所有 base/bridge/dashboard 读写都走该实例，与配置声明的数据源严格一致。
  * 旧配置无 baseToken 时跳过（回退全局默认 base，保持向后兼容）。
+ *
+ * @returns 是否已绑定到配置声明的数据源 base。
+ *   无 baseToken → false（无从绑定，调用方需按当前环境 base 判断归属）；
+ *   token 与当前一致 → true（已是目标 base）；
+ *   切换成功 → true；切换失败 → false（回退全局默认 base）。
  */
-async function ensureBaseBound(parsed: PluginData | null): Promise<void> {
+async function ensureBaseBound(parsed: PluginData | null): Promise<boolean> {
   const token = parsed?.baseToken;
-  if (!token || !isWorkspaceAvailable()) return;
-  if (getBaseToken() === token) return;
+  if (!token || !isWorkspaceAvailable()) return false;
+  if (getBaseToken() === token) return true;
   const ok = await selectBase(token);
   if (ok) {
     resetBaseIdCache();
     console.log('[config] 已通过 Workspace 绑定配置所属 base');
-  } else {
-    console.warn('[config] Workspace.getBitable 失败，回退全局默认 base');
+    return true;
   }
+  console.warn('[config] Workspace.getBitable 失败，回退全局默认 base');
+  return false;
 }
 
 /**
@@ -271,15 +277,28 @@ export async function loadConfig(): Promise<PluginData | null> {
       const data = cfg && cfg.customConfig;
       const parsed = asData(data);
       if (parsed) {
-        // ★ 跨 base 防污染：宿主 KV / localStorage 在云端部署下跨多维表格共享，
-        //   读到别的 base 的配置必须丢弃（否则配置面板预填别的表的表单、
-        //   dataConditions 指向别的 base → 宿主校验失败「配置数据发生变更」）。
-        if (await isForeignConfig(parsed)) {
-          console.warn('[config] getConfig 返回的是其他多维表格的配置（baseId 不匹配），已丢弃');
+        // 🔴 顺序铁律：**先绑定「配置自己声明的数据源 base」，再做归属校验**。
+        //
+        // 这是一个曾导致「再次打开配置模式后配置消失、需要重新配置」的真实缺陷：
+        // isForeignConfig 用 baseId 判别归属，而应用模式**允许数据源 ≠ 宿主所在的多维表格**
+        // （用户可在「00 数据源」里选另一个 base，这正是应用插件 1:N 的设计）。
+        // 若在校验前未绑定，getBaseId() 拿到的是「宿主默认 base」的 ID，
+        // 与配置里记录的「数据源 base」ID 当然不等
+        //   → 合法配置被判为「外来配置」→ 静默 return null
+        //   → 界面表现为配置凭空消失（字段/子表/条件/字段级配置全丢）。
+        const bound = await ensureBaseBound(parsed);
+        const hasOwnBase = !!parsed.baseToken;
+        // 归属校验只用于「配置无法自证归属」的情形：
+        //   · 旧配置无 baseToken（只能靠当前环境 base 判断，保持原有跨 base 防污染能力）；
+        //   · 声明了 baseToken 但这个 base 本次绑定不上（读不到就只能按环境 base 判断）。
+        // 带 baseToken 且绑定成功的配置是「自描述」的，绑定后 baseId 必然一致，
+        // 绝不能因「宿主 base ≠ 数据源 base」这一合法情形而被丢弃。
+        if ((!hasOwnBase || !bound) && (await isForeignConfig(parsed))) {
+          console.warn(
+            '[config] getConfig 的配置无法自证归属（baseId 不匹配且无可用数据源标记），已丢弃'
+          );
           return null;
         }
-        // ★ 应用模式：先绑定配置所属的 base，再做字段 hydrate（P0-1）
-        await ensureBaseBound(parsed);
         source = 'dashboard';
         const result = await hydrateConfig(parsed);
         console.log(`[config] loadConfig 完成（${source}），耗时 ${Math.round(performance.now() - startedAt)}ms`);
@@ -315,10 +334,12 @@ export async function loadConfig(): Promise<PluginData | null> {
     }
     const parsed = asData(data);
     if (parsed) {
-      if (await isForeignConfig(parsed)) {
-        console.warn('[config] bridge 存的是其他多维表格的配置（baseId 不匹配），已忽略');
+      // 同样「先绑定、后校验」：带 baseToken 的配置是自描述的，
+      // 绑定成功后 baseId 必然一致，不会因「数据源 ≠ 宿主 base」被误判丢弃。
+      const bound = await ensureBaseBound(parsed);
+      if ((!parsed.baseToken || !bound) && (await isForeignConfig(parsed))) {
+        console.warn('[config] bridge 存的配置无法自证归属（baseId 不匹配），已忽略');
       } else {
-        await ensureBaseBound(parsed);
         source = 'bridge';
         const result = await hydrateConfig(parsed);
         console.log(`[config] loadConfig 完成（${source}），耗时 ${Math.round(performance.now() - startedAt)}ms`);
@@ -335,10 +356,11 @@ export async function loadConfig(): Promise<PluginData | null> {
       if (raw) {
         const parsed = asData(JSON.parse(raw));
         if (parsed) {
-          if (await isForeignConfig(parsed)) {
-            console.warn('[config] localStorage 存的是其他多维表格的配置（baseId 不匹配），已忽略');
+          // 与上面两路一致：先绑定数据源 base，再判断归属（顺序不可反）。
+          const bound = await ensureBaseBound(parsed);
+          if ((!parsed.baseToken || !bound) && (await isForeignConfig(parsed))) {
+            console.warn('[config] localStorage 存的配置无法自证归属（baseId 不匹配），已忽略');
           } else {
-            await ensureBaseBound(parsed);
             source = 'local';
             const result = await hydrateConfig(parsed);
             console.log(`[config] loadConfig 完成（${source}），耗时 ${Math.round(performance.now() - startedAt)}ms`);

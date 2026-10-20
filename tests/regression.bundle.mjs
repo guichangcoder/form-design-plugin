@@ -33062,6 +33062,40 @@ async function run() {
       null
     );
   }
+  {
+    const fs2 = await import("node:fs");
+    const src = fs2.readFileSync(new URL("../src/services/configService.ts", import.meta.url), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "").replace(/([^:])\/\/.*$/gm, "$1");
+    const loadStart = src.indexOf("export async function loadConfig");
+    const loadBody = loadStart >= 0 ? src.slice(loadStart, loadStart + 6e3) : "";
+    const orderOk = (chunk) => {
+      const bound = chunk.indexOf("ensureBaseBound(parsed)");
+      const foreign = chunk.indexOf("isForeignConfig(parsed)");
+      if (bound < 0 || foreign < 0) return false;
+      return bound < foreign;
+    };
+    const dashChunk = loadBody.slice(0, loadBody.indexOf("try {\n    let data: unknown = await getBridge()"));
+    const bridgeChunk = loadBody.slice(
+      loadBody.indexOf("let data: unknown = await getBridge()"),
+      loadBody.indexOf("if (LS_OK)")
+    );
+    const lsChunk = loadBody.slice(loadBody.indexOf("if (LS_OK)"));
+    check("F24 dashboard \u8BFB\u53D6\u5206\u652F\uFF1A\u5148\u7ED1\u5B9A\u6570\u636E\u6E90 base\uFF0C\u518D\u5224\u5F52\u5C5E", orderOk(dashChunk), {
+      hasEnsureBaseBound: dashChunk.includes("ensureBaseBound(parsed)"),
+      hasIsForeign: dashChunk.includes("isForeignConfig(parsed)")
+    });
+    check("F24 bridge \u8BFB\u53D6\u5206\u652F\uFF1A\u5148\u7ED1\u5B9A\u6570\u636E\u6E90 base\uFF0C\u518D\u5224\u5F52\u5C5E", orderOk(bridgeChunk), null);
+    check("F24 localStorage \u8BFB\u53D6\u5206\u652F\uFF1A\u5148\u7ED1\u5B9A\u6570\u636E\u6E90 base\uFF0C\u518D\u5224\u5F52\u5C5E", orderOk(lsChunk), null);
+    check(
+      "F24 ensureBaseBound \u56DE\u4F20\u7ED1\u5B9A\u7ED3\u679C\uFF08\u4F9B\u8C03\u7528\u65B9\u5224\u65AD\u914D\u7F6E\u80FD\u5426\u81EA\u8BC1\u5F52\u5C5E\uFF09",
+      /async function ensureBaseBound\([\s\S]*?\): Promise<boolean>/.test(src) && /return true;/.test(src.slice(src.indexOf("async function ensureBaseBound"))),
+      null
+    );
+    check(
+      "F24 \u5E26 baseToken \u4E14\u7ED1\u5B9A\u6210\u529F\u7684\u914D\u7F6E\u4E0D\u505A\u8DE8 base \u4E22\u5F03\uFF08\u81EA\u63CF\u8FF0\u914D\u7F6E\uFF09",
+      /\(!parsed\.baseToken \|\| !bound\)/.test(src),
+      null
+    );
+  }
   const failed = results.filter((r10) => !r10.pass);
   log(`
 === ${results.length - failed.length}/${results.length} \u901A\u8FC7 ===`);
