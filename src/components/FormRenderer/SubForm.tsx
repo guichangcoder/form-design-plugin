@@ -23,7 +23,11 @@ interface Props {
   preview?: boolean;
 }
 
-export function SubForm({ sub, rows, onChange, cond, errors, uniqueState, onFieldBlur, preview }: Props) {
+/**
+ * 子表字段渲染（逐行）。
+ * ★ React.memo 包裹：理由同 MainForm —— 阻断日期联动写回引发的全树重渲染。
+ */
+export const SubForm = React.memo(function SubForm({ sub, rows, onChange, cond, errors, uniqueState, onFieldBlur, preview }: Props) {
   const updateRow = (idx: number, fieldId: string, v: unknown) =>
     onChange(
       rows.map((r, i) => {
@@ -126,4 +130,4 @@ export function SubForm({ sub, rows, onChange, cond, errors, uniqueState, onFiel
       )}
     </div>
   );
-}
+});

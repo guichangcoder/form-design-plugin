@@ -12,9 +12,9 @@ import { validateForm } from '../src/utils/validator';
 import { submitForm } from '../src/services/recordService';
 import { __setAppForTest as selectBaseForTest } from '../src/services/appContext';
 import { serializeConfig, hydrateConfig } from '../src/services/configSize';
-import { resolveRefOptions, getOptionRefDependencies, hasOptionRef } from '../src/utils/optionRef';
+import { resolveRefOptions, getOptionRefDependencies, hasOptionRef, conditionSpecOf } from '../src/utils/optionRef';
 import { applyDateOffset, isSameInstant, describeOffset, toDateOrNull } from '../src/utils/dateCalc';
-import { applyAutoFill, markManualEdits } from '../src/utils/dateAutoFill';
+import { applyAutoFill, markManualEdits, resolveAutoFill, findAutoFillCycles, wouldCreateAutoFillCycle } from '../src/utils/dateAutoFill';
 import {
   checkDuplicates,
   checkOneValue,
@@ -28,11 +28,20 @@ import {
   loadHeadColumn,
   loadHeadRows,
   loadRowsByConditions,
+  scanRowsByConditionsLocal,
+  scanDistinctValues,
   searchAllPages,
   searchAllRows,
   getHeadCache,
   invalidateTableRecords,
   taskKey,
+  loadFieldSelectOptions,
+  probeOptionExists,
+  enumerateOptionsByProbe,
+  enumerateFieldValuesByColumn,
+  enumerateRefOptions,
+  MAX_PROBE_OPTIONS,
+  DISTINCT_SCAN_MAX_PAGES,
 } from '../src/services/tableRecordCache';
 
 const results = [];
@@ -45,6 +54,14 @@ function check(name, cond, extra) {
 const MAIN = 'tblMain';
 const SUB1 = 'tblSub1';
 const SUB2 = 'tblSub2';
+
+/** 日期格式化（F15 / F21 共用）：Date → YYYY-MM-DD，空值 → 'null' */
+const fmt = (x) =>
+  x
+    ? `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`
+    : 'null';
+/** 构造本地零点的 Date（F15 / F21 共用） */
+const d = (s) => new Date(`${s}T00:00:00`);
 
 /** 构造内存 base：recordCalls 记录所有写/删调用 */
 function makeMockBase({ failSub1AtBatch = -1, failSub2 = false } = {}) {
@@ -487,11 +504,6 @@ async function run() {
 
   // —— F15：日期联动预填（偏移计算 + 自动填/手动改后不覆盖/清空重填）——
   {
-    const fmt = (x) =>
-      x
-        ? `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`
-        : 'null';
-    const d = (s) => new Date(`${s}T00:00:00`);
     const plus1y = { sourceFieldId: 'fStart', direction: 'plus', amount: 1, unit: 'year' };
 
     check('F15 +1 年（2026-03-01→2027-03-01）', fmt(applyDateOffset(d('2026-03-01'), plus1y)) === '2027-03-01');
@@ -560,6 +572,87 @@ async function run() {
     const noSrc = { ...n4, fStart: undefined };
     const n5 = applyAutoFill(fields, noSrc, manual, auto, keyOf);
     check('F15 来源清空后清掉自动值', n5 && n5.fEnd === undefined, n5 && fmt(n5.fEnd));
+  }
+
+  // —— F21：日期联动「环检测 + 有界收敛」（防受控控件频闪）——
+  {
+    const y = (src, dir, amt, unit = 'year') => ({
+      sourceFieldId: src, direction: dir, amount: amt, unit,
+    });
+    const dtf = (id, af) => ({
+      fieldId: id, fieldName: id, fieldType: FieldType.DateTime, visible: true, required: false,
+      ...(af ? { dateAutoFill: af } : {}),
+    });
+    const keyOf = (fid) => `main:${fid}`;
+
+    // 1) 自引用 → 识别为环
+    const selfCycle = findAutoFillCycles([dtf('X', y('X', 'plus', 1))]);
+    check('F21 自引用被识别为环', selfCycle.has('X'), [...selfCycle]);
+
+    // 2) 互引用 → 双方都在环上
+    const mutual = findAutoFillCycles([dtf('A', y('B', 'plus', 1)), dtf('B', y('A', 'plus', 1))]);
+    check('F21 互引用双方都在环上', mutual.has('A') && mutual.has('B'), [...mutual]);
+
+    // 3) 三元环 A→B→C→A（来源链）
+    const tri = findAutoFillCycles([
+      dtf('A', y('C', 'plus', 1, 'month')),
+      dtf('B', y('A', 'plus', 1, 'month')),
+      dtf('C', y('B', 'plus', 1, 'month')),
+    ]);
+    check('F21 三元环全部识别', tri.has('A') && tri.has('B') && tri.has('C'), [...tri]);
+
+    // 4) 无环长链不应误报
+    const chain = findAutoFillCycles([
+      dtf('A'), dtf('B', y('A', 'plus', 1)), dtf('C', y('B', 'plus', 1)), dtf('D', y('C', 'plus', 1)),
+    ]);
+    check('F21 无环长链不误报', chain.size === 0, [...chain]);
+
+    // 5) 环下游被连带排除（A↔B 成环，C 依赖 A）
+    const downstream = findAutoFillCycles([
+      dtf('A', y('B', 'plus', 1)), dtf('B', y('A', 'plus', 1)), dtf('C', y('A', 'plus', 1)),
+    ]);
+    check('F21 环的下游一并排除', downstream.has('A') && downstream.has('B') && downstream.has('C'), [...downstream]);
+
+    // 6) 发散环上字段不再被写入（否则每帧 setState → 频闪）
+    const divFields = [dtf('A', y('B', 'plus', 1)), dtf('B', y('A', 'plus', 1))];
+    const divAuto = new Set();
+    check(
+      'F21 发散环不产生任何写回',
+      applyAutoFill(divFields, { A: new Date('2026-03-01T00:00:00') }, new Set(), divAuto, keyOf) === null
+        && divAuto.size === 0
+    );
+
+    // 7) resolveAutoFill：长链一次求解到收敛，只返回一次结果
+    const chainFields = [
+      dtf('A'), dtf('B', y('A', 'plus', 1)), dtf('C', y('B', 'plus', 1)),
+      dtf('D', y('C', 'plus', 1)), dtf('E', y('D', 'plus', 1)),
+    ];
+    const chainAuto = new Set();
+    const r1 = resolveAutoFill(
+      chainFields, { A: new Date('2026-03-01T00:00:00') }, new Set(), chainAuto, keyOf
+    );
+    check(
+      'F21 长链一次收敛到最终值',
+      r1 && fmt(r1.B) === '2027-03-01' && fmt(r1.C) === '2028-03-01'
+        && fmt(r1.D) === '2029-03-01' && fmt(r1.E) === '2030-03-01',
+      r1 && [fmt(r1.B), fmt(r1.C), fmt(r1.D), fmt(r1.E)]
+    );
+    check('F21 收敛后再求解返回 null（不重复写回）', resolveAutoFill(chainFields, r1, new Set(), chainAuto, keyOf) === null);
+
+    // 8) 发散环经 resolveAutoFill 也不会无限迭代（熔断上限）
+    const rDiv = resolveAutoFill(
+      divFields, { A: new Date('2026-03-01T00:00:00') }, new Set(), new Set(), keyOf
+    );
+    check('F21 发散环被环检测挡住（resolve 返回 null）', rDiv === null);
+
+    // 9) 配置侧预防：wouldCreateAutoFillCycle
+    const cfgFields = [dtf('A', y('B', 'plus', 1)), dtf('B')];
+    check('F21 配置侧：A←B 已存在时 B 选 A 成环', wouldCreateAutoFillCycle(cfgFields, 'B', 'A') === true);
+    check('F21 配置侧：自选自身成环', wouldCreateAutoFillCycle([dtf('A'), dtf('B')], 'B', 'B') === true);
+    check('F21 配置侧：无环选择放行', wouldCreateAutoFillCycle([dtf('A'), dtf('B')], 'B', 'A') === false);
+    check('F21 配置侧：长链末端放行', wouldCreateAutoFillCycle(
+      [dtf('A'), dtf('B', y('A', 'plus', 1)), dtf('C', y('B', 'plus', 1)), dtf('D')], 'D', 'C'
+    ) === false);
   }
 
   // —— F16：唯一性校验（提交时查重：表内已有值 + 本次多行互查 + 权限失败不静默放行）——
@@ -1080,6 +1173,556 @@ async function run() {
     }
   }
 
+  // —— F20：级联选项「假空」修复 ——
+  // 线上症状：源表条件字段是「单选」，按联动条件取数返回 0 条，
+  // 表单下拉永远空白（灰字「已按联动条件取回全部 0 条源记录」）。
+  // 根因：单选 is 条件未带 fieldType / 宿主对条件支持不完整 → 稳定 0 条，且旧逻辑直接判空。
+  // 本轮修复：① 条件带字段类型；② 0 条时用宽松条件复核；③ 仍为 0 才认「真无」。
+  {
+    const CITY = 'fldCity';
+    const PROV = 'fldProv';
+    // 字典表：浙江省 2 行、江苏省 1 行；条件字段 PROV 是「单选」(FieldType.SingleSelect = 3)
+    const dictRows = [
+      { recordId: 'r1', fields: { [PROV]: '浙江省', [CITY]: '杭州' } },
+      { recordId: 'r2', fields: { [PROV]: '浙江省', [CITY]: '宁波' } },
+      { recordId: 'r3', fields: { [PROV]: '江苏省', [CITY]: '南京' } },
+    ];
+
+    // 1) 条件带 fieldType：filter 条件里必须出现 fieldType
+    {
+      let seenFilter = null;
+      const base = {
+        getTableById: async () => ({
+          getFieldMetaList: async () => [],
+          getRecordsByPage: async ({ filter }) => {
+            seenFilter = filter;
+            const conds = filter?.conditions ?? [];
+            const hits = dictRows.filter((r) =>
+              conds.every((c) => String((r.fields ?? {})[c.fieldId] ?? '') === String(c.value))
+            );
+            return { records: hits, hasMore: false };
+          },
+        }),
+        getTableMetaList: async () => [{ id: 'tblCity' }],
+      };
+      selectBaseForTest({ base });
+      invalidateTableRecords();
+      const res = await loadRowsByConditions('tblCity', [
+        { fieldId: PROV, text: '浙江省', fieldType: FieldType.SingleSelect },
+      ]).promise;
+      check(
+        'F20 单选条件带 fieldType 下发（服务端才能正确解析）',
+        !!seenFilter && seenFilter.conditions?.[0]?.fieldType === FieldType.SingleSelect,
+        seenFilter?.conditions?.[0]
+      );
+      check('F20 带类型条件正常取回该父级记录', res.rows.length === 2 && res.filterEffective === true, {
+        n: res.rows.length,
+        eff: res.filterEffective,
+      });
+    }
+
+    // 2) 多选字段的「等于」语义必须用 contains（is 不会命中含多个选项的单元格）
+    {
+      let seenOps = [];
+      const base = {
+        getTableById: async () => ({
+          getFieldMetaList: async () => [],
+          getRecordsByPage: async ({ filter }) => {
+            seenOps = (filter?.conditions ?? []).map((c) => c.operator);
+            return { records: [], hasMore: false };
+          },
+        }),
+        getTableMetaList: async () => [{ id: 'tblCity' }],
+      };
+      selectBaseForTest({ base });
+      invalidateTableRecords();
+      await loadRowsByConditions('tblCity', [
+        { fieldId: 'fldTags', text: '重点', fieldType: FieldType.MultiSelect },
+      ]).promise;
+      check('F20 多选条件使用 contains 语义', seenOps[0] === 'contains', seenOps);
+    }
+
+    // 3) ★核心回归：精确条件返回 0 条（宿主误解析=假空），宽松条件能命中 → 采用复核结果，不判空
+    {
+      const base = {
+        getTableById: async () => ({
+          getFieldMetaList: async () => ([]),
+          getRecordsByPage: async ({ filter }) => {
+            const conds = filter?.conditions ?? [];
+            const c = conds[0] ?? {};
+            // 模拟宿主缺陷：只要带 fieldType 的 is 条件就返回空（假空）
+            if (c.operator === 'is' && typeof c.fieldType === 'number') {
+              return { records: [], hasMore: false };
+            }
+            // 宽松条件（contains，无 fieldType）能正常命中
+            const hits = dictRows.filter((r) => {
+              const v = String((r.fields ?? {})[c.fieldId] ?? '');
+              return c.operator === 'contains' ? v.includes(String(c.value)) : v === String(c.value);
+            });
+            return { records: hits, hasMore: false };
+          },
+        }),
+        getTableMetaList: async () => [{ id: 'tblCity' }],
+      };
+      selectBaseForTest({ base });
+      invalidateTableRecords();
+      const res = await loadRowsByConditions('tblCity', [
+        { fieldId: PROV, text: '浙江省', fieldType: FieldType.SingleSelect },
+      ]).promise;
+      check(
+        'F20 假空场景：精确条件 0 条时用宽松条件复核并命中（不再直接判空）',
+        res.rows.length === 2 && res.filterEffective === true,
+        { n: res.rows.length, eff: res.filterEffective }
+      );
+      const opts = resolveRefOptions(
+        { tableId: 'tblCity', fieldId: CITY, conditions: [
+          { sourceFieldId: PROV, sourceFieldType: FieldType.SingleSelect, valueSource: 'static', staticValue: '浙江省' },
+        ] },
+        res.rows,
+        {}
+      );
+      check('F20 复核结果经本地筛后能产出子级选项', opts.join(',') === '杭州,宁波', opts);
+    }
+
+    // 4) 真无：精确与宽松条件都 0 条 → 才认「该条件下确实无记录」
+    {
+      const base = {
+        getTableById: async () => ({
+          getFieldMetaList: async () => [],
+          getRecordsByPage: async () => ({ records: [], hasMore: false }),
+        }),
+        getTableMetaList: async () => [{ id: 'tblCity' }],
+      };
+      selectBaseForTest({ base });
+      invalidateTableRecords();
+      const res = await loadRowsByConditions('tblCity', [
+        { fieldId: PROV, text: '不存在的省', fieldType: FieldType.SingleSelect },
+      ]).promise;
+      check('F20 真无记录时仍返回空（不伪造）', res.rows.length === 0, res.rows.length);
+    }
+
+    // 5) 条件构造保持类型无关的本地自证正确性（多选单元格「A B」）
+    {
+      const base = {
+        getTableById: async () => ({
+          getFieldMetaList: async () => [],
+          getRecordsByPage: async () => ({
+            records: [{ recordId: 'm1', fields: { fldTags: '重点 紧急' } }],
+            hasMore: false,
+          }),
+        }),
+        getTableMetaList: async () => [{ id: 'tblCity' }],
+      };
+      selectBaseForTest({ base });
+      invalidateTableRecords();
+      const res = await loadRowsByConditions('tblCity', [
+        { fieldId: 'fldTags', text: '重点', fieldType: FieldType.MultiSelect },
+      ]).promise;
+      check(
+        'F20 多选本地自证按「单元格含该选项」判定',
+        res.rows.length === 1 && res.filterEffective === true,
+        { n: res.rows.length, eff: res.filterEffective }
+      );
+    }
+
+    // 6) 有界本地扫描兜底：条件反复失效时仍能扫出满足条件的记录
+    {
+      const base = {
+        getTableById: async () => ({
+          getFieldMetaList: async () => [],
+          getRecordsByPage: async ({ pageToken }) => {
+            const start = pageToken === undefined ? 0 : Number(pageToken);
+            const slice = dictRows.slice(start, start + 2);
+            const next = start + 2;
+            return {
+              records: slice,
+              hasMore: next < dictRows.length,
+              pageToken: next < dictRows.length ? String(next) : undefined,
+            };
+          },
+        }),
+        getTableMetaList: async () => [{ id: 'tblCity' }],
+      };
+      selectBaseForTest({ base });
+      invalidateTableRecords();
+      const scan = await scanRowsByConditionsLocal('tblCity', [
+        { fieldId: PROV, text: '浙江省', fieldType: FieldType.SingleSelect },
+      ]).done;
+      check(
+        'F20 有界本地扫描兜底能扫出该父级全部记录',
+        scan.rows.length === 2 && scan.truncated === false,
+        { n: scan.rows.length, truncated: scan.truncated }
+      );
+    }
+
+    // 7) conditionSpecOf 纯函数：类型随条件带出；父级未填/固定值为空不下发
+    {
+      const withType = conditionSpecOf(
+        { sourceFieldId: PROV, sourceFieldType: FieldType.SingleSelect, valueSource: 'field', formFieldId: 'fldFormProv' },
+        { fldFormProv: '浙江' }
+      );
+      check(
+        'F20 conditionSpecOf 带出源表字段类型',
+        !!withType && withType.fieldType === FieldType.SingleSelect && withType.text === '浙江',
+        withType
+      );
+      check(
+        'F20 conditionSpecOf 父级未填时返回 null（子级无选项）',
+        conditionSpecOf(
+          { sourceFieldId: PROV, valueSource: 'field', formFieldId: 'fldFormProv' },
+          {}
+        ) === null
+      );
+      check(
+        'F20 conditionSpecOf 固定值为空时返回 null（不放出全部选项）',
+        conditionSpecOf({ sourceFieldId: PROV, valueSource: 'static', staticValue: '  ' }, {}) === null
+      );
+    }
+  }
+
+// —— F22：引用选项「完整穷举」（上万条源表不再只出前 200）——
+  // 线上症状：源表上万条、配了引用条件，需要该条件下全部去重取值作为选项，
+  // 实际只出来了前 200 条对应的选项 → 选项不全；且底部灰字显示"已加载最新 200 条"。
+  // 根因（本轮定位）：① 旧实现上限内截断却把 hasMore 写死 false → 静默丢数据；
+  //                  ② 首版穷举过度依赖 `getFieldValueListByPage` / 字段选项域，本宿主不可用
+  //                     → 静默回退到「200 条」老路径（正是用户看到的灰字）。
+  // 本轮修复：把「关联字段选择器同源」的 `getRecordsByPage` 渐进扫描作为**必然可用**的兜底引擎，
+  //          选项域 / 存在性探测只作更快的可选优化；任何情形都不会静默只给 200 条。
+  {
+    const CITY2 = 'fldCity2';
+    const PROV2 = 'fldProv2';
+    // 源表 3 万行：浙江省 2 万行（杭州/宁波/温州 轮转），江苏省 1 万行。
+    // 「温州」出现位置远在第 200 行之后 → 旧实现（只读 200）必然漏掉它。
+    const DECLARED = ['杭州', '宁波', '温州', '绍兴']; // 字段配置的选项域（4 项）
+
+    /** 造一个「行为真实」的 mock 表：分页按 token 推进、可按 pageSize 截断 */
+    function makeBigDictBase({ ignoreFilter = false } = {}) {
+      const calls = { records: 0, meta: 0, pages: 0 };
+      const rows = [];
+      const zj = ['杭州', '宁波', '温州'];
+      for (let i = 0; i < 20000; i += 1) {
+        rows.push({ recordId: `zj${i}`, fields: { [PROV2]: '浙江省', [CITY2]: zj[i % 3] } });
+      }
+      for (let i = 0; i < 10000; i += 1) {
+        rows.push({ recordId: `js${i}`, fields: { [PROV2]: '江苏省', [CITY2]: '南京' } });
+      }
+      const filtered = (filter) => {
+        const conds = filter?.conditions ?? [];
+        if (ignoreFilter) return rows;
+        let hits = rows;
+        for (const c of conds) {
+          hits = hits.filter((r) => {
+            const v = String((r.fields ?? {})[c.fieldId] ?? '');
+            if (c.operator === 'contains') return v.includes(String(c.value));
+            return v === String(c.value);
+          });
+        }
+        return hits;
+      };
+      const table = {
+        getFieldMetaList: async () => {
+          calls.meta += 1;
+          return [
+            {
+              id: CITY2,
+              name: '城市',
+              type: FieldType.SingleSelect,
+              property: { options: DECLARED.map((n, i) => ({ id: `o${i}`, name: n })) },
+            },
+            { id: PROV2, name: '省', type: FieldType.SingleSelect, property: { options: [] } },
+          ];
+        },
+        getRecordsByPage: async ({ filter, pageSize, pageToken }) => {
+          calls.records += 1;
+          calls.pages += 1;
+          const all = filtered(filter);
+          const start = pageToken === undefined ? 0 : Number(pageToken);
+          const n = pageSize ?? 200;
+          const slice = all.slice(start, start + n);
+          const next = start + n;
+          return {
+            records: slice,
+            total: all.length,
+            hasMore: next < all.length,
+            pageToken: next < all.length ? String(next) : undefined,
+          };
+        },
+      };
+      return {
+        base: { getTableById: async () => table, getTableMetaList: async () => [{ id: 'tblBig' }] },
+        calls,
+        rows,
+      };
+    }
+
+    // 1) loadFieldSelectOptions：1 次请求读到完整选项域（更快路径的基础）
+    {
+      const { base, calls } = makeBigDictBase();
+      selectBaseForTest({ base });
+      invalidateTableRecords();
+      const mo = await loadFieldSelectOptions('tblBig', CITY2).promise;
+      check(
+        'F22 读到源字段完整选项域（单选，1 次元信息请求）',
+        mo.found === true && mo.options.join(',') === DECLARED.join(','),
+        { opts: mo.options, metaCalls: calls.meta }
+      );
+      check('F22 读选项域未读取任何记录', calls.records === 0, calls.records);
+    }
+
+    // 2) ★核心：单选+有条件 → 存在性探测穷举，完整（含排在第 2 万位的「温州」）
+    {
+      const { base } = makeBigDictBase();
+      selectBaseForTest({ base });
+      invalidateTableRecords();
+      const r = await enumerateOptionsByProbe('tblBig', CITY2, [
+        { fieldId: PROV2, text: '浙江省', fieldType: FieldType.SingleSelect },
+      ]).promise;
+      check(
+        'F22 有条件下穷举出全部命中选项（杭州/宁波/温州，不再只出前 200 条对应的）',
+        r.values.join(',') === '杭州,宁波,温州' && r.complete === true,
+        { values: r.values, complete: r.complete }
+      );
+      check('F22 绍兴（该条件下无记录）被正确排除', !r.values.includes('绍兴'), r.values);
+      check('F22 探测成本只与选项个数有关（4 项=4 次探测）', r.probes === 4, r.probes);
+      check('F22 探测每项只取 1 条（scanned<=3，远小于 3 万行）', r.scanned <= 3, {
+        scanned: r.scanned,
+        tableRows: 30000,
+      });
+    }
+
+    // 3) 无条件：直接返回选项域（1 次元信息请求、0 次记录读取、必然完整）
+    {
+      const { base, calls } = makeBigDictBase();
+      selectBaseForTest({ base });
+      invalidateTableRecords();
+      const r = await enumerateOptionsByProbe('tblBig', CITY2, []).promise;
+      check(
+        'F22 无条件下直接返回选项域（完整、不读记录）',
+        r.values.join(',') === DECLARED.join(',') && r.source === 'metadata' && calls.records === 0,
+        { values: r.values, source: r.source, records: calls.records }
+      );
+    }
+
+    // 4) 存在性探测：单次探测的返回值与自证
+    {
+      const { base } = makeBigDictBase();
+      selectBaseForTest({ base });
+      const hit = await probeOptionExists('tblBig', CITY2, '温州', [
+        { fieldId: PROV2, text: '浙江省', fieldType: FieldType.SingleSelect },
+      ]);
+      const miss = await probeOptionExists('tblBig', CITY2, '绍兴', [
+        { fieldId: PROV2, text: '浙江省', fieldType: FieldType.SingleSelect },
+      ]);
+      check('F22 探测命中已存在选项（温州@浙江省）', hit.exists === true && hit.effective === true, hit);
+      check('F22 探测判定无记录选项（绍兴@浙江省）', miss.exists === false, miss);
+    }
+
+    // 5) 宿主忽略 filter → 探测路径自证失败，如实回报（不伪造选项）
+    {
+      const { base } = makeBigDictBase({ ignoreFilter: true });
+      selectBaseForTest({ base });
+      invalidateTableRecords();
+      const r = await enumerateOptionsByProbe('tblBig', CITY2, [
+        { fieldId: PROV2, text: '浙江省', fieldType: FieldType.SingleSelect },
+      ]).promise;
+      check(
+        'F22 宿主忽略 filter 时探测路径自证失败（不伪造选项）',
+        r.filterEffective === false && r.values.length === 0 && r.error === 'filter-ineffective',
+        { eff: r.filterEffective, values: r.values, err: r.error }
+      );
+    }
+
+    // 6) 单选 is / 多选 contains 的取值匹配语义
+    {
+      let seenOps = [];
+      const base = {
+        getTableById: async () => ({
+          getFieldMetaList: async () => [
+            { id: 'fldTags2', name: '标签', type: FieldType.MultiSelect, property: { options: [{ id: 'a', name: '重点' }] } },
+          ],
+          getRecordsByPage: async ({ filter }) => {
+            seenOps = (filter?.conditions ?? []).map((c) => c.operator);
+            return { records: [], hasMore: false };
+          },
+        }),
+        getTableMetaList: async () => [{ id: 'tblBig' }],
+      };
+      selectBaseForTest({ base });
+      invalidateTableRecords();
+      await probeOptionExists('tblBig', 'fldTags2', '重点', [], FieldType.MultiSelect);
+      check('F22 多选取值匹配用 contains（含该选项即命中）', seenOps.includes('contains'), seenOps);
+    }
+
+    // 7) ★★ 本轮核心回归：宿主「元信息无选项域 + 无 getFieldValueListByPage」时，
+    //    统一入口必须自动走**渐进全量扫描**并给出完整选项（= 用户线上真实故障场景）。
+    {
+      const PROV3 = 'fldProv3';
+      const CITY3 = 'fldCity3';
+      const rows2 = [];
+      for (let i = 0; i < 2100; i += 1) rows2.push({ recordId: `a${i}`, fields: { [PROV3]: '浙', [CITY3]: `城${i % 7}` } });
+      let pages = 0;
+      const base = {
+        getTableById: async () => ({
+          // 故意返回 Text 类型：无选项域；且不提供 getFieldById → 必然走扫描
+          getFieldMetaList: async () => [{ id: CITY3, name: '城', type: FieldType.Text }],
+          getRecordsByPage: async ({ pageToken }) => {
+            pages += 1;
+            const start = pageToken === undefined ? 0 : Number(pageToken);
+            const slice = rows2.slice(start, start + 200);
+            const next = start + 200;
+            return {
+              records: slice,
+              total: rows2.length,
+              hasMore: next < rows2.length,
+              pageToken: next < rows2.length ? String(next) : undefined,
+            };
+          },
+        }),
+        getTableMetaList: async () => [{ id: 'tblBig' }],
+      };
+      selectBaseForTest({ base });
+      invalidateTableRecords();
+      const r = await enumerateRefOptions('tblBig', CITY3, [
+        { fieldId: PROV3, text: '浙', fieldType: FieldType.Text },
+      ]).promise;
+      check(
+        'F22 无选项域 → 自动走渐进全量扫描并完整（7 个取值全出）',
+        r.source === 'scan' && r.complete === true && r.values.join(',') === '城0,城1,城2,城3,城4,城5,城6',
+        { source: r.source, complete: r.complete, values: r.values }
+      );
+      check('F22 扫描翻了 2100/200 页（非只读 200）', pages >= 11, { pages });
+    }
+
+    // 7b) 扫描「首屏秒出 + 后台续扫」：第一页回调即产出选项、且有进度回调
+    {
+      const PROV4 = 'fldProv4';
+      const CITY4 = 'fldCity4';
+      const rows3 = [];
+      for (let i = 0; i < 1200; i += 1) rows3.push({ recordId: `b${i}`, fields: { [PROV4]: '浙', [CITY4]: `甲${i % 3}` } });
+      const base = {
+        getTableById: async () => ({
+          getFieldMetaList: async () => [{ id: CITY4, name: '城', type: FieldType.Text }],
+          getRecordsByPage: async ({ pageToken }) => {
+            const start = pageToken === undefined ? 0 : Number(pageToken);
+            const slice = rows3.slice(start, start + 200);
+            const next = start + 200;
+            return {
+              records: slice,
+              total: rows3.length,
+              hasMore: next < rows3.length,
+              pageToken: next < rows3.length ? String(next) : undefined,
+            };
+          },
+        }),
+        getTableMetaList: async () => [{ id: 'tblBig' }],
+      };
+      selectBaseForTest({ base });
+      invalidateTableRecords();
+      let callbacks = 0;
+      let progressSeen = 0;
+      const h = enumerateRefOptions('tblBig', CITY4, [
+        { fieldId: PROV4, text: '浙', fieldType: FieldType.Text },
+      ], {
+        onOption: () => { callbacks += 1; },
+        onScanProgress: (s) => { progressSeen = s; },
+      });
+      const r = await h.promise;
+      check('F22 扫描有 onOption 渐进回调（不干等全量）', callbacks >= 3, { callbacks });
+      check('F22 扫描有进度回调（已扫描达到全表 1200）', progressSeen >= 1200, progressSeen);
+      check('F22 扫描结果完整（3 个取值）', r.complete === true && r.values.length === 3, r.values);
+    }
+
+    // 7c) 扫描撞页数上限 → 如实标 truncated（不谎报完整）
+    {
+      const PROV5 = 'fldProv5';
+      const CITY5 = 'fldCity5';
+      const rows4 = [];
+      for (let i = 0; i < 5000; i += 1) rows4.push({ recordId: `c${i}`, fields: { [PROV5]: '浙', [CITY5]: `X${i}` } });
+      const base = {
+        getTableById: async () => ({
+          getFieldMetaList: async () => [{ id: CITY5, name: '城', type: FieldType.Text }],
+          getRecordsByPage: async ({ pageToken }) => {
+            const start = pageToken === undefined ? 0 : Number(pageToken);
+            const slice = rows4.slice(start, start + 200);
+            const next = start + 200;
+            return {
+              records: slice,
+              total: rows4.length,
+              hasMore: next < rows4.length,
+              pageToken: next < rows4.length ? String(next) : undefined,
+            };
+          },
+        }),
+        getTableMetaList: async () => [{ id: 'tblBig' }],
+      };
+      selectBaseForTest({ base });
+      invalidateTableRecords();
+      const r = await enumerateRefOptions('tblBig', CITY5, [
+        { fieldId: PROV5, text: '浙', fieldType: FieldType.Text },
+      ], { maxScanPages: 3 }).promise;
+      check(
+        'F22 扫描撞页数上限时如实标 truncated（不谎报完整）',
+        r.truncated === true && r.complete === false && r.source === 'scan',
+        { truncated: r.truncated, complete: r.complete, n: r.values.length }
+      );
+    }
+
+    // 8) 探测自证失败（宿主忽略 filter）→ 统一入口自动降级扫描，仍得出完整选项
+    {
+      const PROV6 = 'fldProv6';
+      const CITY6 = 'fldCity6';
+      const rows5 = [];
+      for (let i = 0; i < 600; i += 1) {
+        rows5.push({ recordId: `d${i}`, fields: { [PROV6]: i % 2 === 0 ? '浙' : '苏', [CITY6]: i % 2 === 0 ? '杭' : '宁' } });
+      }
+      const base = {
+        getTableById: async () => ({
+          getFieldMetaList: async () => [
+            { id: CITY6, name: '城', type: FieldType.SingleSelect, property: { options: [{ id: 'x', name: '杭' }, { id: 'y', name: '宁' }] } },
+          ],
+          // 宿主忽略 filter：始终返回全部（含不满足条件的）→ 探测自证失败
+          getRecordsByPage: async ({ pageToken }) => {
+            const start = pageToken === undefined ? 0 : Number(pageToken);
+            const slice = rows5.slice(start, start + 200);
+            const next = start + 200;
+            return {
+              records: slice,
+              total: rows5.length,
+              hasMore: next < rows5.length,
+              pageToken: next < rows5.length ? String(next) : undefined,
+            };
+          },
+        }),
+        getTableMetaList: async () => [{ id: 'tblBig' }],
+      };
+      selectBaseForTest({ base });
+      invalidateTableRecords();
+      const r = await enumerateRefOptions('tblBig', CITY6, [
+        { fieldId: PROV6, text: '浙', fieldType: FieldType.SingleSelect },
+      ]).promise;
+      check(
+        'F22 探测自证失败 → 自动降级扫描，仍得出该条件下完整选项（杭）',
+        r.source === 'scan' && r.values.join(',') === '杭' && r.complete === true,
+        { source: r.source, values: r.values, complete: r.complete }
+      );
+    }
+
+    // 9) resolveRefOptions 纯函数行为不受本轮改动影响（去重 + 按条件筛）
+    {
+      const opts = resolveRefOptions(
+        { tableId: 't', fieldId: CITY2, conditions: [
+          { sourceFieldId: PROV2, sourceFieldType: FieldType.SingleSelect, valueSource: 'static', staticValue: '浙江省' },
+        ] },
+        [
+          { fields: { [PROV2]: '浙江省', [CITY2]: '杭州' } },
+          { fields: { [PROV2]: '江苏省', [CITY2]: '南京' } },
+          { fields: { [PROV2]: '浙江省', [CITY2]: '杭州' } },
+        ],
+        {}
+      );
+      check('F22 resolveRefOptions 去重且按条件筛', opts.join(',') === '杭州', opts);
+    }
+  }
   // —— F19：Semi Select「可搜索性」静态防回归 ——
   // 踩过的坑：`filter={undefined}` 会让 Semi 判定 filterable=false，
   // **连搜索输入框都不渲染**，onSearch 永不触发 → 用户"只能选，没法模糊搜索"。
@@ -1123,6 +1766,59 @@ async function run() {
       // 选中后不清空关键字，便于连续多选
       check(`F19 ${file} 保留关键字（autoClearSearchValue=false）`, /autoClearSearchValue=\{false\}/.test(code));
     }
+  }
+
+  // —— F23：引用选项「搜索必须替换列表、且完整性不依赖易缺接口」（静态防回归）——
+  // 踩过的坑：
+  //  ① 选项列表把「搜索结果」与「全量穷举值」求并集 → 列表几乎仍是全量，用户觉得"搜索没生效"；
+  //  ② 完整性过度依赖 `getFieldValueListByPage` / 字段选项域 → 宿主不支持时静默回退到 200 条。
+  // 这里直接扫源码断言这两点不再发生。
+  {
+    const fs = await import('node:fs');
+    const read = (rel) => {
+      const url = new URL(rel, import.meta.url);
+      return fs
+        .readFileSync(url, 'utf8')
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/^\s*\/\/.*$/gm, '')
+        .replace(/([^:])\/\/.*$/gm, '$1');
+    };
+    // ① RefOptionSelect：搜索态必须只取「匹配关键字」的项（不得把未过滤的全量 values 放进来）
+    const sel = read('../src/components/FormRenderer/RefOptionSelect.tsx');
+    // 取 optionTexts 的 useMemo 主体，检查 if(inSearch){...}else{...} 分支内容是否互斥
+    const memoMatch = sel.match(/const optionTexts = useMemo\(\(\) => \{([\s\S]*?)\n  \}, \[/);
+    const body = memoMatch ? memoMatch[1] : '';
+    const ifBlock = (body.match(/if \(inSearch\) \{([\s\S]*?)\} else \{/) || [])[1] || '';
+    const elseBlock = (body.match(/\} else \{([\s\S]*?)\n    \}/) || [])[1] || '';
+    const branchOk =
+      /searchHits\.forEach/.test(ifBlock) &&
+      !/^\s*values\.forEach/m.test(ifBlock) && // 搜索分支绝不能直接铺全量 values
+      /values\.forEach/.test(elseBlock);
+    check('F23 引用选项在搜索态只展示匹配项（不铺未过滤全量）', branchOk, {
+      branchOk,
+      ifHasSearchHits: /searchHits\.forEach/.test(ifBlock),
+      ifHasRawValues: /^\s*values\.forEach/m.test(ifBlock),
+    });
+    // 全量本地过滤必须存在（把关键字应用到已穷举的全量选项上 → 「全量搜索」的可靠一环）
+    check(
+      'F23 搜索对已穷举全量选项做本地过滤（全量搜索的可靠一环）',
+      /localHits\s*=\s*useMemo[\s\S]{0,200}values\.filter\(\(v\)\s*=>\s*v\.toLowerCase\(\)\.includes\(kw\)\)/.test(
+        sel
+      ),
+      null
+    );
+    // ② 统一入口必须存在「扫描」兜底源（保证不静默只给 200 条）
+    const cache = read('../src/services/tableRecordCache.ts');
+    check(
+      'F23 穷举统一入口含 getRecordsByPage 扫描兜底（不依赖易缺接口）',
+      /scanDistinctValues/.test(cache) && /source:\s*'scan'/.test(cache),
+      null
+    );
+    check(
+      'F23 扫描兜底基于 getRecordsByPage（与关联字段选择器同源）',
+      /scanRowsByConditionsLocal[\s\S]*?getRecordsByPage/.test(cache),
+      null
+    );
   }
 
   const failed = results.filter((r) => !r.pass);

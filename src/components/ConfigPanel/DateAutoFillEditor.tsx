@@ -3,6 +3,7 @@ import { Modal, Select, InputNumber, Typography, Switch } from '@douyinfe/semi-u
 import { FieldType } from '@lark-base-open/js-sdk';
 import { DateAutoFillConfig, FieldConfig } from '../../types';
 import { describeOffset } from '../../utils/dateCalc';
+import { wouldCreateAutoFillCycle } from '../../utils/dateAutoFill';
 
 interface Props {
   visible: boolean;
@@ -45,6 +46,17 @@ export function DateAutoFillEditor({ visible, field, siblingFields, onCancel, on
     (f) => f.fieldId !== field.fieldId && f.fieldType === FieldType.DateTime
   );
 
+  /**
+   * ★ 成环预防：把候选里「会让联动依赖成环」的字段标出来并禁用。
+   * 例：A 已经配了「A ← B」，此时编辑 B 时若再选 A 作来源，就形成 A↔B 死循环，
+   * 填写态会无限互相覆盖（受控日期面板反复重置 → 频闪、选不中日期）。
+   */
+  const cyclicCandidateIds = new Set(
+    sourceCandidates
+      .filter((f) => wouldCreateAutoFillCycle(siblingFields, field.fieldId, f.fieldId))
+      .map((f) => f.fieldId)
+  );
+
   const patch = (p: Partial<DateAutoFillConfig>) => setCfg((c) => ({ ...c, ...p }));
 
   const handleSave = () => {
@@ -54,6 +66,11 @@ export function DateAutoFillEditor({ visible, field, siblingFields, onCancel, on
     }
     if (!cfg.sourceFieldId) {
       setSaveError('请选择来源日期字段');
+      return;
+    }
+    // 成环拦截：互相引用会导致填写态反复覆盖，必须挡住
+    if (wouldCreateAutoFillCycle(siblingFields, field.fieldId, cfg.sourceFieldId)) {
+      setSaveError('该来源字段与本字段会形成循环联动（互相引用），请改选其他字段');
       return;
     }
     const amount = Number(cfg.amount);
@@ -88,7 +105,7 @@ export function DateAutoFillEditor({ visible, field, siblingFields, onCancel, on
         <>
           <div className="optionref-label">来源日期字段（同一表单区块内）</div>
           <Select
-            style={{ width: '100%', marginBottom: 12 }}
+            style={{ width: '100%', marginBottom: 4 }}
             filter
             placeholder={sourceCandidates.length ? '选择来源字段' : '本区块没有其他日期字段'}
             disabled={!sourceCandidates.length}
@@ -96,9 +113,23 @@ export function DateAutoFillEditor({ visible, field, siblingFields, onCancel, on
             onChange={(v) => patch({ sourceFieldId: v as string })}
             optionList={sourceCandidates.map((f) => ({
               value: f.fieldId,
-              label: f.label || f.fieldName,
+              label: cyclicCandidateIds.has(f.fieldId)
+                ? `${f.label || f.fieldName}（会形成循环，不可选）`
+                : f.label || f.fieldName,
+              disabled: cyclicCandidateIds.has(f.fieldId),
             }))}
           />
+          {cfg.sourceFieldId && cyclicCandidateIds.has(cfg.sourceFieldId) && (
+            <Typography.Text type="danger" size="small" style={{ display: 'block', marginBottom: 12 }}>
+              该字段与本字段已互相引用，会形成循环联动导致无法填写，请换一个来源字段。
+            </Typography.Text>
+          )}
+          {!cfg.sourceFieldId && cyclicCandidateIds.size > 0 && (
+            <Typography.Text type="tertiary" size="small" style={{ display: 'block', marginBottom: 12 }}>
+              标注「会形成循环」的字段不可选：它与本字段已互相引用，会互相覆盖导致填写时反复跳动。
+            </Typography.Text>
+          )}
+          <div style={{ height: cfg.sourceFieldId && cyclicCandidateIds.has(cfg.sourceFieldId) ? 0 : 8 }} />
 
           <div className="optionref-label">偏移量</div>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>

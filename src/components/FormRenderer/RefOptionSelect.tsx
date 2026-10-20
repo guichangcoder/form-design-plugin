@@ -2,14 +2,13 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Select, Typography } from '@douyinfe/semi-ui';
 import { getBaseToken } from '../../services/appContext';
 import { FieldConfig, FormValues } from '../../types';
-import { hasOptionRef, resolveRefOptions } from '../../utils/optionRef';
+import { hasOptionRef, conditionSpecOf } from '../../utils/optionRef';
 import { stringifyCellValue } from '../../utils/cellText';
 import { classifySdkError, ClassifiedError } from '../../utils/permError';
 import {
-  loadHeadRows,
-  loadRowsByConditions,
-  getHeadCache,
   searchAllRows,
+  enumerateRefOptions,
+  OptionEnumResult,
   SearchHandle,
   FullRow,
   ConditionSpec,
@@ -26,11 +25,22 @@ interface Props {
 }
 
 /**
- * 引用选项选择器（参考多维表格原生「引用选项」）：
- * - **展开只取最新 200 条**（1 次请求，秒出）；
- * - 输入关键字时逐页查询（contains），命中即时并入，可随时取消；
- * - 联动条件（省-市）始终在**已加载的候选**上内存过滤，随父字段值实时重筛；
- * - 权限：以当前打开者身份读源表，服务端只返回其有权限的记录。
+ * 引用选项选择器（参考多维表格原生「引用选项」）。
+ *
+ * ★ 技术方案与**关联字段选择器（LinkSelector）同源**，因为它实测满足要求：
+ *   - 选项由 `enumerateRefOptions` 完整穷举（内部引擎 = `getRecordsByPage` 分页扫描，
+ *     与 LinkSelector 用的完全同一个接口 → 在所有宿主上都可用）；
+ *   - **首屏秒出 + 后台续扫**：逐页回调，第一页就出选项，剩余在后台补，
+ *     底部显示「已扫描 N / 共 M」，不会让用户干等；
+ *   - 关键字搜索走 `searchAllRows`（服务端 `contains` + 附加条件 AND），命中即时并入。
+ *
+ * 完整性保证：翻到底才算「全部」；若撞页数/时间上限，底部**如实提示「可能不全」**，
+ * 绝不静默只给前 200 条。选项来源优先级（都不影响完整性）：
+ *   ① 单选/多选 + 无条件 → 字段配置的选项域（1 次请求、最快）；
+ *   ② 单选/多选 + 有条件 → 存在性探测（成本与表行数无关）；
+ *   ③ 其余 → 渐进全量扫描（必然可用）。
+ *
+ * 权限：以当前打开者身份读源表，服务端只返回其有权限的记录。
  */
 export function RefOptionSelect({
   field,
@@ -43,36 +53,45 @@ export function RefOptionSelect({
 }: Props) {
   const ref = field.optionRef;
   const refOk = hasOptionRef(field);
-  const [head, setHead] = useState<FullRow[]>([]);
-  const [headDone, setHeadDone] = useState(false);
+  /** 已穷举出的选项文本（保序、去重；穷举过程中渐进追加） */
+  const [values, setValues] = useState<string[]>([]);
+  const [done, setDone] = useState(false);
+  /** 穷举结果元信息：用于如实提示「是否完整」 */
+  const [meta, setMeta] = useState<OptionEnumResult | null>(null);
+  /** 扫描进度：已扫描记录数 / 服务端总数（用于「首屏秒出、后台续扫」的可见反馈） */
+  const [scanProgress, setScanProgress] = useState<{ scanned: number; total?: number } | null>(null);
   const [searchHits, setSearchHits] = useState<FullRow[]>([]);
   const [searching, setSearching] = useState(false);
+  /** 本次关键字搜索是否已跑完（用于「搜完了确实没命中」时也保持搜索态，不回退成全量列表） */
+  const [searchDone, setSearchDone] = useState(false);
+  const [searchScanned, setSearchScanned] = useState(0);
   const [error, setError] = useState('');
   const [errorHelp, setErrorHelp] = useState<ClassifiedError | null>(null);
   const [opened, setOpened] = useState(false);
   const openedRef = useRef(false);
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const handleRef = useRef<SearchHandle<FullRow> | null>(null);
+  /** 当前关键字（state，用于渲染；同时用 ref 做「结果是否属于本次关键字」的比对） */
+  const [keyword, setKeyword] = useState('');
   const keywordRef = useRef('');
+  /** 选中的选项文本（用于把「搜索态下不在候选里的已选值」补进候选项，避免回显丢失） */
+  const selectedTexts = useMemo(() => {
+    const arr = multiple ? ((value as string[]) ?? []) : value ? [value as string] : [];
+    return (arr as string[]).filter((x) => typeof x === 'string' && x);
+  }, [value, multiple]);
 
   /**
    * 当前联动条件（valueSource=field 的项，父字段已填值才算成立）。
-   * 这些条件会作为**服务端精确过滤**下发，保证子级选项完整（不受首屏 200 条限制）。
+   * 这些条件会作为**服务端精确过滤**下发，保证子级选项完整（不受 200 条限制）。
+   * 条件携带源表字段类型：服务端对「单选」的 is 条件需要 fieldType 才能正确解析。
    */
   const condKey = useMemo(() => {
     if (!refOk) return '';
     const specs: ConditionSpec[] = [];
     for (const c of ref!.conditions ?? []) {
-      if (c.valueSource === 'field') {
-        if (!c.formFieldId) return ''; // 配置不完整 → 不下发
-        const text = stringifyCellValue(formValues?.[c.formFieldId]).trim();
-        if (!text) return ''; // 父级未填 → 子级无选项（符合原生行为）
-        specs.push({ fieldId: c.sourceFieldId, text });
-      } else {
-        const text = (c.staticValue ?? '').trim();
-        if (!text) return ''; // 固定值为空 → 不下发（不放出全部选项）
-        specs.push({ fieldId: c.sourceFieldId, text });
-      }
+      const spec = conditionSpecOf(c, formValues);
+      if (!spec) return ''; // 配置不完整 / 父级未填 → 不下发（子级无选项，符合原生行为）
+      specs.push(spec);
     }
     // 用 JSON 编码做 key，避免文本里含 = / & 时解析错位
     return specs.length ? JSON.stringify(specs) : '';
@@ -90,111 +109,118 @@ export function RefOptionSelect({
   }, [condKey]);
 
   /**
-   * 展开时取候选源记录：
-   * - 有联动条件 → 按条件服务端精确取回（完整，1~2 次请求）；
-   * - 无联动条件 → 只取最新 200 条（1 次请求，秒出），关键字搜索可补全。
+   * 是否存在「未成立的联动条件」。
+   * 例：配置了「市 ← 表单字段=省」但省还没填 → condKey 为空串，
+   * 此时子级应**无选项**（符合原生级联行为），而不是回落成「取全部记录前 200」。
+   */
+  const hasPendingCond = useMemo(() => {
+    if (!refOk || !ref?.conditions?.length) return false;
+    return condSpecs.length !== ref.conditions.length;
+  }, [refOk, ref, condSpecs.length]);
+
+  /**
+   * 展开时穷举选项（主路径）：
+   *  - 有未成立的联动条件 → 直接空（不加载）；
+   *  - 否则 enumerateRefOptions：秒出首屏、后台续扫，逐页并入。
    */
   useEffect(() => {
-    if (preview || !refOk || !ref?.tableId || !opened) return;
+    if (preview || !refOk || !ref?.tableId || !ref?.fieldId || !opened) return;
     let alive = true;
-    setHeadDone(false);
-
-    if (condSpecs.length > 0) {
-      loadRowsByConditions(ref.tableId, condSpecs, {
-        label: `cond:${condKey}`,
-      })
-        .promise.then((res) => {
-          if (!alive) return;
-          // 条件过滤未生效（宿主忽略 filter）→ 回退到首屏 + 内存过滤
-          if (res.rows.length > 0 && !res.filterEffective) {
-            loadHeadRows(ref.tableId, { label: ref.tableId }).promise.then((h) => {
-              if (!alive) return;
-              setHead(h.rows);
-              setHeadDone(true);
-            });
-            return;
-          }
-          setHead(res.rows);
-          setHeadDone(true);
-          if (res.error) setError(res.error);
-        })
-        .catch(() => {
-          if (alive) setHeadDone(true);
-        });
-      return () => {
-        alive = false;
-      };
-    }
-
-    const key = `row:${ref.tableId}`;
-    const cached = getHeadCache<FullRow>(key);
-    if (cached) {
-      setHead(cached.rows);
-      setHeadDone(true);
-      if (cached.error) setError(cached.error);
+    let enumP: { cancel: () => void } | null = null;
+    setDone(false);
+    setValues([]);
+    setMeta(null);
+    setScanProgress(null);
+    if (hasPendingCond) {
+      setDone(true);
       return;
     }
-    loadHeadRows(ref.tableId, { label: ref.tableId })
-      .promise.then((res) => {
+    const h = enumerateRefOptions(ref.tableId, ref.fieldId, condSpecs, {
+      onOption: (v) => {
         if (!alive) return;
-        setHead(res.rows);
-        setHeadDone(true);
-        if (res.error) {
-          console.error(
-            `[optionRef] 加载引用选项失败：field="${field.label || field.fieldName}" ` +
-              `sourceTableId=${ref.tableId} sourceFieldId=${ref.fieldId} ` +
-              `baseToken=${(() => {
-                try {
-                  const tok = getBaseToken();
-                  return tok ? `...${String(tok).slice(-6)}` : '(无)';
-                } catch {
-                  return '(无)';
-                }
-              })()} error=${res.error}`
-          );
-          const c = classifySdkError(new Error(res.error), '引用选项的源数据表');
-          setError(c.title);
-          setErrorHelp(c);
-        }
+        setValues((prev) => (prev.includes(v) ? prev : [...prev, v]));
+      },
+      onScanProgress: (scanned, total) => {
+        if (!alive) return;
+        setScanProgress({ scanned, total });
+      },
+    });
+    enumP = h;
+    h.promise
+      .then((res) => {
+        if (!alive) return;
+        setMeta(res);
+        setValues(res.values);
+        setDone(true);
+      })
+      .catch((e) => {
+        if (!alive) return;
+        setDone(true);
+        const c = classifySdkError(e, '引用选项的源数据表');
+        setError(c.title);
+        setErrorHelp(c);
+        console.error(
+          `[optionRef] 穷举引用选项失败：field="${field.label || field.fieldName}" ` +
+            `sourceTableId=${ref.tableId} sourceFieldId=${ref.fieldId} ` +
+            `baseToken=${(() => {
+              try {
+                const tok = getBaseToken();
+                return tok ? `...${String(tok).slice(-6)}` : '(无)';
+              } catch {
+                return '(无)';
+              }
+            })()} error=${(e as Error)?.message ?? e}`
+        );
       });
     return () => {
       alive = false;
+      enumP?.cancel();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [preview, refOk, ref?.tableId, ref?.fieldId, opened, condKey]);
+  }, [preview, refOk, ref?.tableId, ref?.fieldId, opened, condKey, hasPendingCond]);
 
-  /** 关键字输入：逐页查询（按源值字段 contains），命中即时并入 */
+  /** 关键字输入：逐页查询（按源值字段 contains），命中即时并入（可被下一次输入取消） */
   const handleSearch = useCallback(
     (kw: string) => {
       keywordRef.current = kw;
+      setKeyword(kw);
       if (searchTimer.current) clearTimeout(searchTimer.current);
       handleRef.current?.cancel();
       handleRef.current = null;
       setSearching(false);
       const q = (kw || '').trim();
+      setSearchDone(false);
       if (!q || !ref?.tableId || !ref?.fieldId) {
         setSearchHits([]);
+        setSearchScanned(0);
         return;
       }
+      // 防抖 250ms，避免每个按键都触发翻页
       searchTimer.current = setTimeout(() => {
         const my = q;
         setSearchHits([]);
+        setSearchScanned(0);
         setSearching(true);
         const h = searchAllRows(ref.tableId, ref.fieldId, my, {
           extraConditions: condSpecs,
           onHits: (rows) => {
-            if (keywordRef.current.trim() !== my) return;
+            if (keywordRef.current.trim() !== my) return; // 关键字已变，丢弃旧结果
             setSearchHits((prev) => {
               const map = new Map(prev.map((r) => [r.recordId, r]));
               rows.forEach((r) => map.set(r.recordId, r));
               return [...map.values()];
             });
           },
+          onProgress: (scanned) => {
+            if (keywordRef.current.trim() !== my) return;
+            setSearchScanned(scanned);
+          },
         });
         handleRef.current = h;
         h.done.then(() => {
           if (handleRef.current === h) {
             setSearching(false);
+            setSearchDone(true);
             handleRef.current = null;
           }
         });
@@ -211,18 +237,57 @@ export function RefOptionSelect({
     };
   }, []);
 
-  /** 候选行 = 最新 200 + 搜索命中（去重） */
-  const sourceRows = useMemo(() => {
-    const map = new Map<string, FullRow>();
-    (searchHits.length ? searchHits : head).forEach((r) => map.set(r.recordId, r));
-    return [...map.values()];
-  }, [head, searchHits]);
+  const kw = keyword.trim().toLowerCase();
+  /** 是否处于「搜索态」：有关键字就进入搜索态（即便结果为空，也不回退成全量列表） */
+  const inSearch = !!kw;
 
-  /** 联动过滤：在已加载候选上内存重筛（不重拉表） */
-  const options = useMemo(
-    () => (refOk ? resolveRefOptions(ref!, sourceRows, formValues).map((t) => ({ value: t, label: t })) : []),
+  /**
+   * 本地关键字过滤（对**已穷举的全量选项**做过滤）。
+   * ★ 这是「全量搜索」最可靠的一环：因为我们已把全部选项枚举到本地，
+   *   直接在本地筛即**即时、完整**，不依赖服务端对「单选字段 contains」的支持。
+   */
+  const localHits = useMemo(
+    () => (inSearch ? values.filter((v) => v.toLowerCase().includes(kw)) : []),
+    [inSearch, values, kw]
+  );
+
+  /**
+   * 最终候选项文本。
+   * ★ 关键（与 LinkSelector 一致）：**有关键字时只展示「匹配关键字」的项**，
+   * 绝不能把「未过滤的全量 values」也放进来 —— 否则列表几乎仍是全量，用户会觉得「搜索没生效」。
+   * 匹配来源两个（都满足关键字）：
+   *   ① 本地对已穷举全量选项的过滤（即时、完整）；
+   *   ② 服务端逐页搜索命中（补充超出穷举上限、或穷举尚未跑到的那部分）。
+   */
+  const optionTexts = useMemo(() => {
+    if (!refOk || hasPendingCond) return [];
+    const out: string[] = [];
+    const seen = new Set<string>();
+    const push = (t: string) => {
+      if (t && !seen.has(t)) {
+        seen.add(t);
+        out.push(t);
+      }
+    };
+    if (inSearch) {
+      localHits.forEach(push);
+      searchHits.forEach((r) => {
+        const t = stringifyCellValue((r.fields ?? {})[ref!.fieldId]).trim();
+        if (t.toLowerCase().includes(kw)) push(t); // 二次自证：确实含关键字
+      });
+    } else {
+      values.forEach(push);
+    }
+    // 已选值不在候选中时补上，保证回显（Semi 多选需 label 可见）
+    selectedTexts.forEach(push);
+    return out.map((t) => ({ value: t, label: t }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [refOk, ref, sourceRows, JSON.stringify(formValues)]
+  }, [refOk, ref, hasPendingCond, values, searchHits, inSearch, localHits, kw, selectedTexts]);
+
+  /** 搜索态下的命中数（本地 + 服务端去重后） */
+  const searchHitCount = useMemo(
+    () => optionTexts.filter((o) => !selectedTexts.includes(o.value as string)).length,
+    [optionTexts, selectedTexts]
   );
 
   if (!refOk) {
@@ -257,15 +322,30 @@ export function RefOptionSelect({
   }
 
   const condApplied = condSpecs.length > 0;
+  const enumRunning = opened && !done && !inSearch;
   const footerText = searching
-    ? '正在按关键字翻页查询…'
-    : searchHits.length
-      ? `搜索命中 ${searchHits.length} 条源记录`
-      : headDone
-        ? condApplied
-          ? `已按联动条件取回全部 ${head.length} 条源记录`
-          : `已加载最新 ${head.length} 条源记录，输入关键字可搜索全部`
-        : '正在加载源记录…';
+    ? `正在按关键字翻页查询…已扫描 ${searchScanned} 条`
+    : inSearch
+      ? searchHitCount > 0
+        ? `搜索命中 ${searchHitCount} 个选项${searching ? '（仍在翻页补充…）' : ''}`
+        : searching || (searchDone === false && searchScanned === 0)
+          ? '正在搜索…'
+          : '未找到匹配的引用选项'
+      : hasPendingCond
+        ? '请先填写上级字段'
+        : enumRunning
+          ? `正在穷举选项…已扫描 ${scanProgress?.scanned ?? 0}${scanProgress?.total ? ` / 共 ${scanProgress.total}` : ''} 条`
+          : done
+            ? meta && !meta.complete
+              ? condApplied
+                ? `已按条件取到 ${values.length} 个选项（已达上限，可能不全）`
+                : `已取到 ${values.length} 个选项（已达上限，可能不全）`
+              : condApplied
+                ? `已按条件穷举全部 ${values.length} 个选项`
+                : meta?.source === 'metadata'
+                  ? `已加载全部 ${values.length} 个选项（源字段选项域）`
+                  : `已加载全部 ${values.length} 个选项，输入关键字可搜索`
+            : '正在加载选项…';
 
   return (
     <Select
@@ -281,15 +361,17 @@ export function RefOptionSelect({
       remote
       /** 选中后保留关键字，便于连续多选 */
       autoClearSearchValue={false}
-      optionList={options}
+      optionList={optionTexts}
       value={multiple ? ((value as string[]) ?? []) : ((value as string) || undefined)}
       placeholder={
-        condApplied
-          ? '点击展开（按上级选择联动加载），或输入关键字搜索'
-          : '点击展开（默认最新记录），或输入关键字搜索全部'
+        hasPendingCond
+          ? '请先填写上级字段'
+          : condApplied
+            ? '点击展开（按上级选择联动加载），或输入关键字搜索'
+            : '点击展开（加载全部选项），或输入关键字搜索'
       }
       disabled={disabled}
-      loading={opened && !headDone && !head.length}
+      loading={opened && !done && !values.length && !inSearch}
       onSearch={handleSearch}
       onDropdownVisibleChange={(v: boolean) => {
         if (v && !openedRef.current) {
@@ -299,16 +381,18 @@ export function RefOptionSelect({
       }}
       emptyContent={
         !opened
-          ? '点击展开后将加载源记录'
+          ? '点击展开后将加载选项'
           : searching
             ? '正在搜索…'
-            : keywordRef.current.trim()
+            : kw
               ? '未找到匹配的引用选项'
-              : headDone
-                ? condApplied
-                  ? '上级未选择或该条件下无选项'
-                  : '无满足条件的引用选项'
-                : '加载中…'
+              : hasPendingCond
+                ? '请先填写上级字段'
+                : done
+                  ? condApplied
+                    ? '上级未选择或该条件下无选项'
+                    : '没有可用的引用选项'
+                  : '加载中…'
       }
       virtualize={{ itemSize: 32 }}
       outerBottomSlot={

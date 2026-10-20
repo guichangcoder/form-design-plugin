@@ -78,6 +78,12 @@ export function OptionRefEditor({ visible, field, siblingFields, onCancel, onSav
 
   const removeCond = (idx: number) => setConditions(conditions.filter((_, i) => i !== idx));
 
+  /** 选择源表条件字段时，同步记录其字段类型（服务端 is 条件需要 fieldType 才能正确解析） */
+  const pickSourceField = (idx: number, fieldId: string) => {
+    const meta = sourceFields.find((f) => f.id === fieldId);
+    updateCond(idx, { sourceFieldId: fieldId, sourceFieldType: meta?.type });
+  };
+
   const handleSave = () => {
     if (!enabled) {
       onSave(undefined);
@@ -170,7 +176,7 @@ export function OptionRefEditor({ visible, field, siblingFields, onCancel, onSav
                   filter
                   placeholder="源表字段"
                   value={c.sourceFieldId || undefined}
-                  onChange={(v) => updateCond(idx, { sourceFieldId: v as string })}
+                  onChange={(v) => pickSourceField(idx, v as string)}
                   optionList={sourceFields.map((f) => ({ value: f.id, label: f.name }))}
                 />
                 <span className="optionref-eq">=</span>
@@ -226,11 +232,16 @@ export function OptionRefEditor({ visible, field, siblingFields, onCancel, onSav
             启用后，字段原有的固定选项不再使用；条件选「表单字段」时，
             选项会随该字段的填写值实时过滤（如「省-市」级联）。
             <br />
-            ⚡ 选项在**下拉展开时才加载**，因此打开表单与配置面板都不再卡顿：
-            默认先取最新 200 条（1 次请求、秒出），输入关键字时再按批向服务端翻页查询、命中即出现，
-            可随时停止（安全上限 20 万条），不会再出现「已知的选项搜不到」。
+            ⚡ 选项在**下拉展开时才加载**，打开表单与配置面板都不卡顿，且**完整穷举、不受源表行数限制**：
             <br />
-            有联动条件（如「省-市」）时，按上级选择走服务端精确取回该条件下的**全部**选项，不受 200 条限制。
+            · 取值字段是**单选/多选** → 直接取其配置的选项域（1 次请求即完整）；有引用条件时，
+            对每个选项做一次「是否存在满足条件的记录」探测 —— **成本只与选项个数有关，与表有几万行无关**，
+            所以上万人数据也不会「只出前 200 条」；
+            <br />
+            · 取值字段是**其它类型**（文本等，没有固定选项域）→ 按该一列分页取回去重（单列负载最小，可按条件过滤）。
+            <br />
+            若源表极大导致穷举达到上限，底部会**如实提示「已达上限，可能不全」**（不会静默截断）。
+            输入关键字时仍会按批向服务端翻页补充命中项。
             <br />
             ⚠️ 发布后所有填写者都要能查看源数据表，否则他们看不到选项——
             插件一律以**填写者本人**的账号权限读取，只加载其权限内的数据，

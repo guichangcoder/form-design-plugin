@@ -24,6 +24,28 @@ export const HEAD_SIZE = 200;
 export const SEARCH_MAX_PAGES = 1000;
 /** 搜索累计命中上限 */
 export const SEARCH_MAX_HITS = 2000;
+/**
+ * 条件取数（引用选项联动 / 无条件穷举）的分页上限。
+ * 旧值为 50（1 万条），对「上万条符合条件」的场景会静默截断；提到 250 页 = 5 万条。
+ * （注：飞书 API 单次 pageSize 上限 200，此处为累计页数。）
+ */
+export const COND_MAX_PAGES = 250;
+/** 只取一列穷举时的分页上限（同 5 万条） */
+export const COLUMN_MAX_PAGES = 250;
+/** 渐进扫描的时间预算（毫秒）：超过即停并如实标记「可能不全」，避免用户无限等待 */
+export const SCAN_TIME_BUDGET_MS = 8000;
+/**
+ * ★ 选项「渐进全量」扫描的默认上限。
+ * 这是**唯一能在所有宿主上都可用**的穷举引擎（基于 getRecordsByPage，
+ * 与关联字段选择器同源，实测可用）—— 故选得宽一些，覆盖「上万条源记录」。
+ * 200×250 = 5 万条。
+ */
+export const DISTINCT_SCAN_MAX_PAGES = 250;
+/**
+ * 渐进全量扫描的时间预算。设得较宽是因为它是**后台渐进**的：
+ * 首屏第一页即出结果，用户不必等它跑完；超时只影响「是否标完整」。
+ */
+export const DISTINCT_SCAN_TIME_BUDGET_MS = 20000;
 
 export interface FieldRow {
   recordId: string;
@@ -44,11 +66,29 @@ export interface HeadResult<T> {
   error?: string;
 }
 
+/**
+ * 条件取数结果（在 HeadResult 基础上补充「完整性」回报）。
+ *
+ * ★ 为什么要这些字段：旧实现把 `hasMore` 写死为 false，导致「达到分页上限、
+ *   结果其实不全」与「已翻到底、就是这么多」**无法区分** —— 上万条源记录时
+ *   会静默丢弃上限之外的数据，界面却显示「全部」。这正是引用选项选项不全的根因。
+ */
+export interface CondFetchResult extends HeadResult<FullRow> {
+  /** 服务端过滤是否真实生效（返回记录经本地自证满足全部条件） */
+  filterEffective: boolean;
+  /** 是否因达到分页上限而**截断**（true 表示结果可能不完整，需要继续扫描/提高上限） */
+  truncated: boolean;
+  /** 本次实际扫描过的记录条数（含被条件筛掉的） */
+  scanned: number;
+  /** 服务端报告的匹配总条数（宿主返回 total 时才有，可用于精确判断是否翻完） */
+  serverTotal?: number;
+}
+
 /* ---------------- 首屏 200 条（一次请求） ---------------- */
 
 const headCache = new Map<string, Promise<HeadResult<any>>>();
-/** 任务键：按「表 + 列 / 行 / 条件」维度生成，供缓存查询与测试使用 */
-export const taskKey = (tableId: string, kind: 'col' | 'row' | 'cond', fieldId?: string) =>
+/** 任务键：按「表 + 列 / 行 / 条件 / 选项穷举」维度生成，供缓存查询与测试使用 */
+export const taskKey = (tableId: string, kind: 'col' | 'row' | 'cond' | 'optval', fieldId?: string) =>
   fieldId ? `${kind}:${tableId}:${fieldId}` : `${kind}:${tableId}`;
 
 /**
@@ -77,10 +117,22 @@ async function fetchPage(
 export function invalidateTableRecords(tableId?: string): void {
   if (!tableId) {
     headCache.clear();
+    resolved.clear();
+    fieldOptionsCache.clear();
+    distinctScanCache.clear();
     return;
   }
   for (const k of [...headCache.keys()]) {
     if (k.split(':').includes(tableId)) headCache.delete(k);
+  }
+  for (const k of [...resolved.keys()]) {
+    if (k.split(':').includes(tableId)) resolved.delete(k);
+  }
+  for (const k of [...fieldOptionsCache.keys()]) {
+    if (k.split(':').includes(tableId)) fieldOptionsCache.delete(k);
+  }
+  for (const k of [...distinctScanCache.keys()]) {
+    if (k.split(':').includes(tableId)) distinctScanCache.delete(k);
   }
 }
 
@@ -220,6 +272,111 @@ export interface ConditionSpec {
   fieldId: string;
   /** 期望的单元格文本 */
   text: string;
+  /**
+   * 源表该条件字段的类型。服务端 filter 的「单选」等于条件必须显式带上
+   * fieldType 才能正确解析（否则可能被按其它类型处理 → 稳定返回 0 条，
+   * 表现为「已按联动条件取回全部 0 条」，即本插件的级联选项空下拉根因）。
+   * 缺失时退化为纯文本 is 条件。
+   */
+  fieldType?: number;
+}
+
+/** 由 ConditionSpec 生成服务端 filter 条件（随字段类型选择 operator 与是否带 fieldType） */
+function specToFilterCondition(c: ConditionSpec): Record<string, unknown> {
+  const base: Record<string, unknown> = { fieldId: c.fieldId, value: c.text };
+  if (typeof c.fieldType === 'number') base.fieldType = c.fieldType;
+  // 多选：等于语义必须用 contains（一个单元格含多个选项，is 不会命中）
+  if (c.fieldType === 4 /* MultiSelect */) {
+    return { ...base, operator: 'contains' };
+  }
+  return { ...base, operator: 'is' };
+}
+
+/**
+ * 宽松条件：去掉 fieldType、operator 统一用 contains（文本子串）。
+ * 当「带类型的 is 条件」返回 0 条时用它复核 —— 若宽松条件能取回记录、
+ * 且经本地自证确实满足条件，说明原 typed 条件被宿主误解析（假空），
+ * 采用复核结果；若仍为 0 条，才认定为「该条件下确实无记录」。
+ */
+function specToLooseCondition(c: ConditionSpec): Record<string, unknown> {
+  return { fieldId: c.fieldId, operator: 'contains', value: c.text };
+}
+
+/** 本地自证：该记录的条件字段文本是否满足该条件（不依赖 filter 是否生效） */
+function recordSatisfiesCondition(fields: Record<string, unknown>, c: ConditionSpec): boolean {
+  const got = stringifyCellValue(fields[c.fieldId]).trim();
+  const want = c.text.trim();
+  if (!want) return false;
+  if (got === want) return true;
+  // 多选单元格文本形如「A B」→ 用包含判断「含该选项」；单选同样安全
+  if (c.fieldType === 4 /* MultiSelect */) {
+    const parts = got.split(/\s+/).filter(Boolean);
+    return parts.includes(want);
+  }
+  return false;
+}
+
+/**
+ * 按给定的 filter 条件拉取整行（分页到底，带上限保护）。
+ *
+ * ★ 关键修复：明确区分「翻到底」与「撞上限」——
+ *   - stopReason='end'        → 服务端已无更多（结果完整）
+ *   - stopReason='maxPages'   → 达到页数上限被截断（结果可能不全，须如实上报）
+ *   - stopReason='stalled'    → pageToken 不再前进（宿主异常，按截断处理）
+ * @returns { rows, filterEffective, total, scanned, truncated }
+ */
+async function fetchRowsWithFilter(
+  table: any,
+  useByPage: boolean,
+  conditions: ConditionSpec[],
+  toCondition: (c: ConditionSpec) => Record<string, unknown>,
+  maxPages: number
+): Promise<{
+  rows: FullRow[];
+  filterEffective: boolean;
+  total?: number;
+  scanned: number;
+  truncated: boolean;
+}> {
+  const rows: FullRow[] = [];
+  let token: any;
+  let guard = 0;
+  let filterEffective = false;
+  let total: number | undefined;
+  let scanned = 0;
+  let truncated = false;
+  for (;;) {
+    const params: any = {
+      pageSize: PAGE_SIZE,
+      filter: { conjunction: 'and', conditions: conditions.map(toCondition) },
+      ...(token !== undefined ? { pageToken: token } : {}),
+    };
+    const res: any = useByPage
+      ? await (table as any).getRecordsByPage(params)
+      : await (table as any).getRecords(params);
+    if (typeof res?.total === 'number') total = res.total;
+    const records: any[] = res?.records ?? [];
+    scanned += records.length;
+    for (const rec of records) {
+      const fields = (rec.fields ?? {}) as Record<string, unknown>;
+      if (conditions.every((c) => recordSatisfiesCondition(fields, c))) filterEffective = true;
+      rows.push({ recordId: rec.recordId, fields });
+    }
+    guard += 1;
+    const next = res?.hasMore ? res?.pageToken : undefined;
+    if (next === undefined) break; // 翻到底：结果完整
+    if (next === token) {
+      // pageToken 不前进 → 宿主异常，按截断处理（否则会死循环）
+      truncated = true;
+      break;
+    }
+    if (guard >= maxPages) {
+      truncated = true; // 撞上限：**必须标记截断**，调用方据此继续扫描或提示
+      break;
+    }
+    token = next;
+  }
+  return { rows, filterEffective, total, scanned, truncated };
 }
 
 /**
@@ -236,69 +393,833 @@ export function loadRowsByConditions(
   tableId: string,
   conditions: ConditionSpec[],
   opts?: { label?: string; maxPages?: number }
-): { key: string; promise: Promise<HeadResult<FullRow> & { filterEffective: boolean }> } {
-  const key = taskKey(tableId, 'cond', conditions.map((c) => `${c.fieldId}=${c.text}`).join('&'));
-  let p = headCache.get(key) as
-    | Promise<HeadResult<FullRow> & { filterEffective: boolean }>
-    | undefined;
+): { key: string; promise: Promise<CondFetchResult> } {
+  // ★ 缓存 key 用 JSON 编码：条件文本里若含 = / & 时，字符串拼接会解析错位（历史坑）。
+  const key = taskKey(tableId, 'cond', JSON.stringify(conditions.map((c) => [c.fieldId, c.fieldType, c.text])));
+  let p = headCache.get(key) as Promise<CondFetchResult> | undefined;
   if (!p) {
-    p = (async () => {
-      const maxPages = opts?.maxPages ?? 50; // 50 * 200 = 1 万，联动字典表足够
+    p = (async (): Promise<CondFetchResult> => {
+      // 上限从旧的 50 页（1 万）提高到 COND_MAX_PAGES（5 万），覆盖「上万条符合条件」的场景；
+      // 仍保留熔断，避免极端表把页面拖死。
+      const maxPages = opts?.maxPages ?? COND_MAX_PAGES;
       try {
         const table = await getBase().getTableById(tableId);
         const useByPage = typeof (table as any).getRecordsByPage === 'function';
-        const rows: FullRow[] = [];
-        let token: any;
-        let guard = 0;
-        let filterEffective = false;
-        for (;;) {
-          const params: any = {
-            pageSize: PAGE_SIZE,
-            filter: {
-              conjunction: 'and',
-              conditions: conditions.map((c) => ({
-                fieldId: c.fieldId,
-                operator: 'is',
-                value: c.text,
-              })),
-            },
-            ...(token !== undefined ? { pageToken: token } : {}),
-          };
-          const res: any = useByPage
-            ? await (table as any).getRecordsByPage(params)
-            : await (table as any).getRecords(params);
-          const records: any[] = res?.records ?? [];
-          for (const rec of records) {
-            const fields = (rec.fields ?? {}) as Record<string, unknown>;
-            const ok = conditions.every(
-              (c) => stringifyCellValue(fields[c.fieldId]).trim() === c.text.trim()
+
+        // —— 第一级：带字段类型的精确条件（单选 is / 多选 contains）——
+        let { rows, filterEffective, total, scanned, truncated } = await fetchRowsWithFilter(
+          table,
+          useByPage,
+          conditions,
+          specToFilterCondition,
+          maxPages
+        );
+
+        // —— 第二级：第一级 0 条时的宽松复核 ——
+        // 关键：宿主可能因条件格式（fieldType/operator）不匹配而稳定返回 0 条，
+        // 若直接采信就会「假空」——正是级联选项下拉为空的根因。
+        // 用去掉类型、统一 contains 的宽松条件重试；只有宽松条件也 0 条，
+        // 才认定「该条件下确实无记录」。
+        if (rows.length === 0) {
+          const loose = await fetchRowsWithFilter(
+            table,
+            useByPage,
+            conditions,
+            specToLooseCondition,
+            maxPages
+          );
+          if (loose.rows.length > 0 && loose.filterEffective) {
+            console.warn(
+              '[tableRecords] 精确条件返回 0 条但宽松条件命中，采用复核结果（条件格式兼容回退）'
             );
-            if (ok) filterEffective = true;
-            rows.push({ recordId: rec.recordId, fields });
+            rows = loose.rows;
+            filterEffective = true;
+            total = loose.total;
+            scanned = loose.scanned;
+            truncated = loose.truncated;
+          } else if (loose.rows.length === 0) {
+            // 两级都空 → 该条件下确实无记录（正常业务态，非缺陷）
+            total = total ?? loose.total ?? 0;
+            scanned = loose.scanned;
+            truncated = false;
           }
-          guard += 1;
-          const next = res?.hasMore ? res?.pageToken : undefined;
-          if (next === undefined || next === token || guard >= maxPages) break;
-          token = next;
         }
+
         if (rows.length > 0 && !filterEffective) {
           console.warn('[tableRecords] 条件过滤未生效（返回记录不满足条件）');
         }
-        const out = { rows, hasMore: false, filterEffective, total: rows.length };
+        if (truncated) {
+          console.warn(
+            `[tableRecords] 条件取数达到上限被截断：表=${tableId} 已取 ${rows.length} 条 / 上限 ${maxPages} 页，结果可能不完整`
+          );
+        }
+        const out: CondFetchResult = {
+          rows,
+          hasMore: truncated, // ★ 如实反映：截断了才算「还有更多」，不再写死 false
+          filterEffective,
+          truncated,
+          scanned,
+          serverTotal: typeof total === 'number' ? total : undefined,
+          total: rows.length,
+        };
         resolved.set(key, out);
         return out;
       } catch (e) {
         headCache.delete(key);
+        // ★ 条件被宿主拒绝（如 operator/fieldType 不适用于该字段）→ 不缓存，
+        //   让调用方按 filterEffective=false 回退「首屏 + 内存过滤」，功能不至于整体失效。
         const err = (e as Error)?.message ?? String(e);
         console.warn(
-          `[tableRecords] 条件加载失败：表=${tableId} 条件=${opts?.label ?? conditions.length} 错误=${err}`
+          `[tableRecords] 条件加载失败（将回退本地过滤）：表=${tableId} 条件=${opts?.label ?? conditions.length} 错误=${err}`
         );
-        return { rows: [], hasMore: false, filterEffective: false, error: err, total: 0 };
+        return {
+          rows: [],
+          hasMore: false,
+          filterEffective: false,
+          truncated: false,
+          scanned: 0,
+          error: err,
+          total: 0,
+        };
       }
     })();
     headCache.set(key, p);
   }
   return { key, promise: p };
+}
+
+/* ---------------- 有界本地扫描兜底（条件在服务端反复失效时） ---------------- */
+
+/** 本地扫描兜底的分页上限（40 * 200 = 8000 条，覆盖常见字典表且不拖死页面） */
+export const LOCAL_SCAN_MAX_PAGES = 40;
+
+/**
+ * 按条件做「有界本地扫描」：分页拉取源表记录，本地筛出满足条件的整行。
+ *
+ * 用途：当带类型的精确条件与宽松条件**都**取不到数据时，若判定为宿主对 filter
+ * 支持不完整（假空），用此兜底 —— 只要有权限读表就能拿到该父级下的记录，
+ * 使级联选项不至于整体失效。有上限保护（8000 条），到顶即停。
+ *
+ * ★ 同时被「选项完整枚举」复用（`scanDistinctValues`）：
+ *   它用的是**已验证可用**的 `getRecordsByPage`（关联字段选择器就是这个接口，实测可用），
+ *   因此是穷举引用选项最可靠的引擎 —— 不依赖 `getFieldValueListByPage` / 字段选项域。
+ */
+export function scanRowsByConditionsLocal(
+  tableId: string,
+  conditions: ConditionSpec[],
+  opts?: {
+    maxPages?: number;
+    /** 时间预算（毫秒）：超过即停并标 truncated，避免用户无限等待 */
+    timeBudgetMs?: number;
+    onRows?: (rows: FullRow[]) => void;
+    /** 进度回调：已扫描记录数 / 服务端总数（宿主返回时才有） */
+    onProgress?: (scanned: number, total?: number) => void;
+  }
+): {
+  cancel: () => void;
+  done: Promise<{ rows: FullRow[]; truncated: boolean; scanned: number; total?: number }>;
+} {
+  const maxPages = opts?.maxPages ?? LOCAL_SCAN_MAX_PAGES;
+  const timeBudgetMs = opts?.timeBudgetMs;
+  const startedAt = Date.now();
+  let cancelled = false;
+
+  const done = (async () => {
+    const rows: FullRow[] = [];
+    let truncated = false;
+    let scanned = 0;
+    let total: number | undefined;
+    try {
+      const table = await getBase().getTableById(tableId);
+      const useByPage = typeof (table as any).getRecordsByPage === 'function';
+      let token: any;
+      let guard = 0;
+      for (;;) {
+        if (cancelled) return { rows, truncated, scanned, total };
+        const params: any = {
+          pageSize: PAGE_SIZE,
+          ...(token !== undefined ? { pageToken: token } : {}),
+        };
+        const res: any = useByPage
+          ? await (table as any).getRecordsByPage(params)
+          : await (table as any).getRecords(params);
+        if (cancelled) return { rows, truncated, scanned, total };
+        if (typeof res?.total === 'number') total = res.total;
+        const batch: FullRow[] = [];
+        for (const rec of res?.records ?? []) {
+          const fields = (rec.fields ?? {}) as Record<string, unknown>;
+          if (!conditions.every((c) => recordSatisfiesCondition(fields, c))) continue;
+          batch.push({ recordId: rec.recordId, fields });
+        }
+        scanned += (res?.records ?? []).length;
+        if (batch.length) {
+          rows.push(...batch);
+          opts?.onRows?.(batch);
+        }
+        opts?.onProgress?.(scanned, total);
+        guard += 1;
+        const next = res?.hasMore ? res?.pageToken : undefined;
+        if (next === undefined || next === token) break;
+        if (guard >= maxPages) {
+          truncated = true;
+          break;
+        }
+        if (timeBudgetMs && Date.now() - startedAt > timeBudgetMs) {
+          truncated = true; // 超时：如实标记（不静默）
+          break;
+        }
+        token = next;
+      }
+      if (truncated) {
+        console.warn(
+          `[tableRecords] 本地扫描达到上限（${maxPages} 页 / ${timeBudgetMs ?? '-'}ms），结果可能不完整`
+        );
+      }
+      return { rows, truncated, scanned, total };
+    } catch (e) {
+      console.warn(
+        `[tableRecords] 本地扫描兜底失败：表=${tableId} 错误=${(e as Error)?.message ?? e}`
+      );
+      return { rows, truncated, scanned, total };
+    }
+  })();
+
+  return { cancel: () => { cancelled = true; }, done };
+}
+
+/* ---------------- 选项「渐进全量」扫描（引用选项的完整性引擎） ---------------- */
+
+/** 选项渐进全量扫描结果 */
+export interface DistinctScanResult {
+  /** 已扫描出的去重取值（保序） */
+  values: string[];
+  /** 是否翻到底（true = 该条件下取值已穷举完整） */
+  complete: boolean;
+  /** 是否因页数/时间上限被截断 */
+  truncated: boolean;
+  /** 已扫描记录数 */
+  scanned: number;
+  /** 服务端总数（宿主返回时才有） */
+  total?: number;
+}
+
+/** 已完成扫描的缓存（键含条件，避免重复全表扫描） */
+const distinctScanCache = new Map<string, Promise<DistinctScanResult>>();
+
+/**
+ * ★ 引用选项「渐进全量」扫描 —— 本插件穷举选项的**主引擎**。
+ *
+ * 为什么是它：关联字段选择器（实测满足用户要求）用的就是 `getRecordsByPage` 分页；
+ * 本函数沿用**同一套已验证可用**的分页方式，逐页收集「取值字段的去重文本」，
+ * 并在本地对每条记录**自证**条件（不信任宿主 filter），因此：
+ *   - 只能读到宿主实际返回的记录（= 打开者权限内），多读无害；
+ *   - 逐页回调 → **首屏秒出、后台续扫**（不需要用户干等）；
+ *   - 翻到 hasMore=false 才是「完整」；撞页数/时间上限则 truncated=true（如实上报）。
+ *
+ * 无条件时等价于「全表取值去重」；有条件时等价于「该条件下取值去重」。
+ */
+export function scanDistinctValues(
+  tableId: string,
+  fieldId: string,
+  conditions: ConditionSpec[],
+  opts?: {
+    onValue?: (v: string) => void;
+    onProgress?: (scanned: number, total?: number) => void;
+    maxPages?: number;
+    timeBudgetMs?: number;
+    /** 复用已完成的扫描结果（默认 true） */
+    useCache?: boolean;
+  }
+): { key: string; cancel: () => void; promise: Promise<DistinctScanResult> } {
+  const key = taskKey(
+    tableId,
+    'cond',
+    JSON.stringify(['distinct', fieldId, conditions.map((c) => [c.fieldId, c.fieldType, c.text])])
+  );
+  const useCache = opts?.useCache !== false;
+  if (useCache) {
+    const cached = distinctScanCache.get(key);
+    if (cached) {
+      // 命中缓存：同步推一次已缓存值，让 UI 立即完整（避免重复扫表）
+      cached.then((r) => r.values.forEach((v) => opts?.onValue?.(v))).catch(() => {});
+      return { key, cancel: () => {}, promise: cached };
+    }
+  }
+
+  const seen = new Set<string>();
+  const values: string[] = [];
+  const h = scanRowsByConditionsLocal(tableId, conditions, {
+    maxPages: opts?.maxPages,
+    timeBudgetMs: opts?.timeBudgetMs,
+    onProgress: opts?.onProgress,
+    onRows: (rows) => {
+      for (const r of rows) {
+        const t = stringifyCellValue(r.fields[fieldId]).trim();
+        if (t && !seen.has(t)) {
+          seen.add(t);
+          values.push(t);
+          opts?.onValue?.(t);
+        }
+      }
+    },
+  });
+
+  const promise = h.done.then((r) => {
+    const out: DistinctScanResult = {
+      values,
+      complete: !r.truncated,
+      truncated: r.truncated,
+      scanned: r.scanned,
+      total: r.total,
+    };
+    if (useCache && out.complete) distinctScanCache.set(key, Promise.resolve(out));
+    return out;
+  });
+
+  return { key, cancel: h.cancel, promise };
+}
+
+/* ---------------- 选项穷举（引用选项「完整枚举」路径） ---------------- */
+/**
+ * ★ 为什么需要这一层（本轮 Bug 3 的根因修复）：
+ *
+ * 症状：源表记录数上万，配置引用条件后需要「该条件下全部去重取值」作为选项，
+ *      实际只出来了前 200 条对应的选项，选项不全。
+ *
+ * 根因：旧实现把「候选」等同于「按条件取回的行」——
+ *      - 无条件下只读最新 200 行（设计如此）；
+ *      - 有条件下按行分页取，旧上限仅 50 页 = 1 万条，且 `hasMore` 被写死 false，
+ *        撞上限后**静默丢弃**，界面仍显示「全部」。
+ *
+ * 关键洞察：**要穷举的是「选项」而不是「记录」**。
+ *      当取值字段是单选/多选时，其选项域已由字段配置（property.options）完整定义，
+ *      任何记录的取值必然是其中之一 —— 于是「该条件下有哪些选项」
+ *      等价于「对选项域中每一项，是否存在一条满足条件的记录」。
+ *      用 pageSize=1 的存在性探测（每个候选 1 次轻量请求）即可**完整**回答，
+ *      既不扫描全表、也天然无截断风险。
+ *
+ * 自证：每次探测都取回整行，本地复核「条件全部满足 且 取值确为该选项」；
+ *      若返回记录不满足 → 判定宿主忽略了 filter，放弃探测路径并回退按行取数。
+ */
+
+/** 值字段的「配置选项域」（仅单选/多选字段有） */
+export interface FieldOptionsResult {
+  /** 该字段配置的全部选项文本（保序、去重） */
+  options: string[];
+  /** 字段类型（缺失=未找到该字段） */
+  type?: number;
+  /** 是否为「单选/多选」字段（false 表示该字段没有可穷举的选项域） */
+  found: boolean;
+  error?: string;
+}
+
+const fieldOptionsCache = new Map<string, Promise<FieldOptionsResult>>();
+
+/**
+ * 读取源表某字段「配置的选项域」。
+ * 只用 `getFieldMetaList`（1 次请求、0 次记录读取）—— 这是穷举选项的基础。
+ */
+export function loadFieldSelectOptions(
+  tableId: string,
+  fieldId: string,
+  opts?: { force?: boolean }
+): { key: string; promise: Promise<FieldOptionsResult> } {
+  const key = taskKey(tableId, 'optval', `meta:${fieldId}`);
+  if (opts?.force) fieldOptionsCache.delete(key);
+  let p = fieldOptionsCache.get(key);
+  if (!p) {
+    p = (async (): Promise<FieldOptionsResult> => {
+      try {
+        const table = await getBase().getTableById(tableId);
+        const metas: any[] = await table.getFieldMetaList();
+        const meta = (metas ?? []).find((m) => m?.id === fieldId);
+        if (!meta) return { options: [], found: false };
+        // 3=SingleSelect 4=MultiSelect
+        const isSelect = meta.type === 3 || meta.type === 4;
+        if (!isSelect) return { options: [], type: meta.type, found: false };
+        const list: any[] = meta?.property?.options ?? [];
+        const names: string[] = [];
+        const seen = new Set<string>();
+        for (const o of list) {
+          const name = typeof o?.name === 'string' ? o.name : '';
+          if (name && !seen.has(name)) {
+            seen.add(name);
+            names.push(name);
+          }
+        }
+        return { options: names, type: meta.type, found: true };
+      } catch (e) {
+        const err = (e as Error)?.message ?? String(e);
+        console.warn(`[tableRecords] 读取字段选项域失败：表=${tableId} 字段=${fieldId} 错误=${err}`);
+        return { options: [], found: false, error: err };
+      }
+    })();
+    fieldOptionsCache.set(key, p);
+  }
+  return { key, promise: p };
+}
+
+/** 单选项存在性探测结果 */
+export interface ProbeResult {
+  /** 是否存在「满足全部条件 且 取值等于该选项」的记录 */
+  exists: boolean;
+  /** 服务端过滤经本地自证是否生效（返回记录确实满足条件与取值） */
+  effective: boolean;
+  error?: string;
+}
+
+/** 「取值字段等于该选项」的服务端条件（随字段类型选择 operator） */
+function optionMatchCondition(
+  valueFieldId: string,
+  optionText: string,
+  valueFieldType?: number
+): Record<string, unknown> {
+  const base: Record<string, unknown> = { fieldId: valueFieldId, value: optionText };
+  if (typeof valueFieldType === 'number') base.fieldType = valueFieldType;
+  // 多选单元格含多个选项 → 等于语义必须用 contains（is 不会命中）；单选用 is
+  if (valueFieldType === 4 /* MultiSelect */) return { ...base, operator: 'contains' };
+  return { ...base, operator: 'is' };
+}
+
+/**
+ * 探测「是否存在满足全部条件、且取值字段等于该选项的记录」。
+ * 只取 1 条（pageSize=1），并**取回整行做本地自证**：
+ * 既校验该行确实满足全部条件，又校验其取值确实是该选项 → 结果可信、可解释。
+ */
+export function probeOptionExists(
+  tableId: string,
+  valueFieldId: string,
+  optionText: string,
+  conditions: ConditionSpec[],
+  valueFieldType?: number
+): Promise<ProbeResult> {
+  return (async (): Promise<ProbeResult> => {
+    try {
+      const table = await getBase().getTableById(tableId);
+      const useByPage = typeof (table as any).getRecordsByPage === 'function';
+      const filter = {
+        conjunction: 'and',
+        conditions: [
+          ...conditions.map(specToFilterCondition),
+          optionMatchCondition(valueFieldId, optionText, valueFieldType),
+        ],
+      };
+      const params: any = { pageSize: 1, filter };
+      const res: any = useByPage
+        ? await (table as any).getRecordsByPage(params)
+        : await (table as any).getRecords(params);
+      const rec = (res?.records ?? [])[0];
+      if (!rec) return { exists: false, effective: true }; // 无命中：无从证伪，按有效处理
+      const fields = (rec.fields ?? {}) as Record<string, unknown>;
+      const condOk = conditions.every((c) => recordSatisfiesCondition(fields, c));
+      const cell = stringifyCellValue(fields[valueFieldId]).trim();
+      const want = optionText.trim();
+      const valueOk =
+        valueFieldType === 4 /* MultiSelect */
+          ? cell.split(/\s+/).filter(Boolean).includes(want)
+          : cell === want;
+      const effective = condOk && valueOk;
+      return { exists: effective, effective };
+    } catch (e) {
+      return { exists: false, effective: false, error: (e as Error)?.message ?? String(e) };
+    }
+  })();
+}
+
+/** 选项穷举结果（供 UI 如实展示「是否完整」） */
+export interface OptionEnumResult {
+  /** 去重后的选项文本（按源字段配置的选项顺序） */
+  values: string[];
+  /** 是否已**完整**穷举（false = 可能不全，UI 必须如实提示） */
+  complete: boolean;
+  /** 是否因达到候选上限被截断（true = 只检查了前 N 项） */
+  truncated: boolean;
+  /** 实际发出的存在性探测次数 */
+  probes: number;
+  /** 读到的记录数（存在性命中数 / 扫描命中数） */
+  scanned: number;
+  /**
+   * 选项来源：
+   * - `metadata`=源字段配置的选项域（无条件，1 次请求即完整）
+   * - `probe`=存在性探测穷举（有条件，成本与表大小无关）
+   * - `scan`=渐进全量扫描（getRecordsByPage，翻到底即完整；最通用、必然可用）
+   */
+  source: 'metadata' | 'probe' | 'scan';
+  /** 服务端过滤是否经自证生效 */
+  filterEffective: boolean;
+  /** 服务端报告的记录总数（宿主返回时才有；扫描模式下 = 表内可读总行数） */
+  serverTotal?: number;
+  /** 扫描模式下已扫描的「源表总记录数」（与 scanned 的「命中数」区分） */
+  scannedTotal?: number;
+  error?: string;
+}
+
+/** 存在性探测的并发度（过大易触发限流，8 是稳妥值） */
+export const PROBE_CONCURRENCY = 8;
+/** 候选选项上限（防止异常字段配置把请求数拖爆） */
+export const MAX_PROBE_OPTIONS = 500;
+
+/**
+ * 按「选项域 + 存在性探测」穷举引用选项（**保证完整、无截断风险**）。
+ *
+ * - 无条件：直接返回源字段配置的选项域（1 次请求、完整），不再只读 200 条记录；
+ * - 有条件：对选项域逐项做 pageSize=1 的存在性探测，命中即产出（可渐进回调）；
+ * - 任一探测发现「返回了记录但不满足条件」→ 判定宿主忽略 filter，
+ *   返回 `complete:false, filterEffective:false`，由调用方回退按行取数。
+ *
+ * @param onOption 渐进回调（每命中一个选项即回调，UI 可即时展示）
+ */
+export function enumerateOptionsByProbe(
+  tableId: string,
+  valueFieldId: string,
+  conditions: ConditionSpec[],
+  opts?: {
+    valueFieldType?: number;
+    /** 已知的选项域（省略则内部读取字段元信息） */
+    declaredOptions?: string[];
+    onOption?: (v: string) => void;
+    /** 进度回调：已探测数 / 候选总数 */
+    onProgress?: (probes: number, total: number) => void;
+    concurrency?: number;
+    maxOptions?: number;
+  }
+): { cancel: () => void; promise: Promise<OptionEnumResult> } {
+  let cancelled = false;
+  const maxOptions = opts?.maxOptions ?? MAX_PROBE_OPTIONS;
+  const concurrency = opts?.concurrency ?? PROBE_CONCURRENCY;
+
+  const promise = (async (): Promise<OptionEnumResult> => {
+    const empty: OptionEnumResult = {
+      values: [],
+      complete: false,
+      truncated: false,
+      probes: 0,
+      scanned: 0,
+      source: 'probe',
+      filterEffective: false,
+    };
+    try {
+      // 1) 取得选项域
+      let declared = opts?.declaredOptions;
+      if (!declared) {
+        const mo = await loadFieldSelectOptions(tableId, valueFieldId).promise;
+        if (!mo.found || mo.options.length === 0) {
+          return { ...empty, source: 'metadata', error: mo.error ?? 'no-declared-options' };
+        }
+        declared = mo.options;
+      }
+      if (cancelled) return empty;
+      if (!declared.length) return { ...empty, source: 'metadata', error: 'no-declared-options' };
+
+      // 2) 无条件 → 选项域即答案（完整、0 次记录读取）
+      if (conditions.length === 0) {
+        return {
+          values: declared.slice(),
+          complete: true,
+          truncated: false,
+          probes: 0,
+          scanned: 0,
+          source: 'metadata',
+          filterEffective: true,
+        };
+      }
+
+      // 3) 有条件 → 逐项存在性探测（并发池，保序输出）
+      const truncated = declared.length > maxOptions;
+      const candidates = declared.slice(0, maxOptions);
+      const found: (string | null)[] = candidates.map(() => null);
+      let cursor = 0;
+      let probes = 0;
+      let scanned = 0;
+      let aborted = false;
+      let firstError: string | undefined;
+
+      const worker = async () => {
+        for (;;) {
+          if (cancelled || aborted) return;
+          const idx = cursor;
+          cursor += 1;
+          if (idx >= candidates.length) return;
+          const cand = candidates[idx];
+          const r = await probeOptionExists(
+            tableId,
+            valueFieldId,
+            cand,
+            conditions,
+            opts?.valueFieldType
+          );
+          probes += 1;
+          opts?.onProgress?.(probes, candidates.length);
+          if (cancelled || aborted) return;
+          if (r.error) {
+            if (!firstError) firstError = r.error;
+            continue; // 单次失败不致命，继续其余候选
+          }
+          if (!r.effective) {
+            // 返回了记录却不满足条件 → 宿主忽略 filter，探测路径不可信 → 退出并回退
+            console.warn('[tableRecords] 存在性探测发现过滤未生效，放弃探测路径并回退按行取数');
+            aborted = true;
+            return;
+          }
+          if (r.exists) {
+            found[idx] = cand;
+            scanned += 1;
+            opts?.onOption?.(cand);
+          }
+        }
+      };
+      const n = Math.max(1, Math.min(concurrency, candidates.length));
+      await Promise.all(Array.from({ length: n }, worker));
+
+      if (aborted) {
+        // 过滤未生效 → 探测路径不可信，交由调用方回退按行取数
+        return { ...empty, probes, truncated, error: 'filter-ineffective' };
+      }
+      // 全部候选都探测失败（有错误、一次都没成功）→ 视为不可用（回退）
+      if (probes >= candidates.length && scanned === 0 && firstError) {
+        return { ...empty, probes, truncated, error: firstError };
+      }
+      return {
+        values: found.filter((v): v is string => !!v),
+        complete: !truncated,
+        truncated,
+        probes,
+        scanned,
+        source: 'probe',
+        filterEffective: true,
+      };
+    } catch (e) {
+      const err = (e as Error)?.message ?? String(e);
+      console.warn(`[tableRecords] 选项穷举失败：表=${tableId} 字段=${valueFieldId} 错误=${err}`);
+      return { ...empty, error: err };
+    }
+  })();
+
+  return { cancel: () => { cancelled = true; }, promise };
+}
+
+/**
+ * 按「取值列穷举」取回满足条件的去重取值（**单列负载，最小化**）。
+ *
+ * 用途：取值字段不是单选/多选（没有配置选项域）时，无法用「选项域 + 存在性探测」，
+ * 改为直接对**该一列**分页取值 —— `getFieldValueListByPage({ stringValue:true })`
+ * 只返回这一列的字符串，负载远小于整行；且支持 `filter`，可按条件精确取回。
+ *
+ * 完整性：翻到 hasMore=false 才是完整；撞 COLUMN_MAX_PAGES 上限则 truncated=true（如实上报）。
+ */
+export function enumerateFieldValuesByColumn(
+  tableId: string,
+  fieldId: string,
+  conditions: ConditionSpec[],
+  opts?: { onValue?: (v: string) => void; maxPages?: number }
+): { cancel: () => void; promise: Promise<OptionEnumResult> } {
+  let cancelled = false;
+  const maxPages = opts?.maxPages ?? COLUMN_MAX_PAGES;
+  const promise = (async (): Promise<OptionEnumResult> => {
+    const seen = new Set<string>();
+    const values: string[] = [];
+    let probes = 0;
+    let scanned = 0;
+    let truncated = false;
+    let filterEffective = false;
+    try {
+      const table = await getBase().getTableById(tableId);
+      const field = await (table as any).getFieldById?.(fieldId);
+      if (!field || typeof field.getFieldValueListByPage !== 'function') {
+        return {
+          values: [],
+          complete: false,
+          truncated: false,
+          probes: 0,
+          scanned: 0,
+          source: 'probe',
+          filterEffective: false,
+          error: 'value-list-api-unavailable',
+        };
+      }
+      let token: any;
+      let guard = 0;
+      for (;;) {
+        if (cancelled) break;
+        const params: any = {
+          pageSize: PAGE_SIZE,
+          stringValue: true,
+          ...(conditions.length
+            ? { filter: { conjunction: 'and', conditions: conditions.map(specToFilterCondition) } }
+            : {}),
+          ...(token !== undefined ? { pageToken: token } : {}),
+        };
+        const res: any = await field.getFieldValueListByPage(params);
+        probes += 1;
+        scanned += (res?.fieldValues ?? []).length;
+        for (const fv of res?.fieldValues ?? []) {
+          const text = stringifyCellValue(fv?.value).trim();
+          if (conditions.length) {
+            // 单列返回不含条件字段 → 无法本地自证条件；只能凭 hasMore 判完整，
+            // 故此处不对 filterEffective 作断言（保持 false，由调用方按 returns 处理）
+          }
+          if (text && !seen.has(text)) {
+            seen.add(text);
+            values.push(text);
+            opts?.onValue?.(text);
+          }
+        }
+        guard += 1;
+        const next = res?.hasMore ? res?.pageToken : undefined;
+        if (next === undefined || next === token) break;
+        if (guard >= maxPages) {
+          truncated = true;
+          break;
+        }
+        token = next;
+      }
+      if (conditions.length === 0) filterEffective = true; // 无条件下不存在「过滤失效」
+      return {
+        values,
+        complete: !truncated,
+        truncated,
+        probes,
+        scanned,
+        source: 'probe',
+        filterEffective,
+      };
+    } catch (e) {
+      const err = (e as Error)?.message ?? String(e);
+      console.warn(`[tableRecords] 取值列穷举失败：表=${tableId} 字段=${fieldId} 错误=${err}`);
+      return {
+        values,
+        complete: false,
+        truncated,
+        probes,
+        scanned,
+        source: 'probe',
+        filterEffective,
+        error: err,
+      };
+    }
+  })();
+  return { cancel: () => { cancelled = true; }, promise };
+}
+
+/**
+ * ★ 引用选项「完整穷举」统一入口（UI 只需调用这一个）。
+ *
+ * 引擎选择原则：**优先用「已验证在所有宿主上都可用」的接口**
+ * （即关联字段选择器同源的 `getRecordsByPage` 分页扫描），
+ * 元信息选项域 / 存在性探测 / 列穷举都只作为**更快的可选优化**，
+ * 任一环节不可用都**不影响完整性**（最终都收敛到扫描引擎）。
+ *
+ * 策略：
+ *  ① 取值字段是单选/多选 + **无条件** → 直接用字段选项域（1 次请求、更快）；
+ *  ② 取值字段是单选/多选 + 有条件 → 先试存在性探测（成本与表大小无关）；不可信则转 ③；
+ *  ③ **渐进全量扫描**（`scanDistinctValues`，getRecordsByPage，翻到底即完整）—— 兜底且必然可用。
+ *
+ * 任何情况下都不会「静默只给 200 条」：要么返回完整，要么如实带 truncated / complete=false。
+ */
+export function enumerateRefOptions(
+  tableId: string,
+  valueFieldId: string,
+  conditions: ConditionSpec[],
+  opts?: {
+    valueFieldType?: number;
+    onOption?: (v: string) => void;
+    onProgress?: (probes: number, total: number) => void;
+    maxProbeOptions?: number;
+    maxColumnPages?: number;
+    /** 渐进扫描上限（页） */
+    maxScanPages?: number;
+    /** 渐进扫描时间预算（毫秒） */
+    scanTimeBudgetMs?: number;
+    /** 扫描进度回调：已扫描记录数 / 总数 */
+    onScanProgress?: (scanned: number, total?: number) => void;
+  }
+): { cancel: () => void; promise: Promise<OptionEnumResult> } {
+  let cancelled = false;
+  let inner: { cancel: () => void } | null = null;
+
+  const promise = (async (): Promise<OptionEnumResult> => {
+    // 渐进全量扫描 = 最终兜底引擎（getRecordsByPage，必然可用）
+    const runScan = async (): Promise<OptionEnumResult> => {
+      const h = scanDistinctValues(tableId, valueFieldId, conditions, {
+        onValue: opts?.onOption,
+        onProgress: opts?.onScanProgress,
+        maxPages: opts?.maxScanPages ?? DISTINCT_SCAN_MAX_PAGES,
+        timeBudgetMs: opts?.scanTimeBudgetMs ?? DISTINCT_SCAN_TIME_BUDGET_MS,
+      });
+      inner = h;
+      const r = await h.promise;
+      return {
+        values: r.values,
+        complete: r.complete,
+        truncated: r.truncated,
+        probes: 0, // 扫描模式的「探测次数」以扫描页数计；此处不计
+        scanned: r.scanned,
+        source: 'scan',
+        filterEffective: true, // 本地自证筛过，必然生效
+        serverTotal: r.total,
+        scannedTotal: r.total,
+      };
+    };
+
+    // 读字段元信息（可能失败 → 直接走扫描）
+    let mo: FieldOptionsResult = { options: [], found: false };
+    try {
+      const r = await loadFieldSelectOptions(tableId, valueFieldId).promise;
+      mo = r;
+    } catch {
+      /* 忽略：走扫描 */
+    }
+    if (cancelled) {
+      return { values: [], complete: false, truncated: false, probes: 0, scanned: 0, source: 'scan', filterEffective: false };
+    }
+
+    // ① 单选/多选 + 无条件 → 选项域即答案（更快，1 次请求）
+    //    注意：选项域是「字段配置的候选集」，比「记录实际出现的取值」更大；
+    //    对引用选项而言这正是期望语义（原生引用选项同样来自字段配置的选项）。
+    if (mo.found && mo.options.length > 0 && conditions.length === 0) {
+      return {
+        values: mo.options.slice(),
+        complete: true,
+        truncated: false,
+        probes: 0,
+        scanned: 0,
+        source: 'metadata',
+        filterEffective: true,
+      };
+    }
+
+    // ② 单选/多选 + 有条件 → 先试存在性探测（成本与表大小无关）
+    if (mo.found && mo.options.length > 0 && conditions.length > 0) {
+      const h = enumerateOptionsByProbe(tableId, valueFieldId, conditions, {
+        valueFieldType: opts?.valueFieldType ?? mo.type,
+        declaredOptions: mo.options,
+        onOption: opts?.onOption,
+        onProgress: opts?.onProgress,
+        maxOptions: opts?.maxProbeOptions,
+      });
+      inner = h;
+      const r = await h.promise;
+      // 探测可信（过滤自证生效、且没有致命错误）→ 直接采用
+      if (r.filterEffective && !r.error) return r;
+      console.warn('[tableRecords] 存在性探测不可用，改用渐进全量扫描');
+      if (cancelled) return r;
+      // 否则转 ③ 扫描（覆盖探测不可用的所有情形）
+      // 注意：探测可能已产出部分选项（onOption 已回调），扫描会去重补充，不会重复。
+      return await runScan();
+    }
+
+    // ③ 其它情形（无选项域 / 元信息不可用 / 列接口不可用）→ 渐进全量扫描
+    //    这是唯一必然可用的路径，保证「永不静默只给 200 条」。
+    return await runScan();
+  })();
+
+  return {
+    cancel: () => {
+      cancelled = true;
+      inner?.cancel();
+    },
+    promise,
+  };
 }
 
 /* ---------------- 逐页搜索（用户输入关键字时才启动） ---------------- */
@@ -321,11 +1242,11 @@ export interface SearchOptions {
   extraConditions?: ConditionSpec[];
 }
 
-/** 把「附加精确条件」转成服务端 filter 片段 */
+/** 把「附加精确条件」转成服务端 filter 片段（随字段类型选择 operator 与 fieldType） */
 function extraCondToFilter(extra?: ConditionSpec[]) {
   return (extra ?? [])
     .filter((c) => c && c.fieldId && (c.text ?? '') !== '')
-    .map((c) => ({ fieldId: c.fieldId, operator: 'is', value: c.text }));
+    .map(specToFilterCondition);
 }
 
 /**
@@ -465,9 +1386,9 @@ export function searchAllRows(
         for (const rec of records) {
           const fields = (rec.fields ?? {}) as Record<string, unknown>;
           const text = stringifyCellValue(fields[fieldId]);
-          // 自证：关键字命中 **且** 附加条件全部满足，才算真命中
-          const condOk = (opts.extraConditions ?? []).every(
-            (c) => stringifyCellValue(fields[c.fieldId]).trim() === c.text.trim()
+          // 自证：关键字命中 **且** 附加条件全部满足，才算真命中（单选/多选按选项文本判定）
+          const condOk = (opts.extraConditions ?? []).every((c) =>
+            recordSatisfiesCondition(fields, c)
           );
           if (text.toLowerCase().includes(kw.toLowerCase()) && condOk) effectiveThisPage = true;
           batch.push({ recordId: rec.recordId, fields });

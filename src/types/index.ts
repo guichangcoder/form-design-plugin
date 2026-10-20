@@ -27,6 +27,13 @@ export const UNSUPPORTED_FIELD_TYPES: FieldType[] = [
 export interface OptionRefCondition {
   /** 源表过滤字段 ID */
   sourceFieldId: string;
+  /**
+   * ★ 源表该条件字段的字段类型（配置时由元信息记录）。
+   * 服务端 filter 对「单选」的等于条件要求同时给出 fieldType 才能正确解析，
+   * 多选则要用 contains 语义；缺失该类型时只能退化为纯文本等于条件。
+   * 旧配置无此字段 → 兼容为「按文本处理」。
+   */
+  sourceFieldType?: FieldType;
   /** 值来源：static=固定值；field=当前记录（主表字段/子表同行字段）的值 */
   valueSource: 'static' | 'field';
   /** valueSource=static 时的固定值（按单元格文本比较） */

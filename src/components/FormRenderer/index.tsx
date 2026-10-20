@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { FieldType } from '@lark-base-open/js-sdk';
 import {
   ConditionalState,
@@ -19,7 +19,7 @@ import {
   noteSubmittedValues,
   FULL_SCAN_TOTAL_LIMIT,
 } from '../../services/uniqueCheck';
-import { applyAutoFill, markManualEdits } from '../../utils/dateAutoFill';
+import { resolveAutoFill, markManualEdits } from '../../utils/dateAutoFill';
 import { toast } from '../../utils/toast';
 import { applyThemeColor } from '../../utils/theme';
 import { Button, Typography } from '@douyinfe/semi-ui';
@@ -67,6 +67,9 @@ function initSubValues(config: FormPluginConfig): Record<string, FormValues[]> {
   return o;
 }
 
+/** 日期联动 manual/auto 集合的主表 key（模块级纯函数：引用恒定，避免下游 memo 穿透） */
+const mainKey = (fieldId: string) => `main:${fieldId}`;
+
 /** 分区卡片头（填写态不传 num/desc，只显示区块名称） */
 function SectionHead({ num, title, desc }: { num?: string; title: string; desc?: string }) {
   return (
@@ -94,7 +97,17 @@ export function FormRenderer({ config, onBackToConfig, preview, metaStale, onRel
    */
   const manualEdited = useRef<Set<string>>(new Set());
   const autoFilled = useRef<Set<string>>(new Set());
-  const mainKey = (fieldId: string) => `main:${fieldId}`;
+
+  /**
+   * ★ 传给 MainForm / SubForm 的回调必须保持引用稳定，否则 React.memo 每次都会被穿透。
+   * 这里用 ref 持有最新值，让下方 useCallback([]) 里的逻辑读到最新数据。
+   */
+  const configRef = useRef(config);
+  configRef.current = config;
+  const mainValuesRef = useRef(mainValues);
+  mainValuesRef.current = mainValues;
+  const subValuesRef = useRef(subValues);
+  subValuesRef.current = subValues;
 
   /**
    * 唯一性校验的实时状态：
@@ -175,24 +188,25 @@ export function FormRenderer({ config, onBackToConfig, preview, metaStale, onRel
       });
   };
 
-  const handleMainBlur = (fieldId: string) => {
-    const f = config.mainTable.fields.find((x) => x.fieldId === fieldId);
+  const handleMainBlur = useCallback((fieldId: string) => {
+    const cfg = configRef.current;
+    const f = cfg.mainTable.fields.find((x) => x.fieldId === fieldId);
     if (!f || !f.unique?.enabled) return;
     runUniqueCheck(
       mainKey(fieldId),
-      config.mainTable.tableId,
+      cfg.mainTable.tableId,
       fieldId,
-      mainValues[fieldId],
+      mainValuesRef.current[fieldId],
       f.unique.message,
       f.fieldType
     );
-  };
+  }, []);
 
-  const handleSubBlur = (tableId: string) => (fieldId: string, rowIndex: number) => {
-    const sub = config.subTables.find((s) => s.tableId === tableId);
+  const handleSubBlur = useCallback((tableId: string) => (fieldId: string, rowIndex: number) => {
+    const sub = configRef.current.subTables.find((s) => s.tableId === tableId);
     const f = sub?.fields.find((x) => x.fieldId === fieldId);
     if (!f || !f.unique?.enabled) return;
-    const row = (subValues[tableId] ?? [])[rowIndex] ?? {};
+    const row = (subValuesRef.current[tableId] ?? [])[rowIndex] ?? {};
     runUniqueCheck(
       `sub:${tableId}:${rowIndex}:${fieldId}`,
       tableId,
@@ -201,7 +215,7 @@ export function FormRenderer({ config, onBackToConfig, preview, metaStale, onRel
       f.unique.message,
       f.fieldType
     );
-  };
+  }, []);
 
   // 把统一 key 的校验状态拆成 MainForm / SubForm 各自的小 map
   const { mainUnique, subUnique } = useMemo(() => {
@@ -222,8 +236,11 @@ export function FormRenderer({ config, onBackToConfig, preview, metaStale, onRel
   }, [uniqueState]);
 
   // —— 日期联动预填：主表 ——
+  // ★ 用 resolveAutoFill 在一个同步循环内迭代到收敛，只 setState 一次。
+  //   旧写法「跑一轮就 setState，依赖值再跑下一轮」在长链配置下会连续写回多次，
+  //   每写一次受控的 DatePicker 面板就被重置一次 → 用户看到频闪、点不中日期。
   useEffect(() => {
-    const next = applyAutoFill(
+    const next = resolveAutoFill(
       config.mainTable.fields,
       mainValues,
       manualEdited.current,
@@ -243,7 +260,7 @@ export function FormRenderer({ config, onBackToConfig, preview, metaStale, onRel
       const rows = subValues[sub.tableId] ?? [];
       let rowChanged = false;
       const newRows = rows.map((row, idx) => {
-        const next = applyAutoFill(
+        const next = resolveAutoFill(
           sub.fields,
           row,
           manualEdited.current,
@@ -266,23 +283,23 @@ export function FormRenderer({ config, onBackToConfig, preview, metaStale, onRel
   }, [subValues, config.subTables]);
 
   /** 主表值变化（用户交互入口）：识别日期联动目标字段是否被手动修改 */
-  const handleMainChange = (next: FormValues) => {
+  const handleMainChange = useCallback((next: FormValues) => {
     markManualEdits(
-      config.mainTable.fields,
-      mainValues,
+      configRef.current.mainTable.fields,
+      mainValuesRef.current,
       next,
       manualEdited.current,
       autoFilled.current,
       mainKey
     );
     setMainValues(next);
-  };
+  }, []);
 
   /** 子表值变化（用户交互入口） */
-  const handleSubChange = (tableId: string) => (rows: FormValues[]) => {
-    const sub = config.subTables.find((s) => s.tableId === tableId);
+  const handleSubChange = useCallback((tableId: string, rows: FormValues[]) => {
+    const sub = configRef.current.subTables.find((s) => s.tableId === tableId);
     if (sub) {
-      const before = subValues[tableId] ?? [];
+      const before = subValuesRef.current[tableId] ?? [];
       rows.forEach((row, idx) => {
         markManualEdits(
           sub.fields,
@@ -295,7 +312,21 @@ export function FormRenderer({ config, onBackToConfig, preview, metaStale, onRel
       });
     }
     setSubValues((o) => ({ ...o, [tableId]: rows }));
-  };
+  }, []);
+
+  /**
+   * 每张子表一个「引用恒定」的 onChange：直接传 handleSubChange.bind 会每次产生新函数，
+   * 导致 React.memo 失效。这里按子表 ID 缓存回调，只有子表集合变化时才重建。
+   */
+  const subTableIds = config.subTables.map((s) => s.tableId).join('|');
+  const subChangeHandlers = useMemo(() => {
+    const map: Record<string, (rows: FormValues[]) => void> = {};
+    for (const s of configRef.current.subTables) {
+      map[s.tableId] = (rows: FormValues[]) => handleSubChange(s.tableId, rows);
+    }
+    return map;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [subTableIds]);
 
   // 应用配置的主题色
   useEffect(() => {
@@ -506,7 +537,7 @@ export function FormRenderer({ config, onBackToConfig, preview, metaStale, onRel
             <SubForm
               sub={sub}
               rows={subValues[sub.tableId] ?? [{}]}
-              onChange={handleSubChange(sub.tableId)}
+              onChange={subChangeHandlers[sub.tableId] ?? ((rows) => handleSubChange(sub.tableId, rows))}
               cond={cond}
               errors={submitErrors}
               uniqueState={subUnique[sub.tableId]}

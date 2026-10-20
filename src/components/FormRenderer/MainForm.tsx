@@ -20,7 +20,13 @@ interface Props {
   preview?: boolean;
 }
 
-export function MainForm({
+/**
+ * 主表字段渲染。
+ * ★ 用 React.memo 包裹：日期联动预填写回 mainValues 时，只要 values / cond 等引用未变，
+ *   就跳过整块重渲染，避免「一次写回 → 全树重渲染 → 受控日期面板被重置」的放大效应。
+ *   各 prop 均为引用稳定（values/cond/errors/uniqueState 由父级 state 直接传入）。
+ */
+export const MainForm = React.memo(function MainForm({
   config,
   values,
   onChange,
@@ -80,4 +86,4 @@ export function MainForm({
         })}
     </div>
   );
-}
+});
