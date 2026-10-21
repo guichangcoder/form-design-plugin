@@ -21,6 +21,12 @@ import {
 } from '../../services/uniqueCheck';
 import { resolveAutoFill, markManualEdits } from '../../utils/dateAutoFill';
 import {
+  applyUserDefaults,
+  formHasAnyUserDefault,
+  resetUserDefaultDone,
+} from '../../utils/userDefault';
+import { getBridge } from '../../services/appContext';
+import {
   FormScope,
   buildFormScope,
   formHasAnyFormRef,
@@ -288,6 +294,109 @@ export function FormRenderer({ config, onBackToConfig, preview, metaStale, onRel
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [subValues, config.subTables]);
 
+  /**
+   * ★ 人员字段「默认值＝当前用户」。
+   *
+   * 与日期联动的区别：这是**一次性初始化**（不是持续联动）。
+   * - 打开表单时取一次 `getBridge().getUserId()`，把配置了开关的人员字段填成当前用户；
+   * - 之后**绝不再插手**：用户改选/删除都尊重（由 userDefaultDone 集合守门）；
+   * - 没配置该开关 → 本 effect 直接 return，**一次请求都不发**（零破坏）。
+   *
+   * ⚠️ 不能把 userId 存进 `defaultValue`：那会在配置者会话里被写死成配置者本人，
+   *    导致所有填写者都被默认成同一个人。必须运行时取「打开者」身份。
+   */
+  const hasUserDefaultFeature = useMemo(
+    () => formHasAnyUserDefault(config.mainTable.fields, config.subTables),
+    [config.mainTable.fields, config.subTables]
+  );
+  /** 已处理过的「默认当前用户」字段集合（改过 / 清空后不再回填） */
+  const userDefaultDone = useRef<Set<string>>(new Set());
+  /** 当前用户 open_id（取一次复用；取不到为空串，后续不重试） */
+  const meIdRef = useRef<string | null>(null);
+  /** 提交成功后自增，用于触发「重新默认当前用户」effect 重跑（否则重新渲染不会重跑） */
+  const [submitSeq, setSubmitSeq] = useState(0);
+  /**
+   * 各子表行数签名：用户「添加一行 / 删除一行」时变化 → 触发默认值 effect 重跑，
+   * 让**新增的行**也自动默认当前用户（已有行已登记 done，不受影响）。
+   */
+  const subRowSig = config.subTables
+    .map((s) => `${s.tableId}:${(subValues[s.tableId] ?? []).length}`)
+    .join('|');
+
+  useEffect(() => {
+    if (preview || !hasUserDefaultFeature) return;
+    let alive = true;
+
+    (async () => {
+      // 取当前用户（首次；失败则本次不填，等下次依赖变化再试）
+      if (meIdRef.current === null) {
+        try {
+          const id = await getBridge().getUserId();
+          if (!alive) return;
+          meIdRef.current = id || '';
+        } catch {
+          if (!alive) return;
+          // 取不到身份：登记为空串，避免每个字段都重复触发一次失败请求
+          meIdRef.current = '';
+        }
+      }
+      const meId = meIdRef.current;
+      if (!meId) return;
+
+      // ⚠️ 这里用 ref 读当前值 + 直接 setState，而不是 setState(updater)。
+      //    因为 applyUserDefaults 会**就地修改** done 集合（登记「已处理」），
+      //    属于副作用；React StrictMode 会双调用 updater 函数来检测非纯函数，
+      //    第二次调用时 done 里已有该 key → 返回 null → 默认值被吞掉。
+      //    ref 在 render 后即最新，effect 紧随 commit 执行，读到的一定是最新值。
+
+      // 主表
+      const nextMain = applyUserDefaults(
+        configRef.current.mainTable.fields,
+        mainValuesRef.current,
+        meId,
+        userDefaultDone.current,
+        mainKey
+      );
+      if (nextMain) setMainValues(nextMain);
+
+      // 子表（逐行）
+      const curSubs = subValuesRef.current;
+      let changedAny = false;
+      const nextSubs: Record<string, FormValues[]> = { ...curSubs };
+      for (const sub of configRef.current.subTables) {
+        const rows = curSubs[sub.tableId] ?? [];
+        let rowChanged = false;
+        const newRows = rows.map((row, idx) => {
+          const next = applyUserDefaults(
+            sub.fields,
+            row,
+            meId,
+            userDefaultDone.current,
+            (fid) => `sub:${sub.tableId}:${idx}:${fid}`
+          );
+          if (next) {
+            rowChanged = true;
+            return next;
+          }
+          return row;
+        });
+        if (rowChanged) {
+          nextSubs[sub.tableId] = newRows;
+          changedAny = true;
+        }
+      }
+      if (changedAny) setSubValues(nextSubs);
+    })();
+
+    return () => {
+      alive = false;
+    };
+    // 依赖：字段配置（开关变化）+ submitSeq（提交后重新默认下一条记录）
+    //      + subRowSig（新增子表行时给新行补默认值）。
+    // 中途改值不重跑（meIdRef / userDefaultDone 已守门，避免与用户输入打架）。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [preview, hasUserDefaultFeature, submitSeq, subRowSig, config.mainTable.fields, config.subTables]);
+
   /** 主表值变化（用户交互入口）：识别日期联动目标字段是否被手动修改 */
   const handleMainChange = useCallback((next: FormValues) => {
     markManualEdits(
@@ -511,6 +620,9 @@ export function FormRenderer({ config, onBackToConfig, preview, metaStale, onRel
       // 重置日期联动的「手动改过 / 自动填过」标记，下一轮填写重新自动预填
       manualEdited.current = new Set();
       autoFilled.current = new Set();
+      // 重置「默认当前用户」的处理标记，并触发 effect 重跑 → 新一条记录重新默认当前用户
+      resetUserDefaultDone(userDefaultDone.current);
+      setSubmitSeq((s) => s + 1);
       // 清空唯一性校验提示
       setUniqueState({});
     } else if (r.rollback === 'partial') {

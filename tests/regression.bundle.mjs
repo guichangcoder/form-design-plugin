@@ -150539,13 +150539,17 @@ function PersonSelector({ value, onChange, disabled, tableId, fieldId, preview }
   const [loading, setLoading] = (0, import_react62.useState)(false);
   const [opened, setOpened] = (0, import_react62.useState)(false);
   const meRef = (0, import_react62.useRef)(null);
+  const [meId, setMeId] = (0, import_react62.useState)("");
   (0, import_react62.useEffect)(() => {
     if (preview) return;
     let alive = true;
     (async () => {
       try {
-        const meId = await getBridge().getUserId();
-        if (meId && alive) meRef.current = { id: meId, name: void 0 };
+        const id = await getBridge().getUserId();
+        if (id && alive) {
+          meRef.current = { id, name: void 0 };
+          setMeId(id);
+        }
       } catch {
       }
     })();
@@ -150607,11 +150611,15 @@ function PersonSelector({ value, onChange, disabled, tableId, fieldId, preview }
   const labelMap = (0, import_react62.useMemo)(() => {
     const map = /* @__PURE__ */ new Map();
     (value || []).forEach((u10) => {
-      if (u10 && u10.id) map.set(u10.id, u10.name || u10.enName || "\u5F53\u524D\u7528\u6237");
+      if (u10 && u10.id) map.set(u10.id, u10.name || u10.enName || "");
     });
-    candidates.forEach((c11) => map.set(c11.id, c11._label));
+    candidates.forEach((c11) => {
+      if (c11.id === meId && (!c11.name && !c11.enName)) return;
+      map.set(c11.id, c11._label);
+    });
+    if (meId && !map.get(meId)) map.set(meId, "\u6211\uFF08\u5F53\u524D\u7528\u6237\uFF09");
     return map;
-  }, [candidates, value]);
+  }, [candidates, value, meId]);
   const selectedIds = (value || []).map((u10) => u10.id);
   const apply = (ids) => {
     const pool = /* @__PURE__ */ new Map();
@@ -151614,6 +151622,64 @@ var init_FieldRenderer = __esm({
   }
 });
 
+// src/utils/userDefault.ts
+var userDefault_exports = {};
+__export(userDefault_exports, {
+  applyUserDefaults: () => applyUserDefaults,
+  formHasAnyUserDefault: () => formHasAnyUserDefault,
+  hasUserDefault: () => hasUserDefault,
+  isEmptyPersonValue: () => isEmptyPersonValue,
+  listUserDefaultFields: () => listUserDefaultFields,
+  resetUserDefaultDone: () => resetUserDefaultDone
+});
+function hasUserDefault(field) {
+  return field.fieldType === j5.User && field.defaultToCurrentUser === true;
+}
+function listUserDefaultFields(fields) {
+  return (fields ?? []).filter(hasUserDefault);
+}
+function formHasAnyUserDefault(mainFields, subTables) {
+  if (listUserDefaultFields(mainFields ?? []).length > 0) return true;
+  return (subTables ?? []).some((s) => listUserDefaultFields(s?.fields ?? []).length > 0);
+}
+function isEmptyPersonValue(v11) {
+  if (v11 === void 0 || v11 === null) return true;
+  if (Array.isArray(v11)) return v11.length === 0;
+  return false;
+}
+function applyUserDefaults(fields, values, meId, done, keyOf) {
+  if (!meId) return null;
+  let next = null;
+  for (const f12 of fields) {
+    if (!hasUserDefault(f12)) continue;
+    const key2 = keyOf(f12.fieldId);
+    if (done.has(key2)) continue;
+    if (!isEmptyPersonValue(values[f12.fieldId])) {
+      done.add(key2);
+      continue;
+    }
+    next = next ?? { ...values };
+    next[f12.fieldId] = [{ id: meId }];
+    done.add(key2);
+  }
+  return next;
+}
+function resetUserDefaultDone(done, prefix2) {
+  if (!prefix2) {
+    done.clear();
+    return;
+  }
+  for (const k12 of [...done]) {
+    if (k12.startsWith(prefix2)) done.delete(k12);
+  }
+}
+var init_userDefault = __esm({
+  "src/utils/userDefault.ts"() {
+    "use strict";
+    init_dist();
+  }
+});
+
 // tests/regression.entry.mjs
 init_dist();
 
@@ -152094,8 +152160,10 @@ var KEEP_FIELDS = [
   // ★ 用户决策（表单内跨区块取值：来源区块/字段，体积很小）
   "unique",
   // 用户决策（唯一性校验开关与提示文案）
-  "dateAutoFill"
+  "dateAutoFill",
   // 用户决策（日期联动预填：来源字段/偏移，体积很小）
+  "defaultToCurrentUser"
+  // ★ 用户决策（人员字段默认值＝当前用户，布尔值）
   // ⚠️ 新增任何字段级配置都必须登记到这里，否则保存时被剥离 → 发布后该配置静默丢失
   // 注：未来若加 order/width 等用户决策字段，记得也加进来
 ];
@@ -152125,7 +152193,8 @@ function untrimField(stub) {
     optionRef: stub.optionRef,
     formRef: stub.formRef,
     unique: stub.unique,
-    dateAutoFill: stub.dateAutoFill
+    dateAutoFill: stub.dateAutoFill,
+    defaultToCurrentUser: stub.defaultToCurrentUser
   };
 }
 function serializeConfig(data) {
@@ -152330,6 +152399,13 @@ function addMonths(base, months) {
   );
   return target;
 }
+function addMonthsEndOfTerm(base, months) {
+  if (months === 0) return new Date(base.getTime());
+  const nominal = addMonths(base, months);
+  if (nominal.getDate() !== base.getDate()) return nominal;
+  nominal.setDate(nominal.getDate() - 1);
+  return nominal;
+}
 function applyDateOffset(base, cfg) {
   if (!base) return null;
   const t3 = base instanceof Date ? base.getTime() : new Date(base).getTime();
@@ -152343,9 +152419,9 @@ function applyDateOffset(base, cfg) {
     case "day":
       return new Date(d12.setDate(d12.getDate() + n11));
     case "month":
-      return addMonths(d12, n11);
+      return addMonthsEndOfTerm(d12, n11);
     case "year":
-      return addMonths(d12, n11 * 12);
+      return addMonthsEndOfTerm(d12, n11 * 12);
     default:
       return addMonths(d12, 0);
   }
@@ -153367,21 +153443,33 @@ async function run() {
   }
   {
     const plus1y = { sourceFieldId: "fStart", direction: "plus", amount: 1, unit: "year" };
-    check("F15 +1 \u5E74\uFF082026-03-01\u21922027-03-01\uFF09", fmt(applyDateOffset(d11("2026-03-01"), plus1y)) === "2027-03-01");
+    check("F15 +1 \u5E74\u672B\u65E5\u53E3\u5F84\uFF082026-03-01\u21922027-02-28\uFF09", fmt(applyDateOffset(d11("2026-03-01"), plus1y)) === "2027-02-28");
     check(
-      "F15 -1 \u5E74\uFF082026-03-01\u21922025-03-01\uFF09",
-      fmt(applyDateOffset(d11("2026-03-01"), { ...plus1y, direction: "minus" })) === "2025-03-01"
+      "F15 \u7528\u6237\u539F\u4F8B +1 \u5E74\uFF082026-10-21\u21922027-10-20\uFF09",
+      fmt(applyDateOffset(d11("2026-10-21"), plus1y)) === "2027-10-20"
     );
     check(
-      "F15 \u6708\u504F\u79FB\u65E5\u6EA2\u51FA\u53D6\u6708\u672B\uFF081/31 +1 \u6708\u21922/28\uFF09",
+      "F15 -1 \u5E74\u672B\u65E5\u53E3\u5F84\uFF082026-03-01\u21922025-02-28\uFF09",
+      fmt(applyDateOffset(d11("2026-03-01"), { ...plus1y, direction: "minus" })) === "2025-02-28"
+    );
+    check(
+      "F15 +1 \u4E2A\u6708\u672B\u65E5\u53E3\u5F84\uFF082026-10-21\u21922026-11-20\uFF09",
+      fmt(applyDateOffset(d11("2026-10-21"), { ...plus1y, amount: 1, unit: "month" })) === "2026-11-20"
+    );
+    check(
+      "F15 \u6708\u504F\u79FB\u65E5\u6EA2\u51FA\u53D6\u6708\u672B\u4E14\u4E0D\u518D\u51CF\u4E00\u5929\uFF081/31 +1 \u6708\u21922/28\uFF09",
       fmt(applyDateOffset(d11("2026-01-31"), { ...plus1y, amount: 1, unit: "month" })) === "2026-02-28"
     );
     check(
-      "F15 \u95F0\u5E74 2/29 +1 \u5E74\u2192\u6B21\u5E74 2/28",
+      "F15 \u95F0\u5E74 2/29 +1 \u5E74\u2192\u6B21\u5E74 2/28\uFF08\u94B3\u5236\u540E\u4E0D\u91CD\u590D\u51CF\u4E00\u5929\uFF09",
       fmt(applyDateOffset(d11("2024-02-29"), plus1y)) === "2025-02-28"
     );
     check(
-      "F15 \u6309\u5929\u504F\u79FB\uFF08+30 \u5929\uFF09",
+      "F15 \u504F\u79FB\u91CF\u4E3A 0 \u65F6\u539F\u6837\u8FD4\u56DE\uFF08\u4E0D\u51CF\u4E00\u5929\uFF09",
+      fmt(applyDateOffset(d11("2026-03-01"), { ...plus1y, amount: 0 })) === "2026-03-01"
+    );
+    check(
+      "F15 \u6309\u5929\u504F\u79FB\u4E0D\u53D7\u672B\u65E5\u53E3\u5F84\u5F71\u54CD\uFF08+30 \u5929\uFF09",
       fmt(applyDateOffset(d11("2026-01-01"), { ...plus1y, amount: 30, unit: "day" })) === "2026-01-31"
     );
     check("F15 \u6765\u6E90\u4E3A\u7A7A\u8FD4\u56DE null", applyDateOffset(null, plus1y) === null);
@@ -153407,12 +153495,12 @@ async function run() {
     const keyOf = (fid) => `main:${fid}`;
     const v02 = { fStart: d11("2026-03-01") };
     const n1 = applyAutoFill(fields, v02, manual, auto, keyOf);
-    check("F15 \u6765\u6E90\u6709\u503C\u65F6\u81EA\u52A8\u9884\u586B", n1 && fmt(n1.fEnd) === "2027-03-01", n1 && fmt(n1.fEnd));
+    check("F15 \u6765\u6E90\u6709\u503C\u65F6\u81EA\u52A8\u9884\u586B", n1 && fmt(n1.fEnd) === "2027-02-28", n1 && fmt(n1.fEnd));
     check("F15 \u9884\u586B\u540E\u6807\u8BB0\u4E3A\u81EA\u52A8\u503C", auto.has("main:fEnd"));
     check("F15 \u503C\u5DF2\u6B63\u786E\u65F6\u4E0D\u91CD\u590D\u5199\u5165", applyAutoFill(fields, n1, manual, auto, keyOf) === null);
     const v22 = { ...n1, fStart: d11("2027-05-06") };
     const n23 = applyAutoFill(fields, v22, manual, auto, keyOf);
-    check("F15 \u672A\u624B\u52A8\u6539\u8FC7\u65F6\u6765\u6E90\u53D8\u5316\u4F1A\u91CD\u7B97", n23 && fmt(n23.fEnd) === "2028-05-06", n23 && fmt(n23.fEnd));
+    check("F15 \u672A\u624B\u52A8\u6539\u8FC7\u65F6\u6765\u6E90\u53D8\u5316\u4F1A\u91CD\u7B97", n23 && fmt(n23.fEnd) === "2028-05-05", n23 && fmt(n23.fEnd));
     const userEdited = { ...n23, fEnd: d11("2027-12-31") };
     markManualEdits(fields, n23, userEdited, manual, auto, keyOf);
     check("F15 \u7528\u6237\u624B\u52A8\u6539\u540E\u8FDB\u5165 manual", manual.has("main:fEnd"));
@@ -153426,7 +153514,7 @@ async function run() {
     markManualEdits(fields, v32, cleared, manual, auto, keyOf);
     check("F15 \u6E05\u7A7A\u76EE\u6807\u5B57\u6BB5\u64A4\u9500\u624B\u52A8\u6807\u8BB0", !manual.has("main:fEnd"));
     const n42 = applyAutoFill(fields, cleared, manual, auto, keyOf);
-    check("F15 \u6E05\u7A7A\u540E\u91CD\u65B0\u81EA\u52A8\u9884\u586B", n42 && fmt(n42.fEnd) === "2030-01-01", n42 && fmt(n42.fEnd));
+    check("F15 \u6E05\u7A7A\u540E\u91CD\u65B0\u81EA\u52A8\u9884\u586B", n42 && fmt(n42.fEnd) === "2029-12-31", n42 && fmt(n42.fEnd));
     const noSrc = { ...n42, fStart: void 0 };
     const n52 = applyAutoFill(fields, noSrc, manual, auto, keyOf);
     check("F15 \u6765\u6E90\u6E05\u7A7A\u540E\u6E05\u6389\u81EA\u52A8\u503C", n52 && n52.fEnd === void 0, n52 && fmt(n52.fEnd));
@@ -153492,8 +153580,8 @@ async function run() {
       keyOf
     );
     check(
-      "F21 \u957F\u94FE\u4E00\u6B21\u6536\u655B\u5230\u6700\u7EC8\u503C",
-      r1 && fmt(r1.B) === "2027-03-01" && fmt(r1.C) === "2028-03-01" && fmt(r1.D) === "2029-03-01" && fmt(r1.E) === "2030-03-01",
+      "F21 \u957F\u94FE\u4E00\u6B21\u6536\u655B\u5230\u6700\u7EC8\u503C\uFF08\u672B\u65E5\u53E3\u5F84\uFF0C\u9010\u73AF -1 \u5929\uFF09",
+      r1 && fmt(r1.B) === "2027-02-28" && fmt(r1.C) === "2028-02-27" && fmt(r1.D) === "2029-02-26" && fmt(r1.E) === "2030-02-25",
       r1 && [fmt(r1.B), fmt(r1.C), fmt(r1.D), fmt(r1.E)]
     );
     check("F21 \u6536\u655B\u540E\u518D\u6C42\u89E3\u8FD4\u56DE null\uFF08\u4E0D\u91CD\u590D\u5199\u56DE\uFF09", resolveAutoFill(chainFields, r1, /* @__PURE__ */ new Set(), chainAuto, keyOf) === null);
@@ -155803,6 +155891,182 @@ async function run() {
         apiCalls.table === 0 && apiCalls.field === 0 && apiCalls.record === 0,
         apiCalls
       );
+    }
+  }
+  {
+    const {
+      hasUserDefault: hasUserDefault2,
+      listUserDefaultFields: listUserDefaultFields2,
+      formHasAnyUserDefault: formHasAnyUserDefault2,
+      applyUserDefaults: applyUserDefaults2,
+      resetUserDefaultDone: resetUserDefaultDone2,
+      isEmptyPersonValue: isEmptyPersonValue2
+    } = await Promise.resolve().then(() => (init_userDefault(), userDefault_exports));
+    const uf2 = (id, extra = {}) => ({
+      fieldId: id,
+      fieldName: id,
+      fieldType: j5.User,
+      visible: true,
+      required: false,
+      ...extra
+    });
+    const MAIN_KEY = (fid) => `main:${fid}`;
+    check("F30 \u4EBA\u5458\u5B57\u6BB5 + \u5F00\u5173 \u2192 \u8BC6\u522B\u4E3A\u9ED8\u8BA4\u5F53\u524D\u7528\u6237", hasUserDefault2(uf2("u1", { defaultToCurrentUser: true })) === true, null);
+    check("F30 \u4EBA\u5458\u5B57\u6BB5\u672A\u5F00\u5F00\u5173 \u2192 \u4E0D\u8BC6\u522B\uFF08\u96F6\u53D8\u5316\uFF09", hasUserDefault2(uf2("u1")) === false, null);
+    check("F30 \u5F00\u5173\u4E3A false \u2192 \u4E0D\u8BC6\u522B", hasUserDefault2(uf2("u1", { defaultToCurrentUser: false })) === false, null);
+    check(
+      "F30 \u67E5\u627E\u5F15\u7528(Lookup)\u5B57\u6BB5\u5373\u4F7F\u8BEF\u914D\u5F00\u5173\u4E5F\u4E0D\u751F\u6548",
+      hasUserDefault2({ fieldId: "x", fieldName: "x", fieldType: j5.Lookup, visible: true, required: false, defaultToCurrentUser: true }) === false,
+      null
+    );
+    check(
+      "F30 \u516C\u5F0F(Formula)\u5B57\u6BB5\u5373\u4F7F\u8BEF\u914D\u5F00\u5173\u4E5F\u4E0D\u751F\u6548",
+      hasUserDefault2({ fieldId: "x", fieldName: "x", fieldType: j5.Formula, visible: true, required: false, defaultToCurrentUser: true }) === false,
+      null
+    );
+    check(
+      "F30 \u65E0\u4EFB\u4F55\u914D\u7F6E \u2192 formHasAnyUserDefault=false\uFF08\u4E0D\u53D6 userId\u3001\u96F6\u8BF7\u6C42\uFF09",
+      formHasAnyUserDefault2([uf2("u1")], [{ fields: [uf2("u2")] }]) === false,
+      null
+    );
+    check(
+      "F30 \u4E3B\u8868\u6216\u5B50\u8868\u4EFB\u4E00\u914D\u7F6E \u2192 formHasAnyUserDefault=true",
+      formHasAnyUserDefault2([uf2("u1", { defaultToCurrentUser: true })], [{ fields: [] }]) === true && formHasAnyUserDefault2([uf2("u1")], [{ fields: [uf2("u2", { defaultToCurrentUser: true })] }]) === true,
+      null
+    );
+    check(
+      "F30 \u7A7A\u503C\u5224\u5B9A\uFF1Aundefined/null/[] \u4E3A\u7A7A\uFF0C[{id}] \u975E\u7A7A",
+      isEmptyPersonValue2(void 0) && isEmptyPersonValue2(null) && isEmptyPersonValue2([]) && !isEmptyPersonValue2([{ id: "ou_me" }]),
+      null
+    );
+    {
+      const fields = [uf2("owner", { defaultToCurrentUser: true }), uf2("member")];
+      const done = /* @__PURE__ */ new Set();
+      const v02 = {};
+      const n1 = applyUserDefaults2(fields, v02, "ou_me", done, MAIN_KEY);
+      check("F30 \u7A7A\u5B57\u6BB5 \u2192 \u81EA\u52A8\u586B\u5165\u5F53\u524D\u7528\u6237", !!n1 && JSON.stringify(n1.owner) === JSON.stringify([{ id: "ou_me" }]), n1);
+      check("F30 \u672A\u5F00\u5F00\u5173\u7684\u4EBA\u5458\u5B57\u6BB5\u4E0D\u52A8", n1 && n1.member === void 0, n1);
+      check("F30 \u539F values \u672A\u88AB\u5C31\u5730\u4FEE\u6539\uFF08\u8FD4\u56DE\u65B0\u5BF9\u8C61\uFF09", v02.owner === void 0, v02);
+      check("F30 \u586B\u8FC7\u7684\u5B57\u6BB5\u767B\u8BB0\u8FDB done", done.has("main:owner"), [...done]);
+      check(
+        "F30 \u5DF2\u586B\u540E\u518D\u6B21\u8C03\u7528\u8FD4\u56DE null\uFF08\u4E0D\u91CD\u590D\u5199\u56DE\uFF0C\u907F\u514D\u6B7B\u5FAA\u73AF\uFF09",
+        applyUserDefaults2(fields, n1, "ou_me", done, MAIN_KEY) === null,
+        null
+      );
+    }
+    {
+      const fields = [uf2("owner", { defaultToCurrentUser: true })];
+      const done = /* @__PURE__ */ new Set();
+      const n1 = applyUserDefaults2(fields, {}, "ou_me", done, MAIN_KEY);
+      const edited = { ...n1, owner: [{ id: "ou_other" }] };
+      const n23 = applyUserDefaults2(fields, edited, "ou_me", done, MAIN_KEY);
+      check(
+        "F30 \u7528\u6237\u6539\u9009\u4ED6\u4EBA\u540E\u4E0D\u518D\u88AB\u8986\u76D6\u56DE\u5F53\u524D\u7528\u6237",
+        n23 === null && edited.owner[0].id === "ou_other",
+        n23
+      );
+      const cleared = { ...n1, owner: [] };
+      const n32 = applyUserDefaults2(fields, cleared, "ou_me", done, MAIN_KEY);
+      check("F30 \u7528\u6237\u4E3B\u52A8\u6E05\u7A7A\u540E\u4E0D\u518D\u81EA\u52A8\u8865\u56DE", n32 === null && cleared.owner.length === 0, n32);
+    }
+    {
+      const fields = [uf2("owner", { defaultToCurrentUser: true, defaultValue: [{ id: "ou_default" }] })];
+      const done = /* @__PURE__ */ new Set();
+      const n11 = applyUserDefaults2(fields, { owner: [{ id: "ou_default" }] }, "ou_me", done, MAIN_KEY);
+      check("F30 \u5B57\u6BB5\u81EA\u5E26\u9ED8\u8BA4\u503C\u65F6\u5C0A\u91CD\u539F\u503C\uFF08\u4E0D\u88AB\u5F53\u524D\u7528\u6237\u8986\u76D6\uFF09", n11 === null, n11);
+      check("F30 \u81EA\u5E26\u503C\u7684\u5B57\u6BB5\u540C\u6837\u767B\u8BB0 done\uFF08\u4E4B\u540E\u4E0D\u518D\u63D2\u624B\uFF09", done.has("main:owner"), [...done]);
+    }
+    {
+      const fields = [uf2("owner", { defaultToCurrentUser: true })];
+      const done = /* @__PURE__ */ new Set();
+      check("F30 meId \u4E3A\u7A7A \u2192 \u4E0D\u586B\u4EFB\u4F55\u503C", applyUserDefaults2(fields, {}, "", done, MAIN_KEY) === null, null);
+      check("F30 meId \u4E3A\u7A7A\u65F6\u4E0D\u767B\u8BB0 done\uFF08\u4E0B\u6B21\u62FF\u5230\u8EAB\u4EFD\u4ECD\u53EF\u8865\u586B\uFF09", !done.has("main:owner"), [...done]);
+      const n11 = applyUserDefaults2(fields, {}, "ou_me", done, MAIN_KEY);
+      check("F30 \u62FF\u5230\u8EAB\u4EFD\u540E\u8865\u586B\u6210\u529F", !!n11 && n11.owner[0].id === "ou_me", n11);
+    }
+    {
+      const fields = [uf2("owner", { defaultToCurrentUser: true })];
+      const done = /* @__PURE__ */ new Set();
+      const rowKey = (idx) => (fid) => `sub:t1:${idx}:${fid}`;
+      const n02 = applyUserDefaults2(fields, {}, "ou_me", done, rowKey(0));
+      const n1 = applyUserDefaults2(fields, {}, "ou_me", done, rowKey(1));
+      check("F30 \u5B50\u8868\u7B2C 1 \u884C\u586B\u5165\u5F53\u524D\u7528\u6237", !!n02 && n02.owner[0].id === "ou_me", n02);
+      check("F30 \u5B50\u8868\u7B2C 2 \u884C\u4E5F\u72EC\u7ACB\u586B\u5165\uFF08key \u6309\u884C\u9694\u79BB\uFF09", !!n1 && n1.owner[0].id === "ou_me", n1);
+      check(
+        "F30 \u5B50\u8868\u4E24\u884C\u7684 done key \u4E92\u4E0D\u76F8\u540C",
+        done.has("sub:t1:0:owner") && done.has("sub:t1:1:owner"),
+        [...done]
+      );
+    }
+    {
+      const fields = [uf2("owner", { defaultToCurrentUser: true })];
+      const done = /* @__PURE__ */ new Set();
+      applyUserDefaults2(fields, {}, "ou_me", done, MAIN_KEY);
+      check("F30 \u63D0\u4EA4\u524D done \u975E\u7A7A", done.size > 0, [...done]);
+      resetUserDefaultDone2(done);
+      check("F30 \u63D0\u4EA4\u6210\u529F\u540E\u91CD\u7F6E done \u2192 \u4E0B\u4E00\u6761\u8BB0\u5F55\u53EF\u91CD\u65B0\u9ED8\u8BA4", done.size === 0, [...done]);
+      const n11 = applyUserDefaults2(fields, {}, "ou_me", done, MAIN_KEY);
+      check("F30 \u91CD\u7F6E\u540E\u91CD\u65B0\u586B\u5165\u5F53\u524D\u7528\u6237", !!n11 && n11.owner[0].id === "ou_me", n11);
+    }
+    {
+      const fs30 = await import("node:fs");
+      const read30 = (rel) => fs30.readFileSync(new URL(rel, import.meta.url), "utf8");
+      const cfgList = read30("../src/components/ConfigPanel/FieldConfigList.tsx");
+      check(
+        "F30 \u914D\u7F6E\u9762\u677F\u6709\u300C\u9ED8\u8BA4\u5F53\u524D\u7528\u6237\u300D\u5F00\u5173\uFF0C\u4E14\u4EC5\u5BF9\u4EBA\u5458\u5B57\u6BB5\u663E\u793A",
+        /defaultToCurrentUser/.test(cfgList) && /isUserField/.test(cfgList),
+        null
+      );
+      const cfgSize = read30("../src/services/configSize.ts");
+      check(
+        "F30 configSize KEEP_FIELDS \u767B\u8BB0\u4E86 defaultToCurrentUser\uFF08\u9632\u7626\u8EAB\u5265\u79BB\uFF09",
+        /'defaultToCurrentUser'/.test(cfgSize),
+        null
+      );
+      check(
+        "F30 configSize untrimField \u8FD8\u539F defaultToCurrentUser",
+        /defaultToCurrentUser:\s*stub\.defaultToCurrentUser/.test(cfgSize),
+        null
+      );
+      const formRenderer = read30("../src/components/FormRenderer/index.tsx");
+      check(
+        "F30 FormRenderer \u4EC5\u5728 formHasAnyUserDefault \u4E3A\u771F\u65F6\u53D6\u5F53\u524D\u7528\u6237\uFF08\u96F6\u7834\u574F\uFF09",
+        /formHasAnyUserDefault\(/.test(formRenderer) && /hasUserDefaultFeature/.test(formRenderer),
+        null
+      );
+      check(
+        "F30 FormRenderer \u63D0\u4EA4\u6210\u529F\u540E\u91CD\u7F6E\u9ED8\u8BA4\u503C\u6807\u8BB0\uFF08\u4E0B\u4E00\u6761\u8BB0\u5F55\u91CD\u65B0\u9ED8\u8BA4\uFF09",
+        /resetUserDefaultDone\(/.test(formRenderer) && /setSubmitSeq/.test(formRenderer),
+        null
+      );
+      const personSel = read30("../src/components/FormRenderer/PersonSelector.tsx");
+      check(
+        "F30 PersonSelector \u628A\u5F53\u524D\u7528\u6237\u6807\u7B7E\u663E\u793A\u4E3A\u300C\u6211\uFF08\u5F53\u524D\u7528\u6237\uFF09\u300D\uFF08\u5426\u5219\u53EA\u89C1\u88F8 ID\uFF09",
+        /我（当前用户）/.test(personSel),
+        null
+      );
+    }
+    {
+      const thin30 = serializeConfig({
+        forms: [
+          {
+            id: "f30",
+            version: "1.0.0",
+            formTitle: "t",
+            mainTable: {
+              tableId: "tblM30",
+              fields: [uf2("owner", { defaultToCurrentUser: true }), uf2("member")]
+            },
+            subTables: [],
+            conditionalRules: []
+          }
+        ]
+      });
+      const th2 = thin30.forms[0].mainTable.fields;
+      check("F30 \u5E8F\u5217\u5316\u540E defaultToCurrentUser \u4FDD\u7559", th2[0].defaultToCurrentUser === true, th2[0]);
+      check("F30 \u672A\u914D\u7F6E\u8BE5\u5F00\u5173\u7684\u5B57\u6BB5\u4E0D\u4EA7\u751F\u8BE5\u5C5E\u6027\uFF08\u4F53\u79EF\u4E0D\u53D8\uFF09", !("defaultToCurrentUser" in th2[1]), th2[1]);
+      const bytes = new (await import("node:buffer")).Buffer.from(JSON.stringify(thin30)).length;
+      check("F30 \u4F53\u79EF\u8FDC\u5C0F\u4E8E 10240 \u4E0A\u9650\uFF08\u5E03\u5C14\u503C\u4F53\u79EF\u6781\u5C0F\uFF09", bytes < 4096, { bytes });
     }
   }
   const failed = results.filter((r10) => !r10.pass);

@@ -39,6 +39,11 @@ export function PersonSelector({ value, onChange, disabled, tableId, fieldId, pr
   const [loading, setLoading] = useState(false);
   const [opened, setOpened] = useState(false);
   const meRef = useRef<BitableUser | null>(null);
+  /**
+   * 当前用户 open_id（state 而非仅 ref）：用于把「默认值＝当前用户」填进来的
+   * 无名人员标签显示成「我（当前用户）」，否则用户只会看到一个含义不明的「当前用户」。
+   */
+  const [meId, setMeId] = useState('');
 
   // 1) 打开即取「当前用户」（一次极轻调用，保证不开下拉也能选到自己）
   useEffect(() => {
@@ -46,8 +51,11 @@ export function PersonSelector({ value, onChange, disabled, tableId, fieldId, pr
     let alive = true;
     (async () => {
       try {
-        const meId = await getBridge().getUserId();
-        if (meId && alive) meRef.current = { id: meId, name: undefined };
+        const id = await getBridge().getUserId();
+        if (id && alive) {
+          meRef.current = { id, name: undefined };
+          setMeId(id);
+        }
       } catch {
         /* ignore */
       }
@@ -125,12 +133,19 @@ export function PersonSelector({ value, onChange, disabled, tableId, fieldId, pr
     const map = new Map<string, string>();
     // value 里的旧 name（如历史“我（当前用户）”）先写入
     (value || []).forEach((u) => {
-      if (u && u.id) map.set(u.id, u.name || u.enName || '当前用户');
+      if (u && u.id) map.set(u.id, u.name || u.enName || '');
     });
     // 候选中的最新/真实名称覆盖旧 name
-    candidates.forEach((c) => map.set(c.id, c._label));
+    candidates.forEach((c) => {
+      // 候选里对「当前用户」只登记了 id（SDK 无取姓名接口），不覆盖成 id 本身
+      if (c.id === meId && (!c.name && !c.enName)) return;
+      map.set(c.id, c._label);
+    });
+    // ★ 「默认值＝当前用户」填入的值只有 id（SDK 没有取姓名的接口）。
+    //   显示成「我（当前用户）」——明确告知这是本人，而不是一个含义不明的裸 ID。
+    if (meId && !map.get(meId)) map.set(meId, '我（当前用户）');
     return map;
-  }, [candidates, value]);
+  }, [candidates, value, meId]);
 
   const selectedIds = (value || []).map((u) => u.id);
 

@@ -161,6 +161,21 @@ export interface FieldConfig {
   unique?: UniqueConfig;
   /** 日期联动预填（仅日期字段，挂在被预填的目标字段上） */
   dateAutoFill?: DateAutoFillConfig;
+  /**
+   * ★ 人员字段「默认值＝当前用户」（仅 FieldType.User 生效）。
+   *
+   * 开启后，打开表单时该字段自动填入**当前填写者**，填写人可自行改选或删除；
+   * 一旦用户改过 / 主动清空，**不再回填**（默认值只在初始化阶段生效一次）。
+   *
+   * ⚠️ 不能复用 `defaultValue`：`initialValues` 是**同步**求值，而当前用户 ID 只能由
+   * `getBridge().getUserId()` **异步**取得。若把 userId 存进 defaultValue，存下的会是
+   * **配置者**的 open_id（配置发生在配置者会话中）→ 所有填写者都被默认成同一个人。
+   * 因此必须运行时动态取「打开者」身份。
+   *
+   * 查找引用 / 公式等只读字段的 fieldType 分别是 Lookup / Formula（≠ User），天然不生效。
+   * 旧配置无此字段 → 行为完全不变。
+   */
+  defaultToCurrentUser?: boolean;
 }
 
 /**

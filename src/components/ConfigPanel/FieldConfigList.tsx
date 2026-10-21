@@ -40,6 +40,15 @@ function isDateField(t: FieldType): boolean {
   return t === FieldType.DateTime;
 }
 
+/**
+ * 可配置「默认值＝当前用户」的字段类型：**仅人员字段**。
+ * 查找引用 / 公式的字段类型是 Lookup / Formula（≠ User），天然不在此列 ——
+ * 与「排除查找引用或公式字段」的要求一致，无需额外判断。
+ */
+function isUserField(t: FieldType): boolean {
+  return t === FieldType.User;
+}
+
 export function FieldConfigList({ fields, onChange, currentTableId, otherBlocks }: Props) {
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [overIndex, setOverIndex] = useState<number | null>(null);
@@ -181,7 +190,7 @@ export function FieldConfigList({ fields, onChange, currentTableId, otherBlocks 
               </label>
             </div>
             {/* 第三行：字段级高级配置 —— 唯一性校验 / 日期联动 / 引用选项 */}
-            {(canUniqueCheck(f.fieldType) || isDateField(f.fieldType) || isSelectField(f.fieldType)) && (
+            {(canUniqueCheck(f.fieldType) || isDateField(f.fieldType) || isSelectField(f.fieldType) || isUserField(f.fieldType)) && (
               <div className="cfg-field-optionref">
                 {canUniqueCheck(f.fieldType) && (
                   <label
@@ -237,6 +246,20 @@ export function FieldConfigList({ fields, onChange, currentTableId, otherBlocks 
                   >
                     {f.formRef ? '已启用表单取值' : '表单取值…'}
                   </Button>
+                )}
+                {isUserField(f.fieldType) && (
+                  <label
+                    className="f-toggle"
+                    title="打开表单时该人员字段自动填入当前填写者；填写人可自行改选或删除，改过后不再回填"
+                  >
+                    <Switch
+                      size="small"
+                      checked={!!f.defaultToCurrentUser}
+                      disabled={!f.visible}
+                      onChange={(v: boolean) => update(idx, { defaultToCurrentUser: v || undefined })}
+                    />
+                    默认当前用户
+                  </label>
                 )}
               </div>
             )}

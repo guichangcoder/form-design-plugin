@@ -41,6 +41,7 @@ const KEEP_FIELDS: ReadonlyArray<keyof FieldConfig> = [
   'formRef',       // ★ 用户决策（表单内跨区块取值：来源区块/字段，体积很小）
   'unique',        // 用户决策（唯一性校验开关与提示文案）
   'dateAutoFill',  // 用户决策（日期联动预填：来源字段/偏移，体积很小）
+  'defaultToCurrentUser', // ★ 用户决策（人员字段默认值＝当前用户，布尔值）
   // ⚠️ 新增任何字段级配置都必须登记到这里，否则保存时被剥离 → 发布后该配置静默丢失
   // 注：未来若加 order/width 等用户决策字段，记得也加进来
 ] as const;
@@ -77,6 +78,7 @@ function untrimField(stub: any): FieldConfig {
     formRef: stub.formRef,
     unique: stub.unique,
     dateAutoFill: stub.dateAutoFill,
+    defaultToCurrentUser: stub.defaultToCurrentUser,
   };
 }
 

@@ -3,9 +3,15 @@
  *
  * 规则：
  * - day  ：按自然日加减（setDate，自动处理跨月/跨年与闰年）
- * - month：按月加减，日溢出取目标月最后一天（1/31 +1 月 → 2/28 或 2/29）
- * - year ：等价于 ±(amount×12) 个月，同样处理 2/29 → 次年 2/28
+ * - month：**「期间末日」口径** —— 先按月加减（日溢出取目标月最后一天，
+ *          如 1/31 +1 月 → 2/28），**再回退一天**（2026-10-21 +1 月 → 2026-11-20）
+ * - year ：等价于 ±(amount×12) 个月，口径同 month（2026-10-21 +1 年 → 2027-10-20）
  * - direction=minus 时反向偏移；amount 取非负整数，非法值视为 0
+ *
+ * ★ 为什么月/年要「减一天」：这两个单位的业务含义是**有效期长度**。
+ *   「起止日 2026-10-21，有效期一年」⇒ 到期日是**最后一天** 2027-10-20，
+ *   而不是 2027-10-21（那是下一年度的第一天，等于多给了一天）。
+ *   `day` 不受影响：「+30 天」就是字面的第 30 天，不涉及期间末日语义。
  */
 import { DateAutoFillConfig } from '../types';
 
@@ -36,6 +42,27 @@ export function addMonths(base: Date, months: number): Date {
 }
 
 /**
+ * ★ 「N 个月 / N 年有效期」的末日：先按月偏移，再回退一天。
+ *
+ * 三种情形（都用 `addMonths` 先得到「名义日」）：
+ * 1. **未发生月末钳制** → 名义日再回退一天。
+ *    2026-10-21 +1 年 → 名义 2027-10-21 → **2027-10-20**（一年有效期的最后一天）。
+ * 2. **发生了月末钳制** → 名义日已经是目标月最后一天，**本身就是期间末日，不再回退**。
+ *    2024-02-29 +1 年 → 名义 2025-02-28（2025 无 2/29）→ 保持 **2025-02-28**；
+ *    2026-01-31 +1 月 → 名义 2026-02-28 → 保持 **2026-02-28**。
+ *    若在钳制后仍机械地减一天（→ 2/27），反而是**少给了一天**，与「有效期」语义相悖。
+ * 3. **偏移量为 0** → 原样返回（「+0 个月」就是当天，回退一天会变成昨天）。
+ */
+export function addMonthsEndOfTerm(base: Date, months: number): Date {
+  if (months === 0) return new Date(base.getTime());
+  const nominal = addMonths(base, months);
+  // 名义日的「日」与基准日不同 ⇒ 发生了月末钳制 ⇒ 名义日即期间末日
+  if (nominal.getDate() !== base.getDate()) return nominal;
+  nominal.setDate(nominal.getDate() - 1);
+  return nominal;
+}
+
+/**
  * 按配置计算偏移后的日期。
  * @param base 来源日期（无效时返回 null）
  */
@@ -54,12 +81,18 @@ export function applyDateOffset(base: Date | null | undefined, cfg?: DateAutoFil
     case 'day':
       return new Date(d.setDate(d.getDate() + n));
     case 'month':
-      return addMonths(d, n);
+      return addMonthsEndOfTerm(d, n);
     case 'year':
-      return addMonths(d, n * 12);
+      return addMonthsEndOfTerm(d, n * 12);
     default:
       return addMonths(d, 0);
   }
+}
+
+/** 把日期格式化为 YYYY-MM-DD（配置面板示例文案用，保证示例与实际计算一致） */
+export function formatYmd(d: Date | null | undefined): string {
+  if (!d || !Number.isFinite(d.getTime())) return '';
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
 /** 把表单态的日期值（Date / 毫秒时间戳 / 日期字符串）统一成 Date，非法返回 null */

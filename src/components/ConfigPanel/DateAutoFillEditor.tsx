@@ -1,8 +1,8 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Modal, Select, InputNumber, Typography, Switch } from '@douyinfe/semi-ui';
 import { FieldType } from '@lark-base-open/js-sdk';
 import { DateAutoFillConfig, FieldConfig } from '../../types';
-import { describeOffset } from '../../utils/dateCalc';
+import { describeOffset, applyDateOffset, formatYmd } from '../../utils/dateCalc';
 import { wouldCreateAutoFillCycle } from '../../utils/dateAutoFill';
 
 interface Props {
@@ -86,6 +86,19 @@ export function DateAutoFillEditor({ visible, field, siblingFields, onCancel, on
     sourceCandidates.find((f) => f.fieldId === cfg.sourceFieldId)?.fieldName ||
     '';
 
+  /**
+   * ★ 示例文案必须「算出来」而不是「拼出来」。
+   * 旧实现是 `${2026 + n}-03-01` 硬拼年份，既忽略「减一天」的口径，
+   * 又与实际 `applyDateOffset` 各写一套逻辑 —— 一旦算法调整，示例就会撒谎。
+   * 这里直接用示例日期 2026-03-01 喂给同一个 `applyDateOffset`，
+   * 示例 = 实际计算的真实结果，永远同步。
+   */
+  const sample = useMemo(() => {
+    const base = new Date(2026, 2, 1); // 2026-03-01
+    const result = applyDateOffset(base, { ...cfg, sourceFieldId: cfg.sourceFieldId || '__sample__' });
+    return { base: formatYmd(base), result: formatYmd(result) || '…' };
+  }, [cfg]);
+
   return (
     <Modal
       title={`日期联动预填 — ${field.label || field.fieldName}`}
@@ -167,15 +180,12 @@ export function DateAutoFillEditor({ visible, field, siblingFields, onCancel, on
             style={{ display: 'block', marginTop: 12, lineHeight: 1.7 }}
           >
             {sourceName
-              ? `填写「${sourceName}」后，本字段自动填入 ${describeOffset(cfg)} 的日期（如 2026-03-01 → ${
-                  cfg.unit === 'year'
-                    ? `${2026 + (cfg.direction === 'minus' ? -1 : 1) * Math.floor(cfg.amount || 0)}-03-01`
-                    : '…'
-                }）。`
+              ? `填写「${sourceName}」后，本字段自动填入 ${describeOffset(cfg)} 的日期（如 ${sample.base} → ${sample.result}）。`
               : '选择来源字段后可见预填示例。'}
             <br />
             用户仍可手动修改本字段；一旦手动改过，再改来源字段也不会覆盖用户输入。
-            按「月/年」偏移时，若目标月没有这一天（如 1/31 + 1 个月），自动取该月最后一天。
+            按「月/年」偏移时按「期间末日」计算（如 2026-10-21 + 1 年 → 2027-10-20，即一年有效期的最后一天）；
+            若目标月没有这一天（如 1/31 + 1 个月），自动取该月最后一天。
           </Typography.Text>
         </>
       ) : (

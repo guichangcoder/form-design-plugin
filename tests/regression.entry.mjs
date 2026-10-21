@@ -521,21 +521,33 @@ async function run() {
   {
     const plus1y = { sourceFieldId: 'fStart', direction: 'plus', amount: 1, unit: 'year' };
 
-    check('F15 +1 年（2026-03-01→2027-03-01）', fmt(applyDateOffset(d('2026-03-01'), plus1y)) === '2027-03-01');
+    check('F15 +1 年末日口径（2026-03-01→2027-02-28）', fmt(applyDateOffset(d('2026-03-01'), plus1y)) === '2027-02-28');
     check(
-      'F15 -1 年（2026-03-01→2025-03-01）',
-      fmt(applyDateOffset(d('2026-03-01'), { ...plus1y, direction: 'minus' })) === '2025-03-01'
+      'F15 用户原例 +1 年（2026-10-21→2027-10-20）',
+      fmt(applyDateOffset(d('2026-10-21'), plus1y)) === '2027-10-20'
     );
     check(
-      'F15 月偏移日溢出取月末（1/31 +1 月→2/28）',
+      'F15 -1 年末日口径（2026-03-01→2025-02-28）',
+      fmt(applyDateOffset(d('2026-03-01'), { ...plus1y, direction: 'minus' })) === '2025-02-28'
+    );
+    check(
+      'F15 +1 个月末日口径（2026-10-21→2026-11-20）',
+      fmt(applyDateOffset(d('2026-10-21'), { ...plus1y, amount: 1, unit: 'month' })) === '2026-11-20'
+    );
+    check(
+      'F15 月偏移日溢出取月末且不再减一天（1/31 +1 月→2/28）',
       fmt(applyDateOffset(d('2026-01-31'), { ...plus1y, amount: 1, unit: 'month' })) === '2026-02-28'
     );
     check(
-      'F15 闰年 2/29 +1 年→次年 2/28',
+      'F15 闰年 2/29 +1 年→次年 2/28（钳制后不重复减一天）',
       fmt(applyDateOffset(d('2024-02-29'), plus1y)) === '2025-02-28'
     );
     check(
-      'F15 按天偏移（+30 天）',
+      'F15 偏移量为 0 时原样返回（不减一天）',
+      fmt(applyDateOffset(d('2026-03-01'), { ...plus1y, amount: 0 })) === '2026-03-01'
+    );
+    check(
+      'F15 按天偏移不受末日口径影响（+30 天）',
       fmt(applyDateOffset(d('2026-01-01'), { ...plus1y, amount: 30, unit: 'day' })) === '2026-01-31'
     );
     check('F15 来源为空返回 null', applyDateOffset(null, plus1y) === null);
@@ -560,13 +572,13 @@ async function run() {
 
     const v0 = { fStart: d('2026-03-01') };
     const n1 = applyAutoFill(fields, v0, manual, auto, keyOf);
-    check('F15 来源有值时自动预填', n1 && fmt(n1.fEnd) === '2027-03-01', n1 && fmt(n1.fEnd));
+    check('F15 来源有值时自动预填', n1 && fmt(n1.fEnd) === '2027-02-28', n1 && fmt(n1.fEnd));
     check('F15 预填后标记为自动值', auto.has('main:fEnd'));
     check('F15 值已正确时不重复写入', applyAutoFill(fields, n1, manual, auto, keyOf) === null);
 
     const v2 = { ...n1, fStart: d('2027-05-06') };
     const n2 = applyAutoFill(fields, v2, manual, auto, keyOf);
-    check('F15 未手动改过时来源变化会重算', n2 && fmt(n2.fEnd) === '2028-05-06', n2 && fmt(n2.fEnd));
+    check('F15 未手动改过时来源变化会重算', n2 && fmt(n2.fEnd) === '2028-05-05', n2 && fmt(n2.fEnd));
 
     const userEdited = { ...n2, fEnd: d('2027-12-31') };
     markManualEdits(fields, n2, userEdited, manual, auto, keyOf);
@@ -582,7 +594,7 @@ async function run() {
     markManualEdits(fields, v3, cleared, manual, auto, keyOf);
     check('F15 清空目标字段撤销手动标记', !manual.has('main:fEnd'));
     const n4 = applyAutoFill(fields, cleared, manual, auto, keyOf);
-    check('F15 清空后重新自动预填', n4 && fmt(n4.fEnd) === '2030-01-01', n4 && fmt(n4.fEnd));
+    check('F15 清空后重新自动预填', n4 && fmt(n4.fEnd) === '2029-12-31', n4 && fmt(n4.fEnd));
 
     const noSrc = { ...n4, fStart: undefined };
     const n5 = applyAutoFill(fields, noSrc, manual, auto, keyOf);
@@ -647,9 +659,9 @@ async function run() {
       chainFields, { A: new Date('2026-03-01T00:00:00') }, new Set(), chainAuto, keyOf
     );
     check(
-      'F21 长链一次收敛到最终值',
-      r1 && fmt(r1.B) === '2027-03-01' && fmt(r1.C) === '2028-03-01'
-        && fmt(r1.D) === '2029-03-01' && fmt(r1.E) === '2030-03-01',
+      'F21 长链一次收敛到最终值（末日口径，逐环 -1 天）',
+      r1 && fmt(r1.B) === '2027-02-28' && fmt(r1.C) === '2028-02-27'
+        && fmt(r1.D) === '2029-02-26' && fmt(r1.E) === '2030-02-25',
       r1 && [fmt(r1.B), fmt(r1.C), fmt(r1.D), fmt(r1.E)]
     );
     check('F21 收敛后再求解返回 null（不重复写回）', resolveAutoFill(chainFields, r1, new Set(), chainAuto, keyOf) === null);
@@ -3345,6 +3357,196 @@ async function run() {
         apiCalls.table === 0 && apiCalls.field === 0 && apiCalls.record === 0,
         apiCalls
       );
+    }
+  }
+
+  /* ============================================================
+   * F30 人员字段「默认值＝当前用户」—— 2026-10-22 新增的**可选**功能
+   *
+   * 需求：表单中可录入的人员字段（排除查找引用/公式）可设「默认值＝当前用户」；
+   *      打开表单自动填入本人，填写人可自行改选/删除，**改过之后不再回填**。
+   *
+   * ★ 关键设计：
+   *   1) 不能复用 `defaultValue` —— 它在配置者会话里同步求值，存下的是**配置者**的
+   *      open_id，会把所有填写者默认成同一个人；必须运行时取「打开者」身份。
+   *   2) 仅 `fieldType === User` 生效：Lookup / Formula 的 fieldType 不是 User，
+   *      天然排除（符合「排除查找引用或公式字段」的要求）。
+   *   3) 一次性初始化语义：done 集合守门，用户改过/清空后绝不回填。
+   * ============================================================ */
+  {
+    const {
+      hasUserDefault,
+      listUserDefaultFields,
+      formHasAnyUserDefault,
+      applyUserDefaults,
+      resetUserDefaultDone,
+      isEmptyPersonValue,
+    } = await import('../src/utils/userDefault.ts');
+
+    const uf = (id, extra = {}) => ({
+      fieldId: id, fieldName: id, fieldType: FieldType.User, visible: true, required: false, ...extra,
+    });
+    const MAIN_KEY = (fid) => `main:${fid}`;
+
+    // 1) 识别：只有 User + 开关为真才算；查找引用/公式天然不成立
+    check('F30 人员字段 + 开关 → 识别为默认当前用户', hasUserDefault(uf('u1', { defaultToCurrentUser: true })) === true, null);
+    check('F30 人员字段未开开关 → 不识别（零变化）', hasUserDefault(uf('u1')) === false, null);
+    check('F30 开关为 false → 不识别', hasUserDefault(uf('u1', { defaultToCurrentUser: false })) === false, null);
+    check(
+      'F30 查找引用(Lookup)字段即使误配开关也不生效',
+      hasUserDefault({ fieldId: 'x', fieldName: 'x', fieldType: FieldType.Lookup, visible: true, required: false, defaultToCurrentUser: true }) === false,
+      null
+    );
+    check(
+      'F30 公式(Formula)字段即使误配开关也不生效',
+      hasUserDefault({ fieldId: 'x', fieldName: 'x', fieldType: FieldType.Formula, visible: true, required: false, defaultToCurrentUser: true }) === false,
+      null
+    );
+
+    // 2) 零破坏守门：无配置 → formHasAnyUserDefault=false（调用方据此完全不发请求）
+    check(
+      'F30 无任何配置 → formHasAnyUserDefault=false（不取 userId、零请求）',
+      formHasAnyUserDefault([uf('u1')], [{ fields: [uf('u2')] }]) === false,
+      null
+    );
+    check(
+      'F30 主表或子表任一配置 → formHasAnyUserDefault=true',
+      formHasAnyUserDefault([uf('u1', { defaultToCurrentUser: true })], [{ fields: [] }]) === true &&
+        formHasAnyUserDefault([uf('u1')], [{ fields: [uf('u2', { defaultToCurrentUser: true })] }]) === true,
+      null
+    );
+
+    // 3) 空值判定（人员字段值是 BitableUser[]）
+    check('F30 空值判定：undefined/null/[] 为空，[{id}] 非空',
+      isEmptyPersonValue(undefined) && isEmptyPersonValue(null) && isEmptyPersonValue([]) &&
+        !isEmptyPersonValue([{ id: 'ou_me' }]), null);
+
+    // 4) 核心：填入当前用户
+    {
+      const fields = [uf('owner', { defaultToCurrentUser: true }), uf('member')];
+      const done = new Set();
+      const v0 = {};
+      const n1 = applyUserDefaults(fields, v0, 'ou_me', done, MAIN_KEY);
+      check('F30 空字段 → 自动填入当前用户', !!n1 && JSON.stringify(n1.owner) === JSON.stringify([{ id: 'ou_me' }]), n1);
+      check('F30 未开开关的人员字段不动', n1 && n1.member === undefined, n1);
+      check('F30 原 values 未被就地修改（返回新对象）', v0.owner === undefined, v0);
+      check('F30 填过的字段登记进 done', done.has('main:owner'), [...done]);
+      check('F30 已填后再次调用返回 null（不重复写回，避免死循环）',
+        applyUserDefaults(fields, n1, 'ou_me', done, MAIN_KEY) === null, null);
+    }
+
+    // 5) 用户改过 → 不再回填（本功能的核心承诺）
+    {
+      const fields = [uf('owner', { defaultToCurrentUser: true })];
+      const done = new Set();
+      const n1 = applyUserDefaults(fields, {}, 'ou_me', done, MAIN_KEY);
+      // 用户改成别人
+      const edited = { ...n1, owner: [{ id: 'ou_other' }] };
+      const n2 = applyUserDefaults(fields, edited, 'ou_me', done, MAIN_KEY);
+      check('F30 用户改选他人后不再被覆盖回当前用户',
+        n2 === null && edited.owner[0].id === 'ou_other', n2);
+      // 用户清空
+      const cleared = { ...n1, owner: [] };
+      const n3 = applyUserDefaults(fields, cleared, 'ou_me', done, MAIN_KEY);
+      check('F30 用户主动清空后不再自动补回', n3 === null && cleared.owner.length === 0, n3);
+    }
+
+    // 6) 字段本就有值（配置了 defaultValue）→ 尊重它，不覆盖
+    {
+      const fields = [uf('owner', { defaultToCurrentUser: true, defaultValue: [{ id: 'ou_default' }] })];
+      const done = new Set();
+      const n = applyUserDefaults(fields, { owner: [{ id: 'ou_default' }] }, 'ou_me', done, MAIN_KEY);
+      check('F30 字段自带默认值时尊重原值（不被当前用户覆盖）', n === null, n);
+      check('F30 自带值的字段同样登记 done（之后不再插手）', done.has('main:owner'), [...done]);
+    }
+
+    // 7) 取不到当前用户 → 不填（且不登记 done，等拿到身份再补）
+    {
+      const fields = [uf('owner', { defaultToCurrentUser: true })];
+      const done = new Set();
+      check('F30 meId 为空 → 不填任何值', applyUserDefaults(fields, {}, '', done, MAIN_KEY) === null, null);
+      check('F30 meId 为空时不登记 done（下次拿到身份仍可补填）', !done.has('main:owner'), [...done]);
+      const n = applyUserDefaults(fields, {}, 'ou_me', done, MAIN_KEY);
+      check('F30 拿到身份后补填成功', !!n && n.owner[0].id === 'ou_me', n);
+    }
+
+    // 8) 子表逐行 key 隔离：一行已填不影响另一行
+    {
+      const fields = [uf('owner', { defaultToCurrentUser: true })];
+      const done = new Set();
+      const rowKey = (idx) => (fid) => `sub:t1:${idx}:${fid}`;
+      const n0 = applyUserDefaults(fields, {}, 'ou_me', done, rowKey(0));
+      const n1 = applyUserDefaults(fields, {}, 'ou_me', done, rowKey(1));
+      check('F30 子表第 1 行填入当前用户', !!n0 && n0.owner[0].id === 'ou_me', n0);
+      check('F30 子表第 2 行也独立填入（key 按行隔离）', !!n1 && n1.owner[0].id === 'ou_me', n1);
+      check('F30 子表两行的 done key 互不相同',
+        done.has('sub:t1:0:owner') && done.has('sub:t1:1:owner'), [...done]);
+    }
+
+    // 9) submit 后重置：新一条记录重新默认当前用户
+    {
+      const fields = [uf('owner', { defaultToCurrentUser: true })];
+      const done = new Set();
+      applyUserDefaults(fields, {}, 'ou_me', done, MAIN_KEY);
+      check('F30 提交前 done 非空', done.size > 0, [...done]);
+      resetUserDefaultDone(done);
+      check('F30 提交成功后重置 done → 下一条记录可重新默认', done.size === 0, [...done]);
+      const n = applyUserDefaults(fields, {}, 'ou_me', done, MAIN_KEY);
+      check('F30 重置后重新填入当前用户', !!n && n.owner[0].id === 'ou_me', n);
+    }
+
+    // 10) 静态保障：接线 + 持久化登记（防未来重构悄悄摘掉）
+    {
+      const fs30 = await import('node:fs');
+      const read30 = (rel) => fs30.readFileSync(new URL(rel, import.meta.url), 'utf8');
+
+      const cfgList = read30('../src/components/ConfigPanel/FieldConfigList.tsx');
+      check(
+        'F30 配置面板有「默认当前用户」开关，且仅对人员字段显示',
+        /defaultToCurrentUser/.test(cfgList) && /isUserField/.test(cfgList),
+        null
+      );
+      const cfgSize = read30('../src/services/configSize.ts');
+      check('F30 configSize KEEP_FIELDS 登记了 defaultToCurrentUser（防瘦身剥离）',
+        /'defaultToCurrentUser'/.test(cfgSize), null);
+      check('F30 configSize untrimField 还原 defaultToCurrentUser',
+        /defaultToCurrentUser:\s*stub\.defaultToCurrentUser/.test(cfgSize), null);
+      const formRenderer = read30('../src/components/FormRenderer/index.tsx');
+      check(
+        'F30 FormRenderer 仅在 formHasAnyUserDefault 为真时取当前用户（零破坏）',
+        /formHasAnyUserDefault\(/.test(formRenderer) && /hasUserDefaultFeature/.test(formRenderer),
+        null
+      );
+      check(
+        'F30 FormRenderer 提交成功后重置默认值标记（下一条记录重新默认）',
+        /resetUserDefaultDone\(/.test(formRenderer) && /setSubmitSeq/.test(formRenderer),
+        null
+      );
+      const personSel = read30('../src/components/FormRenderer/PersonSelector.tsx');
+      check('F30 PersonSelector 把当前用户标签显示为「我（当前用户）」（否则只见裸 ID）',
+        /我（当前用户）/.test(personSel), null);
+    }
+
+    // 11) 持久化往返：defaultToCurrentUser 瘦身后不丢
+    {
+      const thin30 = serializeConfig({
+        forms: [
+          {
+            id: 'f30', version: '1.0.0', formTitle: 't',
+            mainTable: {
+              tableId: 'tblM30',
+              fields: [uf('owner', { defaultToCurrentUser: true }), uf('member')],
+            },
+            subTables: [],
+            conditionalRules: [],
+          },
+        ],
+      });
+      const th = thin30.forms[0].mainTable.fields;
+      check('F30 序列化后 defaultToCurrentUser 保留', th[0].defaultToCurrentUser === true, th[0]);
+      check('F30 未配置该开关的字段不产生该属性（体积不变）', !('defaultToCurrentUser' in th[1]), th[1]);
+      const bytes = new (await import('node:buffer')).Buffer.from(JSON.stringify(thin30)).length;
+      check('F30 体积远小于 10240 上限（布尔值体积极小）', bytes < 4096, { bytes });
     }
   }
 
