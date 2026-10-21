@@ -29,3 +29,33 @@ export function stringifyCellValue(v: unknown): string {
   }
   return '';
 }
+
+/**
+ * ★ 把单元格拆成「选项文本」列表（引用选项专用）。
+ *
+ * 语义差异（关键）：
+ * - 多选字段单元格形如 `[{id,text:'A'},{id,text:'B'}]`，代表**两个独立选项**；
+ *   若用 `stringifyCellValue` 会 join 成 `"A B"`，被当成**一个**选项 →
+ *   引用到单选控件后无法单独选中。
+ * - 单选/其它字段 → 单个文本。
+ *
+ * 只在**显式知道是多选**（fieldType === 4）时才拆分：人员/附件/关联等也是数组，
+ * 但它们是「一个值由多项组成」，语义上不应拆成多个选项，故要求类型显式匹配，
+ * 旧配置（无类型）保持原行为，避免误拆。
+ *
+ * @param cell 单元格原始值
+ * @param fieldType 取值字段的 FieldType（缺省 = 不拆，按单值处理）
+ */
+export function extractOptionTexts(cell: unknown, fieldType?: number): string[] {
+  const isMultiSelect = fieldType === 4; // FieldType.MultiSelect
+  if (isMultiSelect && Array.isArray(cell)) {
+    const out: string[] = [];
+    for (const item of cell) {
+      const t = stringifyCellValue(item).trim();
+      if (t) out.push(t);
+    }
+    return out;
+  }
+  const t = stringifyCellValue(cell).trim();
+  return t ? [t] : [];
+}

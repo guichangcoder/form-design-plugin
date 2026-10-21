@@ -3,7 +3,7 @@ import { Select, Typography } from '@douyinfe/semi-ui';
 import { getBaseToken } from '../../services/appContext';
 import { FieldConfig, FormValues } from '../../types';
 import { hasOptionRef, conditionSpecOf } from '../../utils/optionRef';
-import { stringifyCellValue } from '../../utils/cellText';
+import { stringifyCellValue, extractOptionTexts } from '../../utils/cellText';
 import { classifySdkError, ClassifiedError } from '../../utils/permError';
 import {
   searchAllRows,
@@ -136,6 +136,7 @@ export function RefOptionSelect({
       return;
     }
     const h = enumerateRefOptions(ref.tableId, ref.fieldId, condSpecs, {
+      valueFieldType: ref.fieldType,
       onOption: (v) => {
         if (!alive) return;
         setValues((prev) => (prev.includes(v) ? prev : [...prev, v]));
@@ -272,8 +273,10 @@ export function RefOptionSelect({
     if (inSearch) {
       localHits.forEach(push);
       searchHits.forEach((r) => {
-        const t = stringifyCellValue((r.fields ?? {})[ref!.fieldId]).trim();
-        if (t.toLowerCase().includes(kw)) push(t); // 二次自证：确实含关键字
+        // ★ 多选取值字段：命中行可能含多个选项 → 逐个拆出，且每个都要自证含关键字
+        for (const t of extractOptionTexts((r.fields ?? {})[ref!.fieldId], ref!.fieldType)) {
+          if (t.toLowerCase().includes(kw)) push(t); // 二次自证：确实含关键字
+        }
       });
     } else {
       values.forEach(push);

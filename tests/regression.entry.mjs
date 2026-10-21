@@ -13,6 +13,7 @@ import { submitForm } from '../src/services/recordService';
 import { __setAppForTest as selectBaseForTest } from '../src/services/appContext';
 import { serializeConfig, hydrateConfig } from '../src/services/configSize';
 import { resolveRefOptions, getOptionRefDependencies, hasOptionRef, conditionSpecOf } from '../src/utils/optionRef';
+import { extractOptionTexts } from '../src/utils/cellText';
 import { applyDateOffset, isSameInstant, describeOffset, toDateOrNull } from '../src/utils/dateCalc';
 import { applyAutoFill, markManualEdits, resolveAutoFill, findAutoFillCycles, wouldCreateAutoFillCycle } from '../src/utils/dateAutoFill';
 import {
@@ -2148,6 +2149,48 @@ async function run() {
     check('F25 表格模式唯一性徽标走紧凑形态（避免撑宽列）', /uniqueCompact/.test(tableSrc), null);
     check('F25 行级隐藏单元格留空（不渲染控件）', /st-cell-hidden/.test(tableSrc), null);
 
+    // 2026-10-21 反馈修复：表头星号必须红色（全局类）+ 必填格橙色标记 + 文本压单行
+    check(
+      'F25 必填星号是全局类（不再局限 .field-row 后代，否则表头继承灰色）',
+      /^\.required-star\s*\{[^}]*color:\s*var\(--danger\)/m.test(cssSrc) &&
+        !/\.field-row\s+\.required-star\s*\{/.test(cssSrc),
+      null
+    );
+    check(
+      'F25 必填格橙色标记（淡橙底 + 橙左边条，用 inset shadow 不撑列宽）',
+      /\.sub-table\s+td\.st-cell--required\s*\{[^}]*background:\s*#fffbf5/.test(cssSrc) &&
+        /\.sub-table\s+td\.st-cell--required\s*\{[^}]*box-shadow:\s*inset\s+3px\s+0\s+0\s+0\s+#f59e0b/.test(cssSrc),
+      null
+    );
+    check(
+      'F25 必填格 hover 仍保持橙底可辨',
+      /tbody\s+tr:hover\s+td\.st-cell--required\s*\{[^}]*background:\s*#fff7ec/.test(cssSrc),
+      null
+    );
+    check(
+      'F25 错误态红底压倒必填橙（不叠加两种底色）',
+      /\.sub-table\s+td\.st-cell--error\s*\{[^}]*background:\s*#fff5f5/.test(cssSrc),
+      null
+    );
+    check(
+      'F25 表格必填格按「该行是否必填」判定（含行级规则）',
+      /const cellRequired = isFieldRequired\(field, sub\.tableId, cond, idx\)/.test(tableSrc) &&
+        /cellClass\s*\(?\s*\)?[\s\S]{0,160}'st-cell--required'/.test(tableSrc),
+      null
+    );
+    check('F25 表格向 FieldRenderer 传 compact（文本压单行）', /compact\b/.test(tableSrc) && /\scompact\s*$/m.test(tableSrc), null);
+
+    const fieldRendererSrc = fs2.readFileSync(
+      new URL('../src/components/FormRenderer/FieldRenderer.tsx', import.meta.url),
+      'utf8'
+    );
+    check(
+      'F25 文本字段在 compact 下改用单行 Input（默认仍是两行 TextArea）',
+      /case FieldType\.Text:\s*\/\/[^\n]*\n\s*if \(compact\) \{[\s\S]{0,300}<Input/.test(fieldRendererSrc) &&
+        /<TextArea[\s\S]{0,200}rows=\{2\}/.test(fieldRendererSrc),
+      null
+    );
+
     const subFormSrc = fs2.readFileSync(
       new URL('../src/components/FormRenderer/SubForm.tsx', import.meta.url),
       'utf8'
@@ -2175,6 +2218,336 @@ async function run() {
       /layout:\s*'vertical'/.test(subCfgSrc) && /layout:\s*'table'/.test(subCfgSrc),
       null
     );
+  }
+
+  /* ============================================================
+   * F26 条件穷举「假空」兜底（2026-10-21 用户反馈修复）
+   *
+   * 症状：大数据量源表 + 选了上级字段后，子级下拉显示
+   *       「已按条件穷举全部 0 个选项」（灰字），选项根本不出现。
+   *
+   * 根因：`probeOptionExists` 拿到 0 条记录时返回 {exists:false, effective:true}
+   *      （注释「无命中，无从证伪」）→ 当宿主对 typed 条件（is + fieldType）
+   *      **稳定返回 0 条**（本项目已知的「假空」坑）时，逐项探测全 miss 被当成
+   *      「该条件下确实无选项」+「过滤有效」→ 返回 complete:true, values:[]。
+   *      而 `loadRowsByConditions` 有「精确→宽松→本地扫描」三层兜底，
+   *      探测路径**一层都没有** —— 这就是「小数据量能用、大数据量不行」的分界。
+   *
+   * 修复：① 探测全 miss 时做**宽松复核**（去 fieldType、统一 contains）；
+   *      ② 两级皆空仍不声称可信（error='probe-all-miss'）→ 统一入口回退扫描确认。
+   * ============================================================ */
+  {
+    const VAL = 'fldModule26';
+    const COND = 'fldLine26';
+    const MODULES = ['模组一', '模组二', '模组三'];
+
+    /** 造 mock：emptyWhenFiltered=true 模拟宿主「带 filter 一律返回 0 条」的假空 */
+    function makeFakeEmptyBase({ emptyWhenFiltered = true, valueType = FieldType.SingleSelect } = {}) {
+      const rows = [];
+      for (let i = 0; i < 20000; i += 1) {
+        rows.push({ recordId: `a${i}`, fields: { [COND]: '企企云', [VAL]: MODULES[i % 3] } });
+      }
+      for (let i = 0; i < 10000; i += 1) {
+        rows.push({ recordId: `b${i}`, fields: { [COND]: '产品B', [VAL]: '模组X' } });
+      }
+      const table = {
+        getFieldMetaList: async () => [
+          {
+            id: VAL,
+            name: '模组名称',
+            type: valueType,
+            property: { options: MODULES.map((n, i) => ({ id: `m${i}`, name: n })) },
+          },
+          { id: COND, name: '产品线', type: FieldType.SingleSelect, property: { options: [] } },
+        ],
+        getRecordsByPage: async ({ filter, pageSize, pageToken }) => {
+          let all = rows;
+          if (filter) {
+            if (emptyWhenFiltered) {
+              all = []; // ★ 假空：typed 条件被宿主误解析 → 稳定 0 条
+            } else {
+              for (const c of (filter.conditions ?? [])) {
+                all = all.filter((r) => String((r.fields ?? {})[c.fieldId] ?? '') === String(c.value));
+              }
+            }
+          }
+          const start = pageToken === undefined ? 0 : Number(pageToken);
+          const n = pageSize ?? 200;
+          const slice = all.slice(start, start + n);
+          const next = start + n;
+          return {
+            records: slice,
+            total: all.length,
+            hasMore: next < all.length,
+            pageToken: next < all.length ? String(next) : undefined,
+          };
+        },
+      };
+      return { base: { getTableById: async () => table, getTableMetaList: async () => [{ id: 'tblBig26' }] } };
+    }
+
+    const SPEC = [{ fieldId: COND, text: '企企云', fieldType: FieldType.SingleSelect }];
+
+    // 1) 探测路径：假空时**不得**声称「穷举完成且 0 选项」（这正是用户看到的灰字）
+    {
+      const { base } = makeFakeEmptyBase({ emptyWhenFiltered: true });
+      selectBaseForTest({ base });
+      invalidateTableRecords();
+      const r = await enumerateOptionsByProbe('tblBig26', VAL, SPEC).promise;
+      check(
+        'F26 假空时探测路径不伪造「complete=true 且 0 选项」（用户看到的灰字根因）',
+        !(r.complete === true && r.values.length === 0),
+        { complete: r.complete, values: r.values, error: r.error }
+      );
+    }
+
+    // 2) ★ 统一入口：假空时必须回退扫描、拿到本该有的全部选项
+    {
+      const { base } = makeFakeEmptyBase({ emptyWhenFiltered: true });
+      selectBaseForTest({ base });
+      invalidateTableRecords();
+      const r = await enumerateRefOptions('tblBig26', VAL, SPEC, {}).promise;
+      check(
+        'F26 假空时统一入口回退扫描并取到全部 3 个模组（大数据量选项不再为空）',
+        r.values.join(',') === MODULES.join(',') && r.complete === true,
+        { values: r.values, source: r.source, complete: r.complete }
+      );
+    }
+
+    // 3) 对照：宿主 filter 正常时探测路径仍走通（未被兜底逻辑破坏）
+    {
+      const { base } = makeFakeEmptyBase({ emptyWhenFiltered: false });
+      selectBaseForTest({ base });
+      invalidateTableRecords();
+      const r = await enumerateOptionsByProbe('tblBig26', VAL, SPEC).promise;
+      check(
+        'F26 filter 正常时仍走探测路径且结果正确（兜底不干扰快路径）',
+        r.values.join(',') === MODULES.join(',') && r.source === 'probe' && r.complete === true,
+        { values: r.values, source: r.source }
+      );
+    }
+
+    // 4) 宽松复核：typed 条件被误解析、但宽松（contains）条件可用时，采用复核结果
+    {
+      const VAL2 = 'fldModule26b';
+      const table = {
+        getFieldMetaList: async () => [
+          {
+            id: VAL2,
+            name: '模组',
+            type: FieldType.SingleSelect,
+            property: { options: MODULES.map((n, i) => ({ id: `n${i}`, name: n })) },
+          },
+          { id: COND, name: '产品线', type: FieldType.SingleSelect, property: { options: [] } },
+        ],
+        getRecordsByPage: async ({ filter, pageSize }) => {
+          const conds = filter?.conditions ?? [];
+          // ★ 只认「去掉了 fieldType 的 contains 条件」；带 fieldType 的 is 条件一律返回 0（误解析）
+          const typed = conds.some((c) => c.fieldType !== undefined);
+          if (typed) return { records: [], total: 0, hasMore: false };
+          const want = conds.filter((c) => c.operator === 'contains').map((c) => String(c.value));
+          // 值字段 contains + 条件字段 contains 都命中才返回
+          const hitVal = want[want.length - 1];
+          const hitCond = want[0];
+          if (hitVal && MODULES.includes(hitVal) && hitCond === '企企云') {
+            return {
+              records: [{ recordId: 'r1', fields: { [COND]: '企企云', [VAL2]: hitVal } }],
+              total: 1,
+              hasMore: false,
+            };
+          }
+          return { records: [], total: 0, hasMore: false };
+        },
+      };
+      selectBaseForTest({ base: { getTableById: async () => table, getTableMetaList: async () => [{ id: 'tbl26b' }] } });
+      invalidateTableRecords();
+      const r = await enumerateOptionsByProbe('tbl26b', VAL2, SPEC).promise;
+      check(
+        'F26 typed 条件被误解析时宽松复核兜住（不判假空）',
+        r.values.length === MODULES.length && r.complete === true,
+        { values: r.values, complete: r.complete, error: r.error }
+      );
+    }
+
+    // 5) 条件字段类型未记录（旧配置）时，多选条件也按「含该选项」判定（否则整表被筛空）
+    {
+      const PROV_M = 'fldProvM';
+      const CITY_M = 'fldCityM';
+      const src = await (async () => {
+        const rows = [
+          { recordId: 'x1', fields: { [PROV_M]: [{ text: '浙江省' }, { text: '江苏省' }], [CITY_M]: '杭州' } },
+          { recordId: 'x2', fields: { [PROV_M]: [{ text: '江苏省' }], [CITY_M]: '南京' } },
+        ];
+        const table = {
+          getFieldMetaList: async () => [{ id: CITY_M, name: '市', type: FieldType.Text }],
+          getRecordsByPage: async ({ pageToken }) => {
+            const start = pageToken === undefined ? 0 : Number(pageToken);
+            const slice = rows.slice(start, start + 200);
+            return { records: slice, total: rows.length, hasMore: false };
+          },
+        };
+        selectBaseForTest({ base: { getTableById: async () => table, getTableMetaList: async () => [{ id: 'tblM' }] } });
+        invalidateTableRecords();
+        // 条件字段多选但 sourceFieldType 未记录（undefined）
+        return await enumerateRefOptions('tblM', CITY_M, [{ fieldId: PROV_M, text: '浙江省' }]).promise;
+      })();
+      check(
+        'F26 多选条件字段类型未记录时仍按「含该选项」判定（不整表筛空）',
+        src.values.join(',') === '杭州',
+        { values: src.values }
+      );
+    }
+  }
+
+  /* ============================================================
+   * F27 引用的「多选取值字段」拆分为独立单选项（2026-10-21 用户需求 2）
+   *
+   * 需求：引用的取值字段是**多选**时，也要能被识别，并引用成为**单选**的选项。
+   * 症状（修复前）：多选单元格 [{text:'A'},{text:'B'}] 被 stringifyCellValue
+   *      join 成 "A B"，当成**一个**选项 → 引用到单选控件后无法单独选中。
+   * ============================================================ */
+  {
+    const VAL = 'fldMs27';
+    const COND = 'fldLine27';
+    const OPT = ['模组一', '模组二', '模组三'];
+
+    const rows = [];
+    for (let i = 0; i < 3000; i += 1) {
+      rows.push({
+        recordId: `m${i}`,
+        fields: {
+          [COND]: '企企云',
+          [VAL]: [{ text: OPT[i % 3] }, { text: OPT[(i + 1) % 3] }],
+        },
+      });
+    }
+    const table = {
+      getFieldMetaList: async () => [
+        {
+          id: VAL,
+          name: '模组名称',
+          type: FieldType.MultiSelect,
+          property: { options: OPT.map((n, i) => ({ id: `o${i}`, name: n })) },
+        },
+        { id: COND, name: '产品线', type: FieldType.SingleSelect, property: { options: [] } },
+      ],
+      getRecordsByPage: async ({ filter, pageSize, pageToken }) => {
+        // 无 filter 时返回全部（走扫描路径）；带 filter 时按 contains 语义
+        let all = rows;
+        if (filter) {
+          for (const c of (filter.conditions ?? [])) {
+            all = all.filter((r) => {
+              const raw = (r.fields ?? {})[c.fieldId];
+              const t = Array.isArray(raw)
+                ? raw.map((x) => x?.text ?? '').filter(Boolean).join(' ')
+                : String(raw ?? '');
+              return c.operator === 'contains' ? t.includes(String(c.value)) : t === String(c.value);
+            });
+          }
+        }
+        const start = pageToken === undefined ? 0 : Number(pageToken);
+        const n = pageSize ?? 200;
+        const slice = all.slice(start, start + n);
+        const next = start + n;
+        return {
+          records: slice,
+          total: all.length,
+          hasMore: next < all.length,
+          pageToken: next < all.length ? String(next) : undefined,
+        };
+      },
+    };
+    selectBaseForTest({ base: { getTableById: async () => table, getTableMetaList: async () => [{ id: 'tblMs27' }] } });
+    invalidateTableRecords();
+
+    // 1) extractOptionTexts：多选按类型拆分
+    check(
+      'F27 extractOptionTexts 多选单元格拆成多个独立选项（不 join）',
+      extractOptionTexts([{ text: 'A' }, { text: 'B' }], FieldType.MultiSelect).join(',') === 'A,B',
+      null
+    );
+    check(
+      'F27 extractOptionTexts 单选/未给类型时不拆（保持单值语义）',
+      extractOptionTexts([{ text: 'A' }, { text: 'B' }], FieldType.SingleSelect).join(',') === 'A B' &&
+        extractOptionTexts('杭州').join(',') === '杭州',
+      null
+    );
+
+    // 2) 统一入口：多选取值字段 → 三个独立选项，且无合并串
+    {
+      const r = await enumerateRefOptions('tblMs27', VAL, [
+        { fieldId: COND, text: '企企云', fieldType: FieldType.SingleSelect },
+      ], { valueFieldType: FieldType.MultiSelect }).promise;
+      check(
+        'F27 多选取值字段穷举出 3 个独立选项（可被引用到单选控件）',
+        r.values.length === 3 && OPT.every((o) => r.values.includes(o)),
+        { values: r.values, source: r.source }
+      );
+      check(
+        'F27 不再产出「模组一 模组二」这类合并串',
+        !r.values.some((v) => /\s/.test(v)),
+        r.values
+      );
+    }
+
+    // 3) 扫描路径（模拟选项域不可用）：同样按类型拆分
+    {
+      invalidateTableRecords();
+      const r = await scanDistinctValues(
+        'tblMs27',
+        VAL,
+        [{ fieldId: COND, text: '企企云', fieldType: FieldType.SingleSelect }],
+        { valueFieldType: FieldType.MultiSelect }
+      ).promise;
+      check(
+        'F27 渐进扫描路径同样拆多选（不依赖选项域）',
+        r.values.length === 3 && !r.values.some((v) => /\s/.test(v)),
+        { values: r.values }
+      );
+    }
+
+    // 4) 本地兜底筛路径（resolveRefOptions）也拆多选
+    {
+      const vals = resolveRefOptions(
+        {
+          tableId: 'tblMs27',
+          fieldId: VAL,
+          fieldType: FieldType.MultiSelect,
+          conditions: [{ sourceFieldId: COND, valueSource: 'static', staticValue: '企企云', sourceFieldType: FieldType.SingleSelect }],
+        },
+        [
+          { fields: { [COND]: '企企云', [VAL]: [{ text: '模组一' }, { text: '模组二' }] } },
+          { fields: { [COND]: '产品B', [VAL]: [{ text: '模组九' }] } },
+        ],
+        {}
+      );
+      check(
+        'F27 本地兜底筛（resolveRefOptions）同样拆多选且按条件过滤',
+        vals.join(',') === '模组一,模组二',
+        vals
+      );
+    }
+
+    // 5) 配置侧必须记录取值字段类型（否则多选拆分无从判断）
+    {
+      const fs27 = await import('node:fs');
+      const optRefEditorSrc = fs27.readFileSync(
+        new URL('../src/components/ConfigPanel/OptionRefEditor.tsx', import.meta.url),
+        'utf8'
+      );
+      check(
+        'F27 配置侧记录取值字段类型（onSave 带 fieldType）',
+        /onSave\(\{\s*tableId,\s*fieldId,\s*fieldType/.test(optRefEditorSrc) &&
+          /setFieldType\(/.test(optRefEditorSrc),
+        null
+      );
+      const typesSrc = fs27.readFileSync(new URL('../src/types/index.ts', import.meta.url), 'utf8');
+      check(
+        'F27 OptionReference 增加 fieldType 字段（随配置持久化）',
+        /interface OptionReference[\s\S]{0,600}fieldType\?: FieldType/.test(typesSrc),
+        null
+      );
+    }
   }
 
   const failed = results.filter((r) => !r.pass);

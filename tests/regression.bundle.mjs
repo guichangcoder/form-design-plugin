@@ -30105,17 +30105,33 @@ function stringifyCellValue(v11) {
   }
   return "";
 }
+function extractOptionTexts(cell, fieldType) {
+  const isMultiSelect = fieldType === 4;
+  if (isMultiSelect && Array.isArray(cell)) {
+    const out = [];
+    for (const item of cell) {
+      const t10 = stringifyCellValue(item).trim();
+      if (t10) out.push(t10);
+    }
+    return out;
+  }
+  const t3 = stringifyCellValue(cell).trim();
+  return t3 ? [t3] : [];
+}
 
 // src/utils/optionRef.ts
 function refRecordMatches(ref, fields, formValues) {
   return (ref?.conditions ?? []).every((c11) => {
-    const cellText = stringifyCellValue(fields?.[c11.sourceFieldId]).trim();
+    const rawCell = fields?.[c11.sourceFieldId];
+    const cellText = stringifyCellValue(rawCell).trim();
     const expected = c11.valueSource === "field" ? stringifyCellValue(formValues?.[c11.formFieldId ?? ""]).trim() : (c11.staticValue ?? "").trim();
     if (!expected) return false;
-    if (c11.sourceFieldType === j5.MultiSelect) {
-      return cellText.split(/\s+/).filter(Boolean).includes(expected);
+    if (cellText === expected) return true;
+    if (c11.sourceFieldType === j5.MultiSelect || c11.sourceFieldType === void 0) {
+      const parts = stringifyCellValue(rawCell).trim().split(/\s+/).filter(Boolean);
+      return parts.includes(expected);
     }
-    return cellText === expected;
+    return false;
   });
 }
 function resolveRefOptions(ref, records, formValues) {
@@ -30124,10 +30140,12 @@ function resolveRefOptions(ref, records, formValues) {
   const seen = /* @__PURE__ */ new Set();
   for (const rec of records ?? []) {
     if (!refRecordMatches(ref, rec?.fields ?? {}, formValues)) continue;
-    const text = stringifyCellValue((rec?.fields ?? {})[ref.fieldId]).trim();
-    if (text && !seen.has(text)) {
-      seen.add(text);
-      out.push(text);
+    const texts = extractOptionTexts((rec?.fields ?? {})[ref.fieldId], ref.fieldType);
+    for (const text of texts) {
+      if (text && !seen.has(text)) {
+        seen.add(text);
+        out.push(text);
+      }
     }
   }
   return out;
@@ -30979,7 +30997,7 @@ function recordSatisfiesCondition(fields, c11) {
   const want = c11.text.trim();
   if (!want) return false;
   if (got === want) return true;
-  if (c11.fieldType === 4) {
+  if (c11.fieldType === 4 || c11.fieldType === void 0) {
     const parts = got.split(/\s+/).filter(Boolean);
     return parts.includes(want);
   }
@@ -31175,7 +31193,12 @@ function scanDistinctValues(tableId, fieldId, conditions, opts) {
   const key = taskKey(
     tableId,
     "cond",
-    JSON.stringify(["distinct", fieldId, conditions.map((c11) => [c11.fieldId, c11.fieldType, c11.text])])
+    JSON.stringify([
+      "distinct",
+      fieldId,
+      opts?.valueFieldType ?? 0,
+      conditions.map((c11) => [c11.fieldId, c11.fieldType, c11.text])
+    ])
   );
   const useCache = opts?.useCache !== false;
   if (useCache) {
@@ -31195,11 +31218,13 @@ function scanDistinctValues(tableId, fieldId, conditions, opts) {
     onProgress: opts?.onProgress,
     onRows: (rows) => {
       for (const r10 of rows) {
-        const t3 = stringifyCellValue(r10.fields[fieldId]).trim();
-        if (t3 && !seen.has(t3)) {
-          seen.add(t3);
-          values.push(t3);
-          opts?.onValue?.(t3);
+        const texts = extractOptionTexts(r10.fields[fieldId], opts?.valueFieldType);
+        for (const t3 of texts) {
+          if (t3 && !seen.has(t3)) {
+            seen.add(t3);
+            values.push(t3);
+            opts?.onValue?.(t3);
+          }
         }
       }
     }
@@ -31258,16 +31283,17 @@ function optionMatchCondition(valueFieldId, optionText, valueFieldType) {
   if (valueFieldType === 4) return { ...base, operator: "contains" };
   return { ...base, operator: "is" };
 }
-function probeOptionExists(tableId, valueFieldId, optionText, conditions, valueFieldType) {
+function probeOptionExists(tableId, valueFieldId, optionText, conditions, valueFieldType, opts) {
   return (async () => {
     try {
       const table = await getBase().getTableById(tableId);
       const useByPage = typeof table.getRecordsByPage === "function";
+      const loose = opts?.loose === true;
       const filter = {
         conjunction: "and",
         conditions: [
-          ...conditions.map(specToFilterCondition),
-          optionMatchCondition(valueFieldId, optionText, valueFieldType)
+          ...conditions.map(loose ? specToLooseCondition : specToFilterCondition),
+          loose ? { fieldId: valueFieldId, operator: "contains", value: optionText } : optionMatchCondition(valueFieldId, optionText, valueFieldType)
         ]
       };
       const params = { pageSize: 1, filter };
@@ -31279,8 +31305,8 @@ function probeOptionExists(tableId, valueFieldId, optionText, conditions, valueF
       const cell = stringifyCellValue(fields[valueFieldId]).trim();
       const want = optionText.trim();
       const valueOk = valueFieldType === 4 ? cell.split(/\s+/).filter(Boolean).includes(want) : cell === want;
-      const effective = condOk && valueOk;
-      return { exists: effective, effective };
+      const effective = loose ? condOk : condOk && valueOk;
+      return { exists: condOk && valueOk, effective };
     } catch (e11) {
       return { exists: false, effective: false, error: e11?.message ?? String(e11) };
     }
@@ -31292,6 +31318,7 @@ function enumerateOptionsByProbe(tableId, valueFieldId, conditions, opts) {
   let cancelled = false;
   const maxOptions = opts?.maxOptions ?? MAX_PROBE_OPTIONS;
   const concurrency = opts?.concurrency ?? PROBE_CONCURRENCY;
+  let valueFieldType = opts?.valueFieldType;
   const promise = (async () => {
     const empty = {
       values: [],
@@ -31310,6 +31337,15 @@ function enumerateOptionsByProbe(tableId, valueFieldId, conditions, opts) {
           return { ...empty, source: "metadata", error: mo3.error ?? "no-declared-options" };
         }
         declared = mo3.options;
+        if (opts?.valueFieldType === void 0 && typeof mo3.type === "number") {
+          valueFieldType = mo3.type;
+        }
+      } else if (opts?.valueFieldType === void 0) {
+        try {
+          const mo3 = await loadFieldSelectOptions(tableId, valueFieldId).promise;
+          if (typeof mo3.type === "number") valueFieldType = mo3.type;
+        } catch {
+        }
       }
       if (cancelled) return empty;
       if (!declared.length) return { ...empty, source: "metadata", error: "no-declared-options" };
@@ -31344,7 +31380,7 @@ function enumerateOptionsByProbe(tableId, valueFieldId, conditions, opts) {
             valueFieldId,
             cand,
             conditions,
-            opts?.valueFieldType
+            valueFieldType
           );
           probes += 1;
           opts?.onProgress?.(probes, candidates.length);
@@ -31373,6 +31409,55 @@ function enumerateOptionsByProbe(tableId, valueFieldId, conditions, opts) {
       if (probes >= candidates.length && scanned === 0 && firstError) {
         return { ...empty, probes, truncated, error: firstError };
       }
+      if (!cancelled && !aborted && found.every((v11) => !v11) && candidates.length > 0) {
+        let looseHit = 0;
+        const looseFound = candidates.map(() => null);
+        let lcursor = 0;
+        let lprobes = 0;
+        const lworker = async () => {
+          for (; ; ) {
+            if (cancelled || aborted) return;
+            const idx = lcursor;
+            lcursor += 1;
+            if (idx >= candidates.length) return;
+            const r10 = await probeOptionExists(
+              tableId,
+              valueFieldId,
+              candidates[idx],
+              conditions,
+              valueFieldType,
+              { loose: true }
+            );
+            lprobes += 1;
+            if (cancelled) return;
+            if (r10.exists) {
+              looseFound[idx] = candidates[idx];
+              looseHit += 1;
+              opts?.onOption?.(candidates[idx]);
+            }
+          }
+        };
+        const ln3 = Math.max(1, Math.min(concurrency, candidates.length));
+        await Promise.all(Array.from({ length: ln3 }, lworker));
+        if (looseHit > 0) {
+          console.warn(
+            "[tableRecords] \u7CBE\u786E\u6761\u4EF6\u63A2\u6D4B\u5168\u672A\u547D\u4E2D\u3001\u5BBD\u677E\u590D\u6838\u547D\u4E2D \u2192 \u91C7\u7528\u590D\u6838\u7ED3\u679C\uFF08\u6761\u4EF6\u683C\u5F0F\u517C\u5BB9\u56DE\u9000\uFF09"
+          );
+          return {
+            values: looseFound.filter((v11) => !!v11),
+            complete: !truncated,
+            truncated,
+            probes: probes + lprobes,
+            scanned: looseHit,
+            source: "probe",
+            filterEffective: true
+          };
+        }
+        if (!cancelled) {
+          console.warn("[tableRecords] \u6761\u4EF6\u63A2\u6D4B\u4E24\u7EA7\u7686\u7A7A\uFF0C\u4EA4\u7531\u8C03\u7528\u65B9\u56DE\u9000\u626B\u63CF\u786E\u8BA4");
+          return { ...empty, probes: probes + lprobes, truncated, error: "probe-all-miss" };
+        }
+      }
       return {
         values: found.filter((v11) => !!v11),
         complete: !truncated,
@@ -31396,12 +31481,23 @@ function enumerateRefOptions(tableId, valueFieldId, conditions, opts) {
   let cancelled = false;
   let inner = null;
   const promise = (async () => {
+    let mo3 = { options: [], found: false };
+    try {
+      const r10 = await loadFieldSelectOptions(tableId, valueFieldId).promise;
+      mo3 = r10;
+    } catch {
+    }
+    if (cancelled) {
+      return { values: [], complete: false, truncated: false, probes: 0, scanned: 0, source: "scan", filterEffective: false };
+    }
+    const valueFieldType = opts?.valueFieldType ?? mo3.type;
     const runScan = async () => {
       const h11 = scanDistinctValues(tableId, valueFieldId, conditions, {
         onValue: opts?.onOption,
         onProgress: opts?.onScanProgress,
         maxPages: opts?.maxScanPages ?? DISTINCT_SCAN_MAX_PAGES,
-        timeBudgetMs: opts?.scanTimeBudgetMs ?? DISTINCT_SCAN_TIME_BUDGET_MS
+        timeBudgetMs: opts?.scanTimeBudgetMs ?? DISTINCT_SCAN_TIME_BUDGET_MS,
+        valueFieldType
       });
       inner = h11;
       const r10 = await h11.promise;
@@ -31419,15 +31515,6 @@ function enumerateRefOptions(tableId, valueFieldId, conditions, opts) {
         scannedTotal: r10.total
       };
     };
-    let mo3 = { options: [], found: false };
-    try {
-      const r10 = await loadFieldSelectOptions(tableId, valueFieldId).promise;
-      mo3 = r10;
-    } catch {
-    }
-    if (cancelled) {
-      return { values: [], complete: false, truncated: false, probes: 0, scanned: 0, source: "scan", filterEffective: false };
-    }
     if (mo3.found && mo3.options.length > 0 && conditions.length === 0) {
       return {
         values: mo3.options.slice(),
@@ -31441,7 +31528,7 @@ function enumerateRefOptions(tableId, valueFieldId, conditions, opts) {
     }
     if (mo3.found && mo3.options.length > 0 && conditions.length > 0) {
       const h11 = enumerateOptionsByProbe(tableId, valueFieldId, conditions, {
-        valueFieldType: opts?.valueFieldType ?? mo3.type,
+        valueFieldType,
         declaredOptions: mo3.options,
         onOption: opts?.onOption,
         onProgress: opts?.onProgress,
@@ -33436,6 +33523,41 @@ async function run() {
     check("F25 \u8868\u683C min-width \u7531\u5217\u6A21\u578B\u8BA1\u7B97\uFF08\u975E\u786C\u7F16\u7801\uFF09", /style=\{\{\s*minWidth\s*\}\}/.test(tableSrc), null);
     check("F25 \u8868\u683C\u6A21\u5F0F\u552F\u4E00\u6027\u5FBD\u6807\u8D70\u7D27\u51D1\u5F62\u6001\uFF08\u907F\u514D\u6491\u5BBD\u5217\uFF09", /uniqueCompact/.test(tableSrc), null);
     check("F25 \u884C\u7EA7\u9690\u85CF\u5355\u5143\u683C\u7559\u7A7A\uFF08\u4E0D\u6E32\u67D3\u63A7\u4EF6\uFF09", /st-cell-hidden/.test(tableSrc), null);
+    check(
+      "F25 \u5FC5\u586B\u661F\u53F7\u662F\u5168\u5C40\u7C7B\uFF08\u4E0D\u518D\u5C40\u9650 .field-row \u540E\u4EE3\uFF0C\u5426\u5219\u8868\u5934\u7EE7\u627F\u7070\u8272\uFF09",
+      /^\.required-star\s*\{[^}]*color:\s*var\(--danger\)/m.test(cssSrc) && !/\.field-row\s+\.required-star\s*\{/.test(cssSrc),
+      null
+    );
+    check(
+      "F25 \u5FC5\u586B\u683C\u6A59\u8272\u6807\u8BB0\uFF08\u6DE1\u6A59\u5E95 + \u6A59\u5DE6\u8FB9\u6761\uFF0C\u7528 inset shadow \u4E0D\u6491\u5217\u5BBD\uFF09",
+      /\.sub-table\s+td\.st-cell--required\s*\{[^}]*background:\s*#fffbf5/.test(cssSrc) && /\.sub-table\s+td\.st-cell--required\s*\{[^}]*box-shadow:\s*inset\s+3px\s+0\s+0\s+0\s+#f59e0b/.test(cssSrc),
+      null
+    );
+    check(
+      "F25 \u5FC5\u586B\u683C hover \u4ECD\u4FDD\u6301\u6A59\u5E95\u53EF\u8FA8",
+      /tbody\s+tr:hover\s+td\.st-cell--required\s*\{[^}]*background:\s*#fff7ec/.test(cssSrc),
+      null
+    );
+    check(
+      "F25 \u9519\u8BEF\u6001\u7EA2\u5E95\u538B\u5012\u5FC5\u586B\u6A59\uFF08\u4E0D\u53E0\u52A0\u4E24\u79CD\u5E95\u8272\uFF09",
+      /\.sub-table\s+td\.st-cell--error\s*\{[^}]*background:\s*#fff5f5/.test(cssSrc),
+      null
+    );
+    check(
+      "F25 \u8868\u683C\u5FC5\u586B\u683C\u6309\u300C\u8BE5\u884C\u662F\u5426\u5FC5\u586B\u300D\u5224\u5B9A\uFF08\u542B\u884C\u7EA7\u89C4\u5219\uFF09",
+      /const cellRequired = isFieldRequired\(field, sub\.tableId, cond, idx\)/.test(tableSrc) && /cellClass\s*\(?\s*\)?[\s\S]{0,160}'st-cell--required'/.test(tableSrc),
+      null
+    );
+    check("F25 \u8868\u683C\u5411 FieldRenderer \u4F20 compact\uFF08\u6587\u672C\u538B\u5355\u884C\uFF09", /compact\b/.test(tableSrc) && /\scompact\s*$/m.test(tableSrc), null);
+    const fieldRendererSrc = fs2.readFileSync(
+      new URL("../src/components/FormRenderer/FieldRenderer.tsx", import.meta.url),
+      "utf8"
+    );
+    check(
+      "F25 \u6587\u672C\u5B57\u6BB5\u5728 compact \u4E0B\u6539\u7528\u5355\u884C Input\uFF08\u9ED8\u8BA4\u4ECD\u662F\u4E24\u884C TextArea\uFF09",
+      /case FieldType\.Text:\s*\/\/[^\n]*\n\s*if \(compact\) \{[\s\S]{0,300}<Input/.test(fieldRendererSrc) && /<TextArea[\s\S]{0,200}rows=\{2\}/.test(fieldRendererSrc),
+      null
+    );
     const subFormSrc = fs2.readFileSync(
       new URL("../src/components/FormRenderer/SubForm.tsx", import.meta.url),
       "utf8"
@@ -33461,6 +33583,280 @@ async function run() {
       /layout:\s*'vertical'/.test(subCfgSrc) && /layout:\s*'table'/.test(subCfgSrc),
       null
     );
+  }
+  {
+    let makeFakeEmptyBase2 = function({ emptyWhenFiltered = true, valueType = j5.SingleSelect } = {}) {
+      const rows = [];
+      for (let i3 = 0; i3 < 2e4; i3 += 1) {
+        rows.push({ recordId: `a${i3}`, fields: { [COND]: "\u4F01\u4F01\u4E91", [VAL]: MODULES[i3 % 3] } });
+      }
+      for (let i3 = 0; i3 < 1e4; i3 += 1) {
+        rows.push({ recordId: `b${i3}`, fields: { [COND]: "\u4EA7\u54C1B", [VAL]: "\u6A21\u7EC4X" } });
+      }
+      const table = {
+        getFieldMetaList: async () => [
+          {
+            id: VAL,
+            name: "\u6A21\u7EC4\u540D\u79F0",
+            type: valueType,
+            property: { options: MODULES.map((n11, i3) => ({ id: `m${i3}`, name: n11 })) }
+          },
+          { id: COND, name: "\u4EA7\u54C1\u7EBF", type: j5.SingleSelect, property: { options: [] } }
+        ],
+        getRecordsByPage: async ({ filter, pageSize, pageToken }) => {
+          let all = rows;
+          if (filter) {
+            if (emptyWhenFiltered) {
+              all = [];
+            } else {
+              for (const c11 of filter.conditions ?? []) {
+                all = all.filter((r10) => String((r10.fields ?? {})[c11.fieldId] ?? "") === String(c11.value));
+              }
+            }
+          }
+          const start = pageToken === void 0 ? 0 : Number(pageToken);
+          const n11 = pageSize ?? 200;
+          const slice = all.slice(start, start + n11);
+          const next = start + n11;
+          return {
+            records: slice,
+            total: all.length,
+            hasMore: next < all.length,
+            pageToken: next < all.length ? String(next) : void 0
+          };
+        }
+      };
+      return { base: { getTableById: async () => table, getTableMetaList: async () => [{ id: "tblBig26" }] } };
+    };
+    var makeFakeEmptyBase = makeFakeEmptyBase2;
+    const VAL = "fldModule26";
+    const COND = "fldLine26";
+    const MODULES = ["\u6A21\u7EC4\u4E00", "\u6A21\u7EC4\u4E8C", "\u6A21\u7EC4\u4E09"];
+    const SPEC = [{ fieldId: COND, text: "\u4F01\u4F01\u4E91", fieldType: j5.SingleSelect }];
+    {
+      const { base } = makeFakeEmptyBase2({ emptyWhenFiltered: true });
+      __setAppForTest({ base });
+      invalidateTableRecords();
+      const r10 = await enumerateOptionsByProbe("tblBig26", VAL, SPEC).promise;
+      check(
+        "F26 \u5047\u7A7A\u65F6\u63A2\u6D4B\u8DEF\u5F84\u4E0D\u4F2A\u9020\u300Ccomplete=true \u4E14 0 \u9009\u9879\u300D\uFF08\u7528\u6237\u770B\u5230\u7684\u7070\u5B57\u6839\u56E0\uFF09",
+        !(r10.complete === true && r10.values.length === 0),
+        { complete: r10.complete, values: r10.values, error: r10.error }
+      );
+    }
+    {
+      const { base } = makeFakeEmptyBase2({ emptyWhenFiltered: true });
+      __setAppForTest({ base });
+      invalidateTableRecords();
+      const r10 = await enumerateRefOptions("tblBig26", VAL, SPEC, {}).promise;
+      check(
+        "F26 \u5047\u7A7A\u65F6\u7EDF\u4E00\u5165\u53E3\u56DE\u9000\u626B\u63CF\u5E76\u53D6\u5230\u5168\u90E8 3 \u4E2A\u6A21\u7EC4\uFF08\u5927\u6570\u636E\u91CF\u9009\u9879\u4E0D\u518D\u4E3A\u7A7A\uFF09",
+        r10.values.join(",") === MODULES.join(",") && r10.complete === true,
+        { values: r10.values, source: r10.source, complete: r10.complete }
+      );
+    }
+    {
+      const { base } = makeFakeEmptyBase2({ emptyWhenFiltered: false });
+      __setAppForTest({ base });
+      invalidateTableRecords();
+      const r10 = await enumerateOptionsByProbe("tblBig26", VAL, SPEC).promise;
+      check(
+        "F26 filter \u6B63\u5E38\u65F6\u4ECD\u8D70\u63A2\u6D4B\u8DEF\u5F84\u4E14\u7ED3\u679C\u6B63\u786E\uFF08\u515C\u5E95\u4E0D\u5E72\u6270\u5FEB\u8DEF\u5F84\uFF09",
+        r10.values.join(",") === MODULES.join(",") && r10.source === "probe" && r10.complete === true,
+        { values: r10.values, source: r10.source }
+      );
+    }
+    {
+      const VAL2 = "fldModule26b";
+      const table = {
+        getFieldMetaList: async () => [
+          {
+            id: VAL2,
+            name: "\u6A21\u7EC4",
+            type: j5.SingleSelect,
+            property: { options: MODULES.map((n11, i3) => ({ id: `n${i3}`, name: n11 })) }
+          },
+          { id: COND, name: "\u4EA7\u54C1\u7EBF", type: j5.SingleSelect, property: { options: [] } }
+        ],
+        getRecordsByPage: async ({ filter, pageSize }) => {
+          const conds = filter?.conditions ?? [];
+          const typed = conds.some((c11) => c11.fieldType !== void 0);
+          if (typed) return { records: [], total: 0, hasMore: false };
+          const want = conds.filter((c11) => c11.operator === "contains").map((c11) => String(c11.value));
+          const hitVal = want[want.length - 1];
+          const hitCond = want[0];
+          if (hitVal && MODULES.includes(hitVal) && hitCond === "\u4F01\u4F01\u4E91") {
+            return {
+              records: [{ recordId: "r1", fields: { [COND]: "\u4F01\u4F01\u4E91", [VAL2]: hitVal } }],
+              total: 1,
+              hasMore: false
+            };
+          }
+          return { records: [], total: 0, hasMore: false };
+        }
+      };
+      __setAppForTest({ base: { getTableById: async () => table, getTableMetaList: async () => [{ id: "tbl26b" }] } });
+      invalidateTableRecords();
+      const r10 = await enumerateOptionsByProbe("tbl26b", VAL2, SPEC).promise;
+      check(
+        "F26 typed \u6761\u4EF6\u88AB\u8BEF\u89E3\u6790\u65F6\u5BBD\u677E\u590D\u6838\u515C\u4F4F\uFF08\u4E0D\u5224\u5047\u7A7A\uFF09",
+        r10.values.length === MODULES.length && r10.complete === true,
+        { values: r10.values, complete: r10.complete, error: r10.error }
+      );
+    }
+    {
+      const PROV_M = "fldProvM";
+      const CITY_M = "fldCityM";
+      const src = await (async () => {
+        const rows = [
+          { recordId: "x1", fields: { [PROV_M]: [{ text: "\u6D59\u6C5F\u7701" }, { text: "\u6C5F\u82CF\u7701" }], [CITY_M]: "\u676D\u5DDE" } },
+          { recordId: "x2", fields: { [PROV_M]: [{ text: "\u6C5F\u82CF\u7701" }], [CITY_M]: "\u5357\u4EAC" } }
+        ];
+        const table = {
+          getFieldMetaList: async () => [{ id: CITY_M, name: "\u5E02", type: j5.Text }],
+          getRecordsByPage: async ({ pageToken }) => {
+            const start = pageToken === void 0 ? 0 : Number(pageToken);
+            const slice = rows.slice(start, start + 200);
+            return { records: slice, total: rows.length, hasMore: false };
+          }
+        };
+        __setAppForTest({ base: { getTableById: async () => table, getTableMetaList: async () => [{ id: "tblM" }] } });
+        invalidateTableRecords();
+        return await enumerateRefOptions("tblM", CITY_M, [{ fieldId: PROV_M, text: "\u6D59\u6C5F\u7701" }]).promise;
+      })();
+      check(
+        "F26 \u591A\u9009\u6761\u4EF6\u5B57\u6BB5\u7C7B\u578B\u672A\u8BB0\u5F55\u65F6\u4ECD\u6309\u300C\u542B\u8BE5\u9009\u9879\u300D\u5224\u5B9A\uFF08\u4E0D\u6574\u8868\u7B5B\u7A7A\uFF09",
+        src.values.join(",") === "\u676D\u5DDE",
+        { values: src.values }
+      );
+    }
+  }
+  {
+    const VAL = "fldMs27";
+    const COND = "fldLine27";
+    const OPT = ["\u6A21\u7EC4\u4E00", "\u6A21\u7EC4\u4E8C", "\u6A21\u7EC4\u4E09"];
+    const rows = [];
+    for (let i3 = 0; i3 < 3e3; i3 += 1) {
+      rows.push({
+        recordId: `m${i3}`,
+        fields: {
+          [COND]: "\u4F01\u4F01\u4E91",
+          [VAL]: [{ text: OPT[i3 % 3] }, { text: OPT[(i3 + 1) % 3] }]
+        }
+      });
+    }
+    const table = {
+      getFieldMetaList: async () => [
+        {
+          id: VAL,
+          name: "\u6A21\u7EC4\u540D\u79F0",
+          type: j5.MultiSelect,
+          property: { options: OPT.map((n11, i3) => ({ id: `o${i3}`, name: n11 })) }
+        },
+        { id: COND, name: "\u4EA7\u54C1\u7EBF", type: j5.SingleSelect, property: { options: [] } }
+      ],
+      getRecordsByPage: async ({ filter, pageSize, pageToken }) => {
+        let all = rows;
+        if (filter) {
+          for (const c11 of filter.conditions ?? []) {
+            all = all.filter((r10) => {
+              const raw = (r10.fields ?? {})[c11.fieldId];
+              const t3 = Array.isArray(raw) ? raw.map((x11) => x11?.text ?? "").filter(Boolean).join(" ") : String(raw ?? "");
+              return c11.operator === "contains" ? t3.includes(String(c11.value)) : t3 === String(c11.value);
+            });
+          }
+        }
+        const start = pageToken === void 0 ? 0 : Number(pageToken);
+        const n11 = pageSize ?? 200;
+        const slice = all.slice(start, start + n11);
+        const next = start + n11;
+        return {
+          records: slice,
+          total: all.length,
+          hasMore: next < all.length,
+          pageToken: next < all.length ? String(next) : void 0
+        };
+      }
+    };
+    __setAppForTest({ base: { getTableById: async () => table, getTableMetaList: async () => [{ id: "tblMs27" }] } });
+    invalidateTableRecords();
+    check(
+      "F27 extractOptionTexts \u591A\u9009\u5355\u5143\u683C\u62C6\u6210\u591A\u4E2A\u72EC\u7ACB\u9009\u9879\uFF08\u4E0D join\uFF09",
+      extractOptionTexts([{ text: "A" }, { text: "B" }], j5.MultiSelect).join(",") === "A,B",
+      null
+    );
+    check(
+      "F27 extractOptionTexts \u5355\u9009/\u672A\u7ED9\u7C7B\u578B\u65F6\u4E0D\u62C6\uFF08\u4FDD\u6301\u5355\u503C\u8BED\u4E49\uFF09",
+      extractOptionTexts([{ text: "A" }, { text: "B" }], j5.SingleSelect).join(",") === "A B" && extractOptionTexts("\u676D\u5DDE").join(",") === "\u676D\u5DDE",
+      null
+    );
+    {
+      const r10 = await enumerateRefOptions("tblMs27", VAL, [
+        { fieldId: COND, text: "\u4F01\u4F01\u4E91", fieldType: j5.SingleSelect }
+      ], { valueFieldType: j5.MultiSelect }).promise;
+      check(
+        "F27 \u591A\u9009\u53D6\u503C\u5B57\u6BB5\u7A77\u4E3E\u51FA 3 \u4E2A\u72EC\u7ACB\u9009\u9879\uFF08\u53EF\u88AB\u5F15\u7528\u5230\u5355\u9009\u63A7\u4EF6\uFF09",
+        r10.values.length === 3 && OPT.every((o11) => r10.values.includes(o11)),
+        { values: r10.values, source: r10.source }
+      );
+      check(
+        "F27 \u4E0D\u518D\u4EA7\u51FA\u300C\u6A21\u7EC4\u4E00 \u6A21\u7EC4\u4E8C\u300D\u8FD9\u7C7B\u5408\u5E76\u4E32",
+        !r10.values.some((v11) => /\s/.test(v11)),
+        r10.values
+      );
+    }
+    {
+      invalidateTableRecords();
+      const r10 = await scanDistinctValues(
+        "tblMs27",
+        VAL,
+        [{ fieldId: COND, text: "\u4F01\u4F01\u4E91", fieldType: j5.SingleSelect }],
+        { valueFieldType: j5.MultiSelect }
+      ).promise;
+      check(
+        "F27 \u6E10\u8FDB\u626B\u63CF\u8DEF\u5F84\u540C\u6837\u62C6\u591A\u9009\uFF08\u4E0D\u4F9D\u8D56\u9009\u9879\u57DF\uFF09",
+        r10.values.length === 3 && !r10.values.some((v11) => /\s/.test(v11)),
+        { values: r10.values }
+      );
+    }
+    {
+      const vals = resolveRefOptions(
+        {
+          tableId: "tblMs27",
+          fieldId: VAL,
+          fieldType: j5.MultiSelect,
+          conditions: [{ sourceFieldId: COND, valueSource: "static", staticValue: "\u4F01\u4F01\u4E91", sourceFieldType: j5.SingleSelect }]
+        },
+        [
+          { fields: { [COND]: "\u4F01\u4F01\u4E91", [VAL]: [{ text: "\u6A21\u7EC4\u4E00" }, { text: "\u6A21\u7EC4\u4E8C" }] } },
+          { fields: { [COND]: "\u4EA7\u54C1B", [VAL]: [{ text: "\u6A21\u7EC4\u4E5D" }] } }
+        ],
+        {}
+      );
+      check(
+        "F27 \u672C\u5730\u515C\u5E95\u7B5B\uFF08resolveRefOptions\uFF09\u540C\u6837\u62C6\u591A\u9009\u4E14\u6309\u6761\u4EF6\u8FC7\u6EE4",
+        vals.join(",") === "\u6A21\u7EC4\u4E00,\u6A21\u7EC4\u4E8C",
+        vals
+      );
+    }
+    {
+      const fs27 = await import("node:fs");
+      const optRefEditorSrc = fs27.readFileSync(
+        new URL("../src/components/ConfigPanel/OptionRefEditor.tsx", import.meta.url),
+        "utf8"
+      );
+      check(
+        "F27 \u914D\u7F6E\u4FA7\u8BB0\u5F55\u53D6\u503C\u5B57\u6BB5\u7C7B\u578B\uFF08onSave \u5E26 fieldType\uFF09",
+        /onSave\(\{\s*tableId,\s*fieldId,\s*fieldType/.test(optRefEditorSrc) && /setFieldType\(/.test(optRefEditorSrc),
+        null
+      );
+      const typesSrc = fs27.readFileSync(new URL("../src/types/index.ts", import.meta.url), "utf8");
+      check(
+        "F27 OptionReference \u589E\u52A0 fieldType \u5B57\u6BB5\uFF08\u968F\u914D\u7F6E\u6301\u4E45\u5316\uFF09",
+        /interface OptionReference[\s\S]{0,600}fieldType\?: FieldType/.test(typesSrc),
+        null
+      );
+    }
   }
   const failed = results.filter((r10) => !r10.pass);
   log(`

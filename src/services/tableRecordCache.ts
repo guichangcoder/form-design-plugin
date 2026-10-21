@@ -14,7 +14,7 @@
  * 与多维表格自身的权限体系完全一致；插件层不做也不应做提权。
  */
 import { getBase } from './appContext';
-import { stringifyCellValue } from '../utils/cellText';
+import { stringifyCellValue, extractOptionTexts } from '../utils/cellText';
 
 /** 分页大小：飞书 SDK 单次上限就是 200，传更大值非法 */
 export const PAGE_SIZE = 200;
@@ -308,8 +308,11 @@ function recordSatisfiesCondition(fields: Record<string, unknown>, c: ConditionS
   const want = c.text.trim();
   if (!want) return false;
   if (got === want) return true;
-  // 多选单元格文本形如「A B」→ 用包含判断「含该选项」；单选同样安全
-  if (c.fieldType === 4 /* MultiSelect */) {
+  // 多选单元格文本形如「A B」→ 用包含判断「含该选项」。
+  // ★ 类型**未记录**（旧配置 / 多选条件字段未持久化 sourceFieldType）时同样走分词：
+  //   对单值等价（"企企云" → ["企企云"]），对多值正确 —— 否则多选条件字段会让
+  //   所有记录都被筛掉 → 假空（下拉显示「已按条件穷举全部 0 个选项」）。
+  if (c.fieldType === 4 /* MultiSelect */ || c.fieldType === undefined) {
     const parts = got.split(/\s+/).filter(Boolean);
     return parts.includes(want);
   }
@@ -629,12 +632,22 @@ export function scanDistinctValues(
     timeBudgetMs?: number;
     /** 复用已完成的扫描结果（默认 true） */
     useCache?: boolean;
+    /**
+     * ★ 取值字段的字段类型：多选（4）时单元格形如 `[{text:'A'},{text:'B'}]` 代表
+     * **两个独立选项**，需拆开输出（可被引用到单选控件）；缺省按单值处理。
+     */
+    valueFieldType?: number;
   }
 ): { key: string; cancel: () => void; promise: Promise<DistinctScanResult> } {
   const key = taskKey(
     tableId,
     'cond',
-    JSON.stringify(['distinct', fieldId, conditions.map((c) => [c.fieldId, c.fieldType, c.text])])
+    JSON.stringify([
+      'distinct',
+      fieldId,
+      opts?.valueFieldType ?? 0,
+      conditions.map((c) => [c.fieldId, c.fieldType, c.text]),
+    ])
   );
   const useCache = opts?.useCache !== false;
   if (useCache) {
@@ -654,11 +667,14 @@ export function scanDistinctValues(
     onProgress: opts?.onProgress,
     onRows: (rows) => {
       for (const r of rows) {
-        const t = stringifyCellValue(r.fields[fieldId]).trim();
-        if (t && !seen.has(t)) {
-          seen.add(t);
-          values.push(t);
-          opts?.onValue?.(t);
+        // ★ 多选取值字段：一个单元格可含多个选项 → 逐个拆出（否则会被 join 成一个假选项）
+        const texts = extractOptionTexts(r.fields[fieldId], opts?.valueFieldType);
+        for (const t of texts) {
+          if (t && !seen.has(t)) {
+            seen.add(t);
+            values.push(t);
+            opts?.onValue?.(t);
+          }
         }
       }
     },
@@ -791,17 +807,36 @@ export function probeOptionExists(
   valueFieldId: string,
   optionText: string,
   conditions: ConditionSpec[],
-  valueFieldType?: number
+  valueFieldType?: number,
+  opts?: {
+    /**
+     * 宽松模式（用于「精确条件全未命中」时的复核）：
+     * 条件与值字段匹配都**去掉 fieldType、统一用 contains**。
+     *
+     * 为什么需要：宿主可能因 typed 条件（`is` + fieldType）格式不被支持而**稳定返回 0 条**
+     * ——此时逐项探测全部 miss，若直接采信就会「假空」（UI 显示「已按条件穷举全部 0 个选项」）。
+     * 与 `loadRowsByConditions` 的第二级「宽松复核」同一思路。
+     *
+     * 此模式下「过滤是否生效」只由**条件字段**自证（condOk）：
+     * contains 会命中「值近似但不相等」的记录（如查 `A` 命中 `AB`），
+     * 若仍要求值严格相等会把这种正常近似判成「过滤未生效」而误触发回退。
+     * 值的精确匹配另由 `exists` 承担（始终严格），保证结论可信。
+     */
+    loose?: boolean;
+  }
 ): Promise<ProbeResult> {
   return (async (): Promise<ProbeResult> => {
     try {
       const table = await getBase().getTableById(tableId);
       const useByPage = typeof (table as any).getRecordsByPage === 'function';
+      const loose = opts?.loose === true;
       const filter = {
         conjunction: 'and',
         conditions: [
-          ...conditions.map(specToFilterCondition),
-          optionMatchCondition(valueFieldId, optionText, valueFieldType),
+          ...conditions.map(loose ? specToLooseCondition : specToFilterCondition),
+          loose
+            ? { fieldId: valueFieldId, operator: 'contains', value: optionText }
+            : optionMatchCondition(valueFieldId, optionText, valueFieldType),
         ],
       };
       const params: any = { pageSize: 1, filter };
@@ -818,8 +853,9 @@ export function probeOptionExists(
         valueFieldType === 4 /* MultiSelect */
           ? cell.split(/\s+/).filter(Boolean).includes(want)
           : cell === want;
-      const effective = condOk && valueOk;
-      return { exists: effective, effective };
+      // 严格模式：条件与取值都要自证；宽松模式：只自证条件字段（见 opts.loose 注释）
+      const effective = loose ? condOk : condOk && valueOk;
+      return { exists: condOk && valueOk, effective };
     } catch (e) {
       return { exists: false, effective: false, error: (e as Error)?.message ?? String(e) };
     }
@@ -887,6 +923,8 @@ export function enumerateOptionsByProbe(
   let cancelled = false;
   const maxOptions = opts?.maxOptions ?? MAX_PROBE_OPTIONS;
   const concurrency = opts?.concurrency ?? PROBE_CONCURRENCY;
+  /** 取值字段类型（调用方传入优先；缺失时从元信息补，多选的「值匹配」判定依赖它） */
+  let valueFieldType = opts?.valueFieldType;
 
   const promise = (async (): Promise<OptionEnumResult> => {
     const empty: OptionEnumResult = {
@@ -907,6 +945,18 @@ export function enumerateOptionsByProbe(
           return { ...empty, source: 'metadata', error: mo.error ?? 'no-declared-options' };
         }
         declared = mo.options;
+        // 顺带补上取值字段类型（调用方未传时），多选取值字段的「值匹配」判定依赖它
+        if (opts?.valueFieldType === undefined && typeof mo.type === 'number') {
+          valueFieldType = mo.type;
+        }
+      } else if (opts?.valueFieldType === undefined) {
+        // 已给定选项域但缺类型 → 仍读一次元信息补类型（元信息已缓存，代价很小）
+        try {
+          const mo = await loadFieldSelectOptions(tableId, valueFieldId).promise;
+          if (typeof mo.type === 'number') valueFieldType = mo.type;
+        } catch {
+          /* 读不到就按未记录处理（单值语义） */
+        }
       }
       if (cancelled) return empty;
       if (!declared.length) return { ...empty, source: 'metadata', error: 'no-declared-options' };
@@ -946,7 +996,7 @@ export function enumerateOptionsByProbe(
             valueFieldId,
             cand,
             conditions,
-            opts?.valueFieldType
+            valueFieldType
           );
           probes += 1;
           opts?.onProgress?.(probes, candidates.length);
@@ -979,6 +1029,65 @@ export function enumerateOptionsByProbe(
       if (probes >= candidates.length && scanned === 0 && firstError) {
         return { ...empty, probes, truncated, error: firstError };
       }
+
+      // ★ 全 miss 复核（与 loadRowsByConditions 的第二级「宽松复核」同思路）
+      //   症状：宿主对 typed 条件（is + fieldType）稳定返回 0 条 → 逐项探测全 miss
+      //        → 若直接采信，就会「假空」：complete=true 且 values=[]，
+      //          UI 显示「已按条件穷举全部 0 个选项」（正是用户报的现象）。
+      //   做法：给每个候选做一次**宽松探测**（去 fieldType、统一 contains）。
+      //       命中即说明「原条件被误解析」，采用复核结果；仍全空才认「确实无选项」。
+      if (!cancelled && !aborted && found.every((v) => !v) && candidates.length > 0) {
+        let looseHit = 0;
+        const looseFound: (string | null)[] = candidates.map(() => null);
+        let lcursor = 0;
+        let lprobes = 0;
+        const lworker = async () => {
+          for (;;) {
+            if (cancelled || aborted) return;
+            const idx = lcursor;
+            lcursor += 1;
+            if (idx >= candidates.length) return;
+            const r = await probeOptionExists(
+              tableId,
+              valueFieldId,
+              candidates[idx],
+              conditions,
+              valueFieldType,
+              { loose: true }
+            );
+            lprobes += 1;
+            if (cancelled) return;
+            if (r.exists) {
+              looseFound[idx] = candidates[idx];
+              looseHit += 1;
+              opts?.onOption?.(candidates[idx]);
+            }
+          }
+        };
+        const ln = Math.max(1, Math.min(concurrency, candidates.length));
+        await Promise.all(Array.from({ length: ln }, lworker));
+        if (looseHit > 0) {
+          console.warn(
+            '[tableRecords] 精确条件探测全未命中、宽松复核命中 → 采用复核结果（条件格式兼容回退）'
+          );
+          return {
+            values: looseFound.filter((v): v is string => !!v),
+            complete: !truncated,
+            truncated,
+            probes: probes + lprobes,
+            scanned: looseHit,
+            source: 'probe',
+            filterEffective: true,
+          };
+        }
+        // 宽松也全空 → 该条件下确实无记录（正常业务态）。仍按「未知」上报：
+        // 不声称探测可信，交由调用方在「0 结果」时回退扫描做最终确认（双保险）。
+        if (!cancelled) {
+          console.warn('[tableRecords] 条件探测两级皆空，交由调用方回退扫描确认');
+          return { ...empty, probes: probes + lprobes, truncated, error: 'probe-all-miss' };
+        }
+      }
+
       return {
         values: found.filter((v): v is string => !!v),
         complete: !truncated,
@@ -1011,7 +1120,7 @@ export function enumerateFieldValuesByColumn(
   tableId: string,
   fieldId: string,
   conditions: ConditionSpec[],
-  opts?: { onValue?: (v: string) => void; maxPages?: number }
+  opts?: { onValue?: (v: string) => void; maxPages?: number; valueFieldType?: number }
 ): { cancel: () => void; promise: Promise<OptionEnumResult> } {
   let cancelled = false;
   const maxPages = opts?.maxPages ?? COLUMN_MAX_PAGES;
@@ -1053,15 +1162,18 @@ export function enumerateFieldValuesByColumn(
         probes += 1;
         scanned += (res?.fieldValues ?? []).length;
         for (const fv of res?.fieldValues ?? []) {
-          const text = stringifyCellValue(fv?.value).trim();
+          // ★ 多选取值字段：单列返回值同样可能是数组 → 拆成多个独立选项
+          const texts = extractOptionTexts(fv?.value, opts?.valueFieldType);
           if (conditions.length) {
             // 单列返回不含条件字段 → 无法本地自证条件；只能凭 hasMore 判完整，
             // 故此处不对 filterEffective 作断言（保持 false，由调用方按 returns 处理）
           }
-          if (text && !seen.has(text)) {
-            seen.add(text);
-            values.push(text);
-            opts?.onValue?.(text);
+          for (const text of texts) {
+            if (text && !seen.has(text)) {
+              seen.add(text);
+              values.push(text);
+              opts?.onValue?.(text);
+            }
           }
         }
         guard += 1;
@@ -1138,6 +1250,21 @@ export function enumerateRefOptions(
   let inner: { cancel: () => void } | null = null;
 
   const promise = (async (): Promise<OptionEnumResult> => {
+    // 读字段元信息（可能失败 → 直接走扫描）
+    let mo: FieldOptionsResult = { options: [], found: false };
+    try {
+      const r = await loadFieldSelectOptions(tableId, valueFieldId).promise;
+      mo = r;
+    } catch {
+      /* 忽略：走扫描 */
+    }
+    if (cancelled) {
+      return { values: [], complete: false, truncated: false, probes: 0, scanned: 0, source: 'scan', filterEffective: false };
+    }
+    // ★ 取值字段类型：配置侧记录的值优先，缺失则用元信息里的类型。
+    //   多选（4）需要把单元格拆成多个独立选项（可被引用到单选控件）。
+    const valueFieldType = opts?.valueFieldType ?? mo.type;
+
     // 渐进全量扫描 = 最终兜底引擎（getRecordsByPage，必然可用）
     const runScan = async (): Promise<OptionEnumResult> => {
       const h = scanDistinctValues(tableId, valueFieldId, conditions, {
@@ -1145,6 +1272,7 @@ export function enumerateRefOptions(
         onProgress: opts?.onScanProgress,
         maxPages: opts?.maxScanPages ?? DISTINCT_SCAN_MAX_PAGES,
         timeBudgetMs: opts?.scanTimeBudgetMs ?? DISTINCT_SCAN_TIME_BUDGET_MS,
+        valueFieldType,
       });
       inner = h;
       const r = await h.promise;
@@ -1160,18 +1288,6 @@ export function enumerateRefOptions(
         scannedTotal: r.total,
       };
     };
-
-    // 读字段元信息（可能失败 → 直接走扫描）
-    let mo: FieldOptionsResult = { options: [], found: false };
-    try {
-      const r = await loadFieldSelectOptions(tableId, valueFieldId).promise;
-      mo = r;
-    } catch {
-      /* 忽略：走扫描 */
-    }
-    if (cancelled) {
-      return { values: [], complete: false, truncated: false, probes: 0, scanned: 0, source: 'scan', filterEffective: false };
-    }
 
     // ① 单选/多选 + 无条件 → 选项域即答案（更快，1 次请求）
     //    注意：选项域是「字段配置的候选集」，比「记录实际出现的取值」更大；
@@ -1191,7 +1307,7 @@ export function enumerateRefOptions(
     // ② 单选/多选 + 有条件 → 先试存在性探测（成本与表大小无关）
     if (mo.found && mo.options.length > 0 && conditions.length > 0) {
       const h = enumerateOptionsByProbe(tableId, valueFieldId, conditions, {
-        valueFieldType: opts?.valueFieldType ?? mo.type,
+        valueFieldType,
         declaredOptions: mo.options,
         onOption: opts?.onOption,
         onProgress: opts?.onProgress,

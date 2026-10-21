@@ -208,7 +208,10 @@ button {
   color: #374151;
 }
 
-.field-row .required-star {
+/* 必填星号：全局红色（字段标签、子表表头等任何位置通用）
+   ⚠️ 早期写成 `.field-row .required-star` 的后代选择器，导致子表表格表头的星号
+   不在 .field-row 内而继承 th 的灰色 —— 故提升为全局类。 */
+.required-star {
   color: var(--danger);
   margin-right: 4px;
   font-weight: 700;
@@ -498,6 +501,24 @@ button {
 /* 该单元格因行级条件被隐藏：留空（不加占位符号） */
 .sub-table .st-cell-hidden {
   background: #fafafa;
+}
+
+/* 必填格：淡橙底 + 3px 橙色左边条，与表头红色星号视觉呼应。
+   用 inset box-shadow 而非 border —— 用 border 会撑动列宽/行高，破坏表格对齐。 */
+.sub-table td.st-cell--required {
+  background: #fffbf5;
+  box-shadow: inset 3px 0 0 0 #f59e0b;
+}
+
+/* 悬停时保持橙色可辨（覆盖默认 hover 白底） */
+.sub-table tbody tr:hover td.st-cell--required {
+  background: #fff7ec;
+}
+
+/* 校验错误态：红底压倒必填橙（错误是更强的提示，不叠加） */
+.sub-table td.st-cell--error {
+  background: #fff5f5;
+  box-shadow: inset 3px 0 0 0 #f5222d;
 }
 
 /* 单元格内校验错误：红框 + 下方小字 */

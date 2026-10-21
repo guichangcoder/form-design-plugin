@@ -127,8 +127,16 @@ export const SubFormTable = React.memo(function SubFormTable({
                   const err = errors?.find(
                     (e) => e.tableId === sub.tableId && e.fieldId === c.fieldId && e.rowIndex === idx
                   );
+                  // 该格当前是否必填（含行级规则）。必填格标橙，与表头红星视觉呼应。
+                  const cellRequired = isFieldRequired(field, sub.tableId, cond, idx);
+                  // 错误态优先（红框+红字已是更强的提示），此时不再叠加橙色必填底
+                  const cellClass = err
+                    ? 'st-cell--error'
+                    : cellRequired
+                      ? 'st-cell--required'
+                      : undefined;
                   return (
-                    <td key={c.fieldId} className={err ? 'st-cell--error' : undefined}>
+                    <td key={c.fieldId} className={cellClass}>
                       <FieldRenderer
                         field={field}
                         tableId={sub.tableId}
@@ -145,14 +153,13 @@ export const SubFormTable = React.memo(function SubFormTable({
                         uniqueHint={uniqueState?.[`${idx}:${c.fieldId}`]?.detail}
                         preview={preview}
                         uniqueCompact
+                        compact
                       />
                       {err && <div className="st-cell-err">{err.message}</div>}
                       {/* 部分行必填：列头不给星（会给其他行造成误导），改在需要填的格子内提示 */}
-                      {!err &&
-                        c.partialRequired &&
-                        isFieldRequired(field, sub.tableId, cond, idx) && (
-                          <div className="st-cell-hint">本行必填</div>
-                        )}
+                      {!err && c.partialRequired && cellRequired && (
+                        <div className="st-cell-hint">本行必填</div>
+                      )}
                     </td>
                   );
                 })}

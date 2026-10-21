@@ -11,7 +11,7 @@
  */
 import { FieldType } from '@lark-base-open/js-sdk';
 import { FieldConfig, OptionRefCondition, OptionReference } from '../types';
-import { stringifyCellValue } from './cellText';
+import { stringifyCellValue, extractOptionTexts } from './cellText';
 
 /** 源表记录（只需要 fields 部分） */
 export interface SourceRecordLite {
@@ -34,17 +34,22 @@ export function refRecordMatches(
   formValues: Record<string, unknown>
 ): boolean {
   return (ref?.conditions ?? []).every((c) => {
-    const cellText = stringifyCellValue(fields?.[c.sourceFieldId]).trim();
+    const rawCell = fields?.[c.sourceFieldId];
+    const cellText = stringifyCellValue(rawCell).trim();
     const expected =
       c.valueSource === 'field'
         ? stringifyCellValue(formValues?.[c.formFieldId ?? '']).trim()
         : (c.staticValue ?? '').trim();
     // 固定值为空（缺省）或父级未填 → 视为不满足（配置不完整时不放出全部选项，避免误导）
     if (!expected) return false;
-    if (c.sourceFieldType === FieldType.MultiSelect) {
-      return cellText.split(/\s+/).filter(Boolean).includes(expected);
+    if (cellText === expected) return true;
+    // 多选条件字段 / 类型未记录（旧配置）→ 按「含该选项」判定（与 tableRecordCache 一致）。
+    //   否则多选条件会让所有记录都被筛掉 → 假空。
+    if (c.sourceFieldType === FieldType.MultiSelect || c.sourceFieldType === undefined) {
+      const parts = stringifyCellValue(rawCell).trim().split(/\s+/).filter(Boolean);
+      return parts.includes(expected);
     }
-    return cellText === expected;
+    return false;
   });
 }
 
@@ -58,10 +63,13 @@ export function resolveRefOptions(
   const seen = new Set<string>();
   for (const rec of records ?? []) {
     if (!refRecordMatches(ref, rec?.fields ?? {}, formValues)) continue;
-    const text = stringifyCellValue((rec?.fields ?? {})[ref.fieldId]).trim();
-    if (text && !seen.has(text)) {
-      seen.add(text);
-      out.push(text);
+    // ★ 取值字段是多选时，一个单元格含多个选项 → 逐个拆出（否则会 join 成一个假选项）
+    const texts = extractOptionTexts((rec?.fields ?? {})[ref.fieldId], ref.fieldType);
+    for (const text of texts) {
+      if (text && !seen.has(text)) {
+        seen.add(text);
+        out.push(text);
+      }
     }
   }
   return out;

@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Modal, Select, Input, Button, Typography, Switch } from '@douyinfe/semi-ui';
 import { IconPlus, IconDelete } from '@douyinfe/semi-icons';
 import { FieldConfig, OptionRefCondition, OptionReference } from '../../types';
+import { FieldType } from '@lark-base-open/js-sdk';
 import {
   FieldMetaLite,
   TableMetaLite,
@@ -32,6 +33,7 @@ export function OptionRefEditor({ visible, field, siblingFields, onCancel, onSav
   const [enabled, setEnabled] = useState(false);
   const [tableId, setTableId] = useState('');
   const [fieldId, setFieldId] = useState('');
+  const [fieldType, setFieldType] = useState<FieldType | undefined>(undefined);
   const [conditions, setConditions] = useState<OptionRefCondition[]>([]);
   const [tables, setTables] = useState<TableMetaLite[]>([]);
   const [sourceFields, setSourceFields] = useState<FieldMetaLite[]>([]);
@@ -44,6 +46,7 @@ export function OptionRefEditor({ visible, field, siblingFields, onCancel, onSav
     setEnabled(!!ref);
     setTableId(ref?.tableId ?? '');
     setFieldId(ref?.fieldId ?? '');
+    setFieldType(ref?.fieldType);
     setConditions(ref?.conditions ? ref.conditions.map((c) => ({ ...c })) : []);
     setSaveError('');
   }, [visible, field]);
@@ -107,7 +110,7 @@ export function OptionRefEditor({ visible, field, siblingFields, onCancel, onSav
         return;
       }
     }
-    onSave({ tableId, fieldId, conditions });
+    onSave({ tableId, fieldId, fieldType, conditions });
   };
 
   // 联动候选：同区块内除自身外的字段
@@ -139,6 +142,7 @@ export function OptionRefEditor({ visible, field, siblingFields, onCancel, onSav
               onChange={(v) => {
                 setTableId(v as string);
                 setFieldId('');
+                setFieldType(undefined);
                 setConditions([]);
               }}
               optionList={tables.map((t) => ({ value: t.id, label: t.name }))}
@@ -152,9 +156,19 @@ export function OptionRefEditor({ visible, field, siblingFields, onCancel, onSav
               placeholder={tableId ? '选择字段' : '请先选择源表'}
               disabled={!tableId}
               value={fieldId || undefined}
-              onChange={(v) => setFieldId(v as string)}
+              onChange={(v) => {
+                setFieldId(v as string);
+                // ★ 记录取值字段类型：多选需按单元格拆成多个独立选项（可引用到单选）
+                setFieldType(sourceFields.find((f) => f.id === (v as string))?.type);
+              }}
               optionList={sourceFields.map((f) => ({ value: f.id, label: f.name }))}
             />
+            {fieldType === FieldType.MultiSelect && (
+              <Typography.Text type="tertiary" size="small" style={{ display: 'block', marginTop: 4 }}>
+                ⓘ 取值字段是多选：单元格里的多个选项会**拆成多条独立选项**，
+                因此也能被引用到单选字段（不会把「A B」当成一个选项）。
+              </Typography.Text>
+            )}
           </div>
           <div style={{ marginBottom: 8 }}>
             <div className="optionref-label" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>

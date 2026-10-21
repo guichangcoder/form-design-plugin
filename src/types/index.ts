@@ -52,6 +52,13 @@ export interface OptionReference {
   tableId: string;
   /** 源表取值字段 ID（其记录值去重后作为选项文本） */
   fieldId: string;
+  /**
+   * ★ 源表「取值字段」的字段类型（配置时由元信息记录）。
+   * 用途：取值字段是**多选**时，单元格形如 `[{text:'A'},{text:'B'}]` 代表**两个独立选项**，
+   * 需拆成两条选项（可被引用到单选控件）；缺失类型则只能当作整串一个选项。
+   * 旧配置无此字段 → 兼容为「按单值处理」。
+   */
+  fieldType?: FieldType;
   /** 过滤条件（全部满足才纳入；空数组 = 不过滤，引用全部记录） */
   conditions: OptionRefCondition[];
 }

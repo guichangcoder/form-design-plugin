@@ -44,6 +44,11 @@ interface Props {
    * 表格列宽有限，原来的右侧 84px 竖排文字会把列撑爆；hover 时通过 title 显示原因。
    */
   uniqueCompact?: boolean;
+  /**
+   * 横向表格模式：控件紧凑化。
+   * 文本字段由两行 TextArea 压成单行 Input，使表格行高一致、视觉更整齐。
+   */
+  compact?: boolean;
 }
 
 const fullWidth: React.CSSProperties = { width: '100%' };
@@ -166,6 +171,7 @@ export function FieldRenderer({
   uniqueHint,
   preview,
   uniqueCompact,
+  compact,
 }: Props) {
   const options = (field.options ?? []).map((o) => ({ value: o.name, label: o.name }));
 
@@ -184,6 +190,19 @@ export function FieldRenderer({
   const control = ((): React.ReactNode => {
     switch (field.fieldType) {
       case FieldType.Text:
+        // 横向表格模式：压成单行输入（TextArea 两行会把表格行撑高、行高不齐）
+        if (compact) {
+          return (
+            <Input
+              style={fullWidth}
+              value={(value as string) ?? ''}
+              placeholder={field.placeholder}
+              disabled={disabled}
+              onChange={(v: any) => onChange(v)}
+              onBlur={onBlur}
+            />
+          );
+        }
         return (
           <TextArea
             style={fullWidth}
