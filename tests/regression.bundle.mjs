@@ -31003,6 +31003,12 @@ function recordSatisfiesCondition(fields, c11) {
   }
   return false;
 }
+function recordSatisfiesLoose(fields, c11) {
+  const got = stringifyCellValue(fields[c11.fieldId]).trim();
+  const want = c11.text.trim();
+  if (!want) return false;
+  return got.includes(want);
+}
 async function fetchRowsWithFilter(table, useByPage, conditions, toCondition, maxPages) {
   const rows = [];
   let token;
@@ -31121,6 +31127,118 @@ function loadRowsByConditions(tableId, conditions, opts) {
   }
   return { key, promise: p11 };
 }
+function queryDistinctByConditions(tableId, valueFieldId, conditions, opts) {
+  let cancelled = false;
+  const maxPages = opts?.maxPages ?? COND_MAX_PAGES;
+  const timeBudgetMs = opts?.timeBudgetMs ?? DISTINCT_SCAN_TIME_BUDGET_MS;
+  const declared = opts?.declaredOptions ?? [];
+  const seen = /* @__PURE__ */ new Set();
+  const startedAt = Date.now();
+  const promise = (async () => {
+    try {
+      const table = await getBase().getTableById(tableId);
+      const useByPage = typeof table.getRecordsByPage === "function";
+      const pull = async (toCond, selfTest) => {
+        const out = {
+          values: [],
+          complete: false,
+          truncated: false,
+          scanned: 0,
+          trusted: false
+        };
+        let token;
+        let guard = 0;
+        let truncated = false;
+        for (; ; ) {
+          if (cancelled) break;
+          const params = {
+            pageSize: PAGE_SIZE2,
+            filter: { conjunction: "and", conditions: conditions.map(toCond) },
+            ...token !== void 0 ? { pageToken: token } : {}
+          };
+          const res = useByPage ? await table.getRecordsByPage(params) : await table.getRecords(params);
+          if (cancelled) break;
+          if (typeof res?.total === "number") out.total = res.total;
+          const records = res?.records ?? [];
+          out.scanned += records.length;
+          const pageTexts = [];
+          let pageOk = true;
+          for (const rec of records) {
+            const fields = rec.fields ?? {};
+            if (!conditions.every((c11) => selfTest(fields, c11))) {
+              pageOk = false;
+              break;
+            }
+            for (const t3 of extractOptionTexts(fields[valueFieldId], opts?.valueFieldType)) {
+              if (t3) pageTexts.push(t3);
+            }
+          }
+          if (!pageOk) {
+            console.warn("[tableRecords] \u76F4\u63A5\u67E5\u8BE2\u8FD4\u56DE\u7684\u884C\u4E0D\u6EE1\u8DB3\u6761\u4EF6 \u2192 \u5224\u5B9A\u5BBF\u4E3B\u672A\u6309\u6761\u4EF6\u8FC7\u6EE4\uFF0C\u56DE\u9000\u626B\u63CF");
+            return { ...out, values: [], trusted: false, error: "filter-ineffective" };
+          }
+          for (const t3 of pageTexts) {
+            if (!seen.has(t3)) {
+              seen.add(t3);
+              opts?.onValue?.(t3);
+            }
+          }
+          opts?.onProgress?.(out.scanned, out.total);
+          if (declared.length > 0 && declared.every((o11) => seen.has(o11))) {
+            return { ...out, values: Array.from(seen), complete: true, truncated: false, trusted: true };
+          }
+          guard += 1;
+          const next = res?.hasMore ? res?.pageToken : void 0;
+          if (next === void 0 || next === token) break;
+          if (guard >= maxPages) {
+            truncated = true;
+            break;
+          }
+          if (Date.now() - startedAt > timeBudgetMs) {
+            truncated = true;
+            break;
+          }
+          token = next;
+        }
+        if (cancelled) {
+          return { ...out, values: Array.from(seen), complete: false, truncated: true, trusted: true };
+        }
+        return { ...out, values: Array.from(seen), complete: !truncated, truncated, trusted: true };
+      };
+      const strict = await pull(specToFilterCondition, recordSatisfiesCondition);
+      if (!strict.trusted) return strict;
+      if (strict.scanned === 0) {
+        const loose = await pull(specToLooseCondition, recordSatisfiesLoose);
+        if (loose.trusted && loose.scanned > 0) {
+          console.warn(
+            "[tableRecords] \u76F4\u63A5\u67E5\u8BE2\uFF1A\u7CBE\u786E\u6761\u4EF6 0 \u6761\u3001\u5BBD\u677E\u6761\u4EF6\u547D\u4E2D \u2192 \u91C7\u7528\u590D\u6838\u7ED3\u679C\uFF08\u6761\u4EF6\u683C\u5F0F\u517C\u5BB9\u56DE\u9000\uFF09"
+          );
+          return loose;
+        }
+        console.warn("[tableRecords] \u76F4\u63A5\u67E5\u8BE2\u4E24\u7EA7\u7686 0 \u6761\uFF0C\u4EA4\u7531\u8C03\u7528\u65B9\u56DE\u9000\u626B\u63CF\u786E\u8BA4");
+        return { ...strict, trusted: false, error: "query-empty" };
+      }
+      return strict;
+    } catch (e11) {
+      const err = e11?.message ?? String(e11);
+      console.warn(`[tableRecords] \u76F4\u63A5\u67E5\u8BE2\u7A77\u4E3E\u5931\u8D25\uFF08\u5C06\u56DE\u9000\u626B\u63CF\uFF09\uFF1A\u8868=${tableId} \u9519\u8BEF=${err}`);
+      return { values: [], complete: false, truncated: false, scanned: 0, trusted: false, error: err };
+    }
+  })();
+  const key = taskKey(
+    tableId,
+    "cond",
+    JSON.stringify([
+      "querydistinct",
+      valueFieldId,
+      opts?.valueFieldType ?? 0,
+      conditions.map((c11) => [c11.fieldId, c11.fieldType, c11.text])
+    ])
+  );
+  return { key, cancel: () => {
+    cancelled = true;
+  }, promise };
+}
 var LOCAL_SCAN_MAX_PAGES = 40;
 function scanRowsByConditionsLocal(tableId, conditions, opts) {
   const maxPages = opts?.maxPages ?? LOCAL_SCAN_MAX_PAGES;
@@ -31210,8 +31328,10 @@ function scanDistinctValues(tableId, fieldId, conditions, opts) {
       }, promise: cached };
     }
   }
+  const declared = (opts?.declaredOptions ?? []).filter(Boolean);
   const seen = /* @__PURE__ */ new Set();
   const values = [];
+  let stoppedEarly = false;
   const h11 = scanRowsByConditionsLocal(tableId, conditions, {
     maxPages: opts?.maxPages,
     timeBudgetMs: opts?.timeBudgetMs,
@@ -31227,13 +31347,18 @@ function scanDistinctValues(tableId, fieldId, conditions, opts) {
           }
         }
       }
+      if (declared.length > 0 && declared.every((o11) => seen.has(o11))) {
+        stoppedEarly = true;
+        h11.cancel();
+      }
     }
   });
   const promise = h11.done.then((r10) => {
+    const truncated = stoppedEarly ? false : r10.truncated;
     const out = {
       values,
-      complete: !r10.truncated,
-      truncated: r10.truncated,
+      complete: !truncated,
+      truncated,
       scanned: r10.scanned,
       total: r10.total
     };
@@ -31491,13 +31616,17 @@ function enumerateRefOptions(tableId, valueFieldId, conditions, opts) {
       return { values: [], complete: false, truncated: false, probes: 0, scanned: 0, source: "scan", filterEffective: false };
     }
     const valueFieldType = opts?.valueFieldType ?? mo3.type;
+    const engine = opts?.engine ?? "auto";
     const runScan = async () => {
       const h11 = scanDistinctValues(tableId, valueFieldId, conditions, {
         onValue: opts?.onOption,
         onProgress: opts?.onScanProgress,
         maxPages: opts?.maxScanPages ?? DISTINCT_SCAN_MAX_PAGES,
         timeBudgetMs: opts?.scanTimeBudgetMs ?? DISTINCT_SCAN_TIME_BUDGET_MS,
-        valueFieldType
+        valueFieldType,
+        // ★ 单选/多选有选项域 → 传给扫描引擎「找齐即停」：
+        //   假空回退扫描时，避免把整张大表白扫一遍（选项域小、命中集中在前面几页时尤其明显）
+        declaredOptions: mo3.found && mo3.options.length > 0 ? mo3.options : void 0
       });
       inner = h11;
       const r10 = await h11.promise;
@@ -31526,19 +31655,59 @@ function enumerateRefOptions(tableId, valueFieldId, conditions, opts) {
         filterEffective: true
       };
     }
-    if (mo3.found && mo3.options.length > 0 && conditions.length > 0) {
-      const h11 = enumerateOptionsByProbe(tableId, valueFieldId, conditions, {
+    if (conditions.length > 0 && engine !== "scan") {
+      if (engine === "probe" && mo3.found && mo3.options.length > 0) {
+        const hp2 = enumerateOptionsByProbe(tableId, valueFieldId, conditions, {
+          valueFieldType,
+          declaredOptions: mo3.options,
+          onOption: opts?.onOption,
+          onProgress: opts?.onProgress,
+          maxOptions: opts?.maxProbeOptions
+        });
+        inner = hp2;
+        const rp2 = await hp2.promise;
+        if (rp2.filterEffective && !rp2.error) return rp2;
+        console.warn("[tableRecords] \u5B58\u5728\u6027\u63A2\u6D4B\u4E0D\u53EF\u7528\uFF0C\u6539\u7528\u6E10\u8FDB\u5168\u91CF\u626B\u63CF");
+        if (cancelled) return rp2;
+        return await runScan();
+      }
+      const hq = queryDistinctByConditions(tableId, valueFieldId, conditions, {
         valueFieldType,
-        declaredOptions: mo3.options,
-        onOption: opts?.onOption,
-        onProgress: opts?.onProgress,
-        maxOptions: opts?.maxProbeOptions
+        declaredOptions: mo3.found ? mo3.options : void 0,
+        onValue: opts?.onOption,
+        // ★ 复用扫描进度回调：UI 底部「已扫描 N 条」在同一处渲染，直接查询也必须有进度
+        onProgress: opts?.onScanProgress,
+        maxPages: opts?.maxColumnPages,
+        timeBudgetMs: opts?.scanTimeBudgetMs
       });
-      inner = h11;
-      const r10 = await h11.promise;
-      if (r10.filterEffective && !r10.error) return r10;
-      console.warn("[tableRecords] \u5B58\u5728\u6027\u63A2\u6D4B\u4E0D\u53EF\u7528\uFF0C\u6539\u7528\u6E10\u8FDB\u5168\u91CF\u626B\u63CF");
-      if (cancelled) return r10;
+      inner = hq;
+      const rq = await hq.promise;
+      if (rq.trusted) {
+        return {
+          values: rq.values,
+          complete: rq.complete,
+          truncated: rq.truncated,
+          probes: 0,
+          scanned: rq.scanned,
+          source: "query",
+          filterEffective: true,
+          serverTotal: rq.total,
+          scannedTotal: rq.total
+        };
+      }
+      console.warn("[tableRecords] \u76F4\u63A5\u67E5\u8BE2\u4E0D\u53EF\u4FE1\uFF08\u8FC7\u6EE4\u672A\u751F\u6548 / \u4E24\u7EA7\u7A7A / \u51FA\u9519\uFF09\uFF0C\u6539\u7528\u6E10\u8FDB\u5168\u91CF\u626B\u63CF");
+      if (cancelled) {
+        return {
+          values: [],
+          complete: false,
+          truncated: false,
+          probes: 0,
+          scanned: 0,
+          source: "query",
+          filterEffective: false,
+          error: rq.error
+        };
+      }
       return await runScan();
     }
     return await runScan();
@@ -33056,9 +33225,9 @@ async function run() {
       invalidateTableRecords();
       const r10 = await enumerateRefOptions("tblBig", CITY3, [
         { fieldId: PROV3, text: "\u6D59", fieldType: j5.Text }
-      ]).promise;
+      ], { engine: "scan" }).promise;
       check(
-        "F22 \u65E0\u9009\u9879\u57DF \u2192 \u81EA\u52A8\u8D70\u6E10\u8FDB\u5168\u91CF\u626B\u63CF\u5E76\u5B8C\u6574\uFF087 \u4E2A\u53D6\u503C\u5168\u51FA\uFF09",
+        "F22 \u65E0\u9009\u9879\u57DF\u65F6\u626B\u63CF\u5F15\u64CE\u7ED9\u51FA\u5B8C\u6574\u9009\u9879\uFF087 \u4E2A\u53D6\u503C\u5168\u51FA\uFF09",
         r10.source === "scan" && r10.complete === true && r10.values.join(",") === "\u57CE0,\u57CE1,\u57CE2,\u57CE3,\u57CE4,\u57CE5,\u57CE6",
         { source: r10.source, complete: r10.complete, values: r10.values }
       );
@@ -33093,6 +33262,8 @@ async function run() {
       const h11 = enumerateRefOptions("tblBig", CITY4, [
         { fieldId: PROV4, text: "\u6D59", fieldType: j5.Text }
       ], {
+        engine: "scan",
+        // 本用例专测扫描引擎的渐进能力
         onOption: () => {
           callbacks += 1;
         },
@@ -33131,7 +33302,7 @@ async function run() {
       invalidateTableRecords();
       const r10 = await enumerateRefOptions("tblBig", CITY5, [
         { fieldId: PROV5, text: "\u6D59", fieldType: j5.Text }
-      ], { maxScanPages: 3 }).promise;
+      ], { engine: "scan", maxScanPages: 3 }).promise;
       check(
         "F22 \u626B\u63CF\u649E\u9875\u6570\u4E0A\u9650\u65F6\u5982\u5B9E\u6807 truncated\uFF08\u4E0D\u8C0E\u62A5\u5B8C\u6574\uFF09",
         r10.truncated === true && r10.complete === false && r10.source === "scan",
@@ -33854,6 +34025,156 @@ async function run() {
       check(
         "F27 OptionReference \u589E\u52A0 fieldType \u5B57\u6BB5\uFF08\u968F\u914D\u7F6E\u6301\u4E45\u5316\uFF09",
         /interface OptionReference[\s\S]{0,600}fieldType\?: FieldType/.test(typesSrc),
+        null
+      );
+    }
+  }
+  {
+    let makeBase282 = function({ totalRows = 2e4, domainSize = 200, filterMode = "ok", interleave = false } = {}) {
+      const calls = { meta: 0, page: 0 };
+      const domain = Array.from({ length: domainSize }, (_5, i3) => `\u6A21\u7EC4${i3}`);
+      const rows = [];
+      for (let i3 = 0; i3 < totalRows; i3 += 1) {
+        const prov = interleave && i3 % 2 === 1 ? "\u4EA7\u54C1B" : "\u4F01\u4F01\u4E91";
+        rows.push({ recordId: `m${i3}`, fields: { [PROV]: prov, [VAL]: domain[i3 % domainSize] } });
+      }
+      if (!interleave) {
+        for (let i3 = 0; i3 < 300; i3 += 1) {
+          rows.push({ recordId: `x${i3}`, fields: { [PROV]: "\u4EA7\u54C1B", [VAL]: domain[i3 % domainSize] } });
+        }
+      }
+      const table = {
+        getFieldMetaList: async () => {
+          calls.meta += 1;
+          return [
+            { id: VAL, name: "\u6A21\u7EC4", type: j5.SingleSelect, property: { options: domain.map((n11, i3) => ({ id: `o${i3}`, name: n11 })) } },
+            { id: PROV, name: "\u4EA7\u54C1\u7EBF", type: j5.SingleSelect, property: { options: [] } }
+          ];
+        },
+        getRecordsByPage: async ({ filter, pageSize, pageToken }) => {
+          calls.page += 1;
+          let all = rows;
+          if (filter) {
+            if (filterMode === "empty") all = [];
+            else if (filterMode === "ignore") all = rows;
+            else if (filterMode === "typed-empty") {
+              const typed = (filter.conditions ?? []).some((c11) => c11.fieldType !== void 0);
+              all = typed ? [] : rows.filter((r10) => (filter.conditions ?? []).every((c11) => {
+                const v11 = String((r10.fields ?? {})[c11.fieldId] ?? "");
+                return c11.operator === "contains" ? v11.includes(String(c11.value)) : v11 === String(c11.value);
+              }));
+            } else {
+              all = rows.filter((r10) => (filter.conditions ?? []).every((c11) => {
+                const v11 = String((r10.fields ?? {})[c11.fieldId] ?? "");
+                return c11.operator === "contains" ? v11.includes(String(c11.value)) : v11 === String(c11.value);
+              }));
+            }
+          }
+          const start = pageToken === void 0 ? 0 : Number(pageToken);
+          const n11 = pageSize ?? 200;
+          const slice = all.slice(start, start + n11);
+          const next = start + n11;
+          return { records: slice, total: all.length, hasMore: next < all.length, pageToken: next < all.length ? String(next) : void 0 };
+        }
+      };
+      return { base: { getTableById: async () => table, getTableMetaList: async () => [{ id: "tbl28" }] }, calls };
+    };
+    var makeBase28 = makeBase282;
+    const PROV = "fldProv28";
+    const VAL = "fldVal28";
+    const SPEC28 = [{ fieldId: PROV, text: "\u4F01\u4F01\u4E91", fieldType: j5.SingleSelect }];
+    {
+      const { base, calls } = makeBase282({ totalRows: 30, domainSize: 200, filterMode: "ok" });
+      __setAppForTest({ base });
+      invalidateTableRecords();
+      const r10 = await enumerateRefOptions("tbl28", VAL, SPEC28, { valueFieldType: j5.SingleSelect }).promise;
+      check(
+        "F28 \u6709\u6761\u4EF6\u4E0B\u8D70\u300C\u76F4\u63A5\u67E5\u8BE2\u300D\u800C\u975E\u9010\u9879\u63A2\u6D4B\uFF08\u8BF7\u6C42\u6570\u4E0E\u9009\u9879\u57DF\u5927\u5C0F\u65E0\u5173\uFF09",
+        r10.source === "query" && calls.page === 1,
+        { source: r10.source, pageCalls: calls.page, domainSize: 200, values: r10.values.length }
+      );
+      check(
+        "F28 \u547D\u4E2D 30 \u884C \u2192 1 \u9875\u5373\u5B8C\uFF0C\u5168\u90E8 30 \u4E2A\u9009\u9879\u53D6\u5230",
+        r10.values.length === 30 && r10.complete === true,
+        { values: r10.values.length, complete: r10.complete }
+      );
+      check("F28 \u672A\u53D1\u51FA\u4EFB\u4F55\u5B58\u5728\u6027\u63A2\u6D4B\uFF08probes=0\uFF09", r10.probes === 0, r10.probes);
+    }
+    {
+      const { base, calls } = makeBase282({ totalRows: 2e4, domainSize: 200, filterMode: "ok" });
+      __setAppForTest({ base });
+      invalidateTableRecords();
+      const seen = [];
+      const r10 = await enumerateRefOptions("tbl28", VAL, SPEC28, {
+        valueFieldType: j5.SingleSelect,
+        onScanProgress: (s) => seen.push(s)
+      }).promise;
+      check(
+        "F28 \u76F4\u63A5\u67E5\u8BE2\u671F\u95F4\u6709\u8FDB\u5EA6\u56DE\u8C03\uFF08UI \u4E0D\u518D\u5168\u7A0B\u300C\u5DF2\u626B\u63CF 0 \u6761\u300D\uFF09",
+        seen.length > 0 && seen[seen.length - 1] > 0,
+        { progressSamples: seen.length, last: seen[seen.length - 1] ?? null, source: r10.source }
+      );
+      check(
+        "F28 \u9009\u9879\u57DF 200 \u4E14\u53D6\u503C\u8986\u76D6 \u2192 \u9996\u5C4F\uFF08\u9009\u9879\u57DF\u627E\u9F50\uFF09\u5373\u5224\u5B8C\u6574\u3001\u4E0D\u767D\u626B\u5927\u8868",
+        r10.source === "query" && r10.complete === true && calls.page === 1 && r10.values.length === 200,
+        { source: r10.source, pageCalls: calls.page, values: r10.values.length, complete: r10.complete }
+      );
+    }
+    {
+      const { base, calls } = makeBase282({ totalRows: 2e4, domainSize: 200, filterMode: "empty" });
+      __setAppForTest({ base });
+      invalidateTableRecords();
+      const r10 = await enumerateRefOptions("tbl28", VAL, SPEC28, { valueFieldType: j5.SingleSelect }).promise;
+      check(
+        "F28 \u5047\u7A7A\u65F6\u56DE\u9000\u626B\u63CF\u5E76\u53D6\u5230\u5168\u90E8 200 \u4E2A\u9009\u9879\uFF08\u9996\u8F6E\u4FEE\u590D\u4E0D\u56DE\u5F52\uFF09",
+        r10.values.length === 200 && r10.complete === true,
+        { values: r10.values.length, source: r10.source, complete: r10.complete }
+      );
+    }
+    {
+      const { base, calls } = makeBase282({ totalRows: 2e4, domainSize: 8, filterMode: "empty" });
+      __setAppForTest({ base });
+      invalidateTableRecords();
+      const r10 = await enumerateRefOptions("tbl28", VAL, SPEC28, { valueFieldType: j5.SingleSelect }).promise;
+      check(
+        "F28 \u5047\u7A7A\u56DE\u9000\u626B\u63CF\u65F6\u300C\u9009\u9879\u57DF\u627E\u9F50\u5373\u505C\u300D\uFF08\u4E0D\u4E3A 8 \u4E2A\u9009\u9879\u767D\u626B 2 \u4E07\u884C\uFF09",
+        r10.values.length === 8 && r10.complete === true && calls.page < 20,
+        { values: r10.values.length, pageCalls: calls.page, complete: r10.complete }
+      );
+    }
+    {
+      const { base } = makeBase282({ totalRows: 50, domainSize: 12, filterMode: "typed-empty" });
+      __setAppForTest({ base });
+      invalidateTableRecords();
+      const r10 = await enumerateRefOptions("tbl28", VAL, SPEC28, { valueFieldType: j5.SingleSelect }).promise;
+      check(
+        "F28 typed \u6761\u4EF6\u5047\u7A7A\u4F46\u5BBD\u677E\u53EF\u7528 \u2192 \u76F4\u63A5\u67E5\u8BE2\u5BBD\u677E\u590D\u6838\u515C\u4F4F\uFF0812 \u4E2A\u9009\u9879\u5168\u51FA\uFF09",
+        r10.values.length === 12 && r10.complete === true,
+        { values: r10.values.length, source: r10.source, complete: r10.complete }
+      );
+    }
+    {
+      const { base } = makeBase282({ totalRows: 300, domainSize: 3, filterMode: "ignore", interleave: true });
+      __setAppForTest({ base });
+      invalidateTableRecords();
+      const r10 = await enumerateRefOptions("tbl28", VAL, SPEC28, { valueFieldType: j5.SingleSelect }).promise;
+      check(
+        "F28 \u5BBF\u4E3B\u5FFD\u7565 filter \u2192 \u76F4\u63A5\u67E5\u8BE2\u81EA\u8BC1\u5931\u8D25\u5E76\u56DE\u9000\u626B\u63CF\uFF0C\u4ECD\u5F97\u8BE5\u6761\u4EF6\u4E0B 3 \u4E2A\u9009\u9879",
+        r10.source === "scan" && r10.values.length === 3 && ["\u6A21\u7EC40", "\u6A21\u7EC41", "\u6A21\u7EC42"].every((o11) => r10.values.includes(o11)) && r10.complete === true,
+        { source: r10.source, values: r10.values }
+      );
+    }
+    {
+      const fs28 = await import("node:fs");
+      const cache28 = fs28.readFileSync(new URL("../src/services/tableRecordCache.ts", import.meta.url), "utf8");
+      check(
+        "F28 \u7EDF\u4E00\u5165\u53E3\u542B\u300C\u76F4\u63A5\u67E5\u8BE2\u300D\u5F15\u64CE\uFF08source: query\uFF09",
+        /queryDistinctByConditions/.test(cache28) && /source:\s*'query'/.test(cache28),
+        null
+      );
+      check(
+        "F28 \u626B\u63CF\u5F15\u64CE\u652F\u6301\u300C\u9009\u9879\u57DF\u627E\u9F50\u5373\u505C\u300D\uFF08declaredOptions\uFF09",
+        /declaredOptions/.test(cache28) && /stoppedEarly/.test(cache28),
         null
       );
     }

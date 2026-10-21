@@ -320,6 +320,19 @@ function recordSatisfiesCondition(fields: Record<string, unknown>, c: ConditionS
 }
 
 /**
+ * 本地**宽松**自证：单元格文本「包含」期望值。
+ *
+ * 与 `specToLooseCondition` 配对使用：宽松条件在服务端就是 contains，
+ * 若这里仍用严格相等，会把「contains 命中的近似行」误判成「过滤未生效」。
+ */
+function recordSatisfiesLoose(fields: Record<string, unknown>, c: ConditionSpec): boolean {
+  const got = stringifyCellValue(fields[c.fieldId]).trim();
+  const want = c.text.trim();
+  if (!want) return false;
+  return got.includes(want);
+}
+
+/**
  * 按给定的 filter 条件拉取整行（分页到底，带上限保护）。
  *
  * ★ 关键修复：明确区分「翻到底」与「撞上限」——
@@ -491,6 +504,187 @@ export function loadRowsByConditions(
   return { key, promise: p };
 }
 
+/* ---------------- 有条件「直接查询」穷举（引用选项的快速路径） ---------------- */
+
+/** 有条件直接查询穷举的结果 */
+export interface QueryDistinctResult {
+  /** 去重后的取值（保序） */
+  values: string[];
+  /** 是否已完整（翻到底 / 选项域已找齐） */
+  complete: boolean;
+  /** 是否撞页数/时间上限（true = 结果可能不全） */
+  truncated: boolean;
+  /** 已读取的记录数（= 满足条件的行数） */
+  scanned: number;
+  /** 服务端报告的匹配总行数（宿主返回时才有） */
+  total?: number;
+  /** 是否可信（服务端过滤经本地自证生效）。false → 调用方必须回退扫描 */
+  trusted: boolean;
+  error?: string;
+}
+
+/**
+ * ★ 有条件时的**快速路径**：带条件「直接查询」匹配行，本地自证后取去重取值。
+ *
+ * 为什么需要（2026-10-21 用户实测反馈）：
+ * 症状 = 选中上级字段后，子级下拉长时间停在「正在穷举选项…已扫描 0 条」，很久才出选项。
+ * 根因 = 旧实现在有条件下**首选逐项存在性探测**，其请求次数 = **选项域大小**：
+ *        200 个模组 → 200 次请求（并发 8，按 200ms/请求 ≈ 5s）；
+ *        若宿主对 typed 条件「假空」，还要再跑 200 次宽松复核才回退 → 400 次请求 ≈ 10s；
+ *        且探测阶段**没有任何扫描进度回调** → UI 全程显示「已扫描 0 条」，用户以为卡死。
+ * 而用户的直觉是对的：**有了条件直接查一次就够了** ——
+ *        「命中 30 行」= 1 页即完（1 次请求），比 200 次探测快两个数量级。
+ *
+ * 做法：
+ *   - filter 只放**条件字段**（我们要的是「该条件下出现过的全部取值」），不带取值字段；
+ *   - 每页取回后**逐行本地自证**（必须满足全部条件），任一返回行不满足 → 判定宿主
+ *     忽略/误解析 filter → `trusted:false`，交由调用方回退扫描（绝不采信伪命中）；
+ *   - 逐页 `onValue` 渐进产出 + `onProgress` 上报进度（UI 底部灰字即时推进，不再「0 条」）；
+ *   - **早退**：取值字段是单选/多选时取值必属选项域，declared 全部找齐即判完整；
+ *   - 精确条件 0 条 → 用宽松条件（去 fieldType、统一 contains）复核一次；
+ *     两级都 0 条仍**不采信**（防「假空」），交由调用方回退扫描确认。
+ */
+export function queryDistinctByConditions(
+  tableId: string,
+  valueFieldId: string,
+  conditions: ConditionSpec[],
+  opts?: {
+    valueFieldType?: number;
+    /** 已知的取值字段选项域（用于「找齐即完整」早退） */
+    declaredOptions?: string[];
+    /** 渐进回调：每发现一个新取值即回调 */
+    onValue?: (v: string) => void;
+    /** 进度回调：已读取行数 / 匹配总行数 */
+    onProgress?: (scanned: number, total?: number) => void;
+    maxPages?: number;
+    timeBudgetMs?: number;
+  }
+): { key: string; cancel: () => void; promise: Promise<QueryDistinctResult> } {
+  let cancelled = false;
+  const maxPages = opts?.maxPages ?? COND_MAX_PAGES;
+  const timeBudgetMs = opts?.timeBudgetMs ?? DISTINCT_SCAN_TIME_BUDGET_MS;
+  const declared = opts?.declaredOptions ?? [];
+  const seen = new Set<string>();
+  const startedAt = Date.now();
+
+  const promise = (async (): Promise<QueryDistinctResult> => {
+    try {
+      const table = await getBase().getTableById(tableId);
+      const useByPage = typeof (table as any).getRecordsByPage === 'function';
+
+      /** 按给定条件构造方式与自证方式拉取（strict / loose 共用） */
+      const pull = async (
+        toCond: (c: ConditionSpec) => Record<string, unknown>,
+        selfTest: (fields: Record<string, unknown>, c: ConditionSpec) => boolean
+      ): Promise<QueryDistinctResult> => {
+        const out: QueryDistinctResult = {
+          values: [],
+          complete: false,
+          truncated: false,
+          scanned: 0,
+          trusted: false,
+        };
+        let token: any;
+        let guard = 0;
+        let truncated = false;
+        for (;;) {
+          if (cancelled) break;
+          const params: any = {
+            pageSize: PAGE_SIZE,
+            filter: { conjunction: 'and', conditions: conditions.map(toCond) },
+            ...(token !== undefined ? { pageToken: token } : {}),
+          };
+          const res: any = useByPage
+            ? await (table as any).getRecordsByPage(params)
+            : await (table as any).getRecords(params);
+          if (cancelled) break;
+          if (typeof res?.total === 'number') out.total = res.total;
+          const records: any[] = res?.records ?? [];
+          out.scanned += records.length;
+          // ★ 整页先校验、再提交：避免「不可信页」的取值已经被 onValue 发出去（UI 污染）
+          const pageTexts: string[] = [];
+          let pageOk = true;
+          for (const rec of records) {
+            const fields = (rec.fields ?? {}) as Record<string, unknown>;
+            if (!conditions.every((c) => selfTest(fields, c))) {
+              pageOk = false;
+              break;
+            }
+            for (const t of extractOptionTexts(fields[valueFieldId], opts?.valueFieldType)) {
+              if (t) pageTexts.push(t);
+            }
+          }
+          if (!pageOk) {
+            console.warn('[tableRecords] 直接查询返回的行不满足条件 → 判定宿主未按条件过滤，回退扫描');
+            return { ...out, values: [], trusted: false, error: 'filter-ineffective' };
+          }
+          for (const t of pageTexts) {
+            if (!seen.has(t)) {
+              seen.add(t);
+              opts?.onValue?.(t);
+            }
+          }
+          opts?.onProgress?.(out.scanned, out.total);
+          // ★ 早退：单选/多选取值字段的取值必属选项域 → declared 全部找齐即完整
+          if (declared.length > 0 && declared.every((o) => seen.has(o))) {
+            return { ...out, values: Array.from(seen), complete: true, truncated: false, trusted: true };
+          }
+          guard += 1;
+          const next = res?.hasMore ? res?.pageToken : undefined;
+          if (next === undefined || next === token) break; // 翻到底 → 完整
+          if (guard >= maxPages) {
+            truncated = true;
+            break;
+          }
+          if (Date.now() - startedAt > timeBudgetMs) {
+            truncated = true;
+            break;
+          }
+          token = next;
+        }
+        if (cancelled) {
+          return { ...out, values: Array.from(seen), complete: false, truncated: true, trusted: true };
+        }
+        return { ...out, values: Array.from(seen), complete: !truncated, truncated, trusted: true };
+      };
+
+      // 第一级：带字段类型的精确条件
+      const strict = await pull(specToFilterCondition, recordSatisfiesCondition);
+      if (!strict.trusted) return strict; // 过滤未生效 → 交由调用方回退扫描
+      // 第二级：精确条件 0 条 → 宽松复核（宿主可能对 typed 条件稳定返 0 条 = 假空）
+      if (strict.scanned === 0) {
+        const loose = await pull(specToLooseCondition, recordSatisfiesLoose);
+        if (loose.trusted && loose.scanned > 0) {
+          console.warn(
+            '[tableRecords] 直接查询：精确条件 0 条、宽松条件命中 → 采用复核结果（条件格式兼容回退）'
+          );
+          return loose;
+        }
+        // 两级都 0 条：**不采信**（可能是假空）→ 交由调用方回退扫描做最终确认
+        console.warn('[tableRecords] 直接查询两级皆 0 条，交由调用方回退扫描确认');
+        return { ...strict, trusted: false, error: 'query-empty' };
+      }
+      return strict;
+    } catch (e) {
+      const err = (e as Error)?.message ?? String(e);
+      console.warn(`[tableRecords] 直接查询穷举失败（将回退扫描）：表=${tableId} 错误=${err}`);
+      return { values: [], complete: false, truncated: false, scanned: 0, trusted: false, error: err };
+    }
+  })();
+
+  const key = taskKey(
+    tableId,
+    'cond',
+    JSON.stringify([
+      'querydistinct',
+      valueFieldId,
+      opts?.valueFieldType ?? 0,
+      conditions.map((c) => [c.fieldId, c.fieldType, c.text]),
+    ])
+  );
+  return { key, cancel: () => { cancelled = true; }, promise };
+}
+
 /* ---------------- 有界本地扫描兜底（条件在服务端反复失效时） ---------------- */
 
 /** 本地扫描兜底的分页上限（40 * 200 = 8000 条，覆盖常见字典表且不拖死页面） */
@@ -637,6 +831,18 @@ export function scanDistinctValues(
      * **两个独立选项**，需拆开输出（可被引用到单选控件）；缺省按单值处理。
      */
     valueFieldType?: number;
+    /**
+     * ★ 取值字段的**选项域**（仅单选/多选有）。给出时启用**找齐即停**优化：
+     * 单选/多选的取值必属选项域 → 一旦选项域内每一项都已在扫描中命中，
+     * 即证明已完整（继续扫描不可能再产出新取值）→ 立即结束并标 `complete:true`。
+     *
+     * 为什么重要：宿主对 typed 条件「假空」时必须回退扫描；若命中行的取值恰好
+     * 集中在源表前几页，找齐即停能避免把整张大表（上万行）白扫一遍
+     * —— 从「秒级到十几秒」降到「一两页」。
+     *
+     * 不传此参数则行为与之前完全一致（翻到底才算完整）。
+     */
+    declaredOptions?: string[];
   }
 ): { key: string; cancel: () => void; promise: Promise<DistinctScanResult> } {
   const key = taskKey(
@@ -659,8 +865,10 @@ export function scanDistinctValues(
     }
   }
 
+  const declared = (opts?.declaredOptions ?? []).filter(Boolean);
   const seen = new Set<string>();
   const values: string[] = [];
+  let stoppedEarly = false;
   const h = scanRowsByConditionsLocal(tableId, conditions, {
     maxPages: opts?.maxPages,
     timeBudgetMs: opts?.timeBudgetMs,
@@ -677,14 +885,21 @@ export function scanDistinctValues(
           }
         }
       }
+      // ★ 找齐即停：单选/多选取值必属选项域，选项域全部命中 = 已完整
+      if (declared.length > 0 && declared.every((o) => seen.has(o))) {
+        stoppedEarly = true;
+        h.cancel();
+      }
     },
   });
 
   const promise = h.done.then((r) => {
+    // 找齐即停时不受页数/时间预算影响，结果本身就是完整的
+    const truncated = stoppedEarly ? false : r.truncated;
     const out: DistinctScanResult = {
       values,
-      complete: !r.truncated,
-      truncated: r.truncated,
+      complete: !truncated,
+      truncated,
       scanned: r.scanned,
       total: r.total,
     };
@@ -877,10 +1092,12 @@ export interface OptionEnumResult {
   /**
    * 选项来源：
    * - `metadata`=源字段配置的选项域（无条件，1 次请求即完整）
-   * - `probe`=存在性探测穷举（有条件，成本与表大小无关）
+   * - `query`=有条件「直接查询」匹配行后本地取去重值（**快速路径**：请求量 ∝ 匹配行数，
+   *            通常 1 页即完；选项域找齐即早退。2026-10-21 为「计算慢」问题新增）
+   * - `probe`=存在性探测穷举（有条件，成本与表大小无关；已被 `query` 取代为主路径，保留供测试/兜底）
    * - `scan`=渐进全量扫描（getRecordsByPage，翻到底即完整；最通用、必然可用）
    */
-  source: 'metadata' | 'probe' | 'scan';
+  source: 'metadata' | 'query' | 'probe' | 'scan';
   /** 服务端过滤是否经自证生效 */
   filterEffective: boolean;
   /** 服务端报告的记录总数（宿主返回时才有；扫描模式下 = 表内可读总行数） */
@@ -1217,13 +1434,14 @@ export function enumerateFieldValuesByColumn(
  * ★ 引用选项「完整穷举」统一入口（UI 只需调用这一个）。
  *
  * 引擎选择原则：**优先用「已验证在所有宿主上都可用」的接口**
- * （即关联字段选择器同源的 `getRecordsByPage` 分页扫描），
- * 元信息选项域 / 存在性探测 / 列穷举都只作为**更快的可选优化**，
+ * （即关联字段选择器同源的 `getRecordsByPage` 分页），
+ * 元信息选项域 / 直接查询 / 存在性探测都只作为**更快的可选优化**，
  * 任一环节不可用都**不影响完整性**（最终都收敛到扫描引擎）。
  *
- * 策略：
+ * 策略（2026-10-21 调整：有条件下改为「直接查询」优先）：
  *  ① 取值字段是单选/多选 + **无条件** → 直接用字段选项域（1 次请求、更快）；
- *  ② 取值字段是单选/多选 + 有条件 → 先试存在性探测（成本与表大小无关）；不可信则转 ③；
+ *  ② 有条件 → **直接查询**（带条件取匹配行，请求量 ∝ 匹配行数，通常 1 页即完；
+ *     选项域找齐即早退）→ 不可信 / 0 条时转 ③；
  *  ③ **渐进全量扫描**（`scanDistinctValues`，getRecordsByPage，翻到底即完整）—— 兜底且必然可用。
  *
  * 任何情况下都不会「静默只给 200 条」：要么返回完整，要么如实带 truncated / complete=false。
@@ -1244,6 +1462,13 @@ export function enumerateRefOptions(
     scanTimeBudgetMs?: number;
     /** 扫描进度回调：已扫描记录数 / 总数 */
     onScanProgress?: (scanned: number, total?: number) => void;
+    /**
+     * 引擎偏好（测试用）：
+     * - `'auto'`（默认）= 先直接查询、不可信再回退扫描；
+     * - `'probe'` = 强制走存在性探测（覆盖旧行为）；
+     * - `'scan'` = 跳过优化、直接扫描。
+     */
+    engine?: 'auto' | 'probe' | 'scan';
   }
 ): { cancel: () => void; promise: Promise<OptionEnumResult> } {
   let cancelled = false;
@@ -1264,6 +1489,7 @@ export function enumerateRefOptions(
     // ★ 取值字段类型：配置侧记录的值优先，缺失则用元信息里的类型。
     //   多选（4）需要把单元格拆成多个独立选项（可被引用到单选控件）。
     const valueFieldType = opts?.valueFieldType ?? mo.type;
+    const engine = opts?.engine ?? 'auto';
 
     // 渐进全量扫描 = 最终兜底引擎（getRecordsByPage，必然可用）
     const runScan = async (): Promise<OptionEnumResult> => {
@@ -1273,6 +1499,9 @@ export function enumerateRefOptions(
         maxPages: opts?.maxScanPages ?? DISTINCT_SCAN_MAX_PAGES,
         timeBudgetMs: opts?.scanTimeBudgetMs ?? DISTINCT_SCAN_TIME_BUDGET_MS,
         valueFieldType,
+        // ★ 单选/多选有选项域 → 传给扫描引擎「找齐即停」：
+        //   假空回退扫描时，避免把整张大表白扫一遍（选项域小、命中集中在前面几页时尤其明显）
+        declaredOptions: mo.found && mo.options.length > 0 ? mo.options : undefined,
       });
       inner = h;
       const r = await h.promise;
@@ -1304,27 +1533,67 @@ export function enumerateRefOptions(
       };
     }
 
-    // ② 单选/多选 + 有条件 → 先试存在性探测（成本与表大小无关）
-    if (mo.found && mo.options.length > 0 && conditions.length > 0) {
-      const h = enumerateOptionsByProbe(tableId, valueFieldId, conditions, {
+    // ② 有条件 → **优先「直接查询」**（请求量 ∝ 匹配行数，选项域找齐即早退）
+    if (conditions.length > 0 && engine !== 'scan') {
+      // ②a（engine==='probe' 时）→ 强制走存在性探测（仅测试/兼容用）
+      if (engine === 'probe' && mo.found && mo.options.length > 0) {
+        const hp = enumerateOptionsByProbe(tableId, valueFieldId, conditions, {
+          valueFieldType,
+          declaredOptions: mo.options,
+          onOption: opts?.onOption,
+          onProgress: opts?.onProgress,
+          maxOptions: opts?.maxProbeOptions,
+        });
+        inner = hp;
+        const rp = await hp.promise;
+        if (rp.filterEffective && !rp.error) return rp;
+        console.warn('[tableRecords] 存在性探测不可用，改用渐进全量扫描');
+        if (cancelled) return rp;
+        return await runScan();
+      }
+      // ②b 默认：带条件直接查询
+      const hq = queryDistinctByConditions(tableId, valueFieldId, conditions, {
         valueFieldType,
-        declaredOptions: mo.options,
-        onOption: opts?.onOption,
-        onProgress: opts?.onProgress,
-        maxOptions: opts?.maxProbeOptions,
+        declaredOptions: mo.found ? mo.options : undefined,
+        onValue: opts?.onOption,
+        // ★ 复用扫描进度回调：UI 底部「已扫描 N 条」在同一处渲染，直接查询也必须有进度
+        onProgress: opts?.onScanProgress,
+        maxPages: opts?.maxColumnPages,
+        timeBudgetMs: opts?.scanTimeBudgetMs,
       });
-      inner = h;
-      const r = await h.promise;
-      // 探测可信（过滤自证生效、且没有致命错误）→ 直接采用
-      if (r.filterEffective && !r.error) return r;
-      console.warn('[tableRecords] 存在性探测不可用，改用渐进全量扫描');
-      if (cancelled) return r;
-      // 否则转 ③ 扫描（覆盖探测不可用的所有情形）
-      // 注意：探测可能已产出部分选项（onOption 已回调），扫描会去重补充，不会重复。
+      inner = hq;
+      const rq = await hq.promise;
+      if (rq.trusted) {
+        return {
+          values: rq.values,
+          complete: rq.complete,
+          truncated: rq.truncated,
+          probes: 0,
+          scanned: rq.scanned,
+          source: 'query',
+          filterEffective: true,
+          serverTotal: rq.total,
+          scannedTotal: rq.total,
+        };
+      }
+      console.warn('[tableRecords] 直接查询不可信（过滤未生效 / 两级空 / 出错），改用渐进全量扫描');
+      if (cancelled) {
+        return {
+          values: [],
+          complete: false,
+          truncated: false,
+          probes: 0,
+          scanned: 0,
+          source: 'query',
+          filterEffective: false,
+          error: rq.error,
+        };
+      }
+      // 回退扫描。注意：直接查询可能已产出部分选项（onOption 已回调），扫描会去重补充。
       return await runScan();
     }
 
-    // ③ 其它情形（无选项域 / 元信息不可用 / 列接口不可用）→ 渐进全量扫描
+    // ③ 其它情形（无选项域 / 元信息不可用 / 引擎指定扫描）→ 渐进全量扫描
     //    这是唯一必然可用的路径，保证「永不静默只给 200 条」。
     return await runScan();
   })();

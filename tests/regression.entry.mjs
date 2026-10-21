@@ -1569,7 +1569,9 @@ async function run() {
     }
 
     // 7) ★★ 本轮核心回归：宿主「元信息无选项域 + 无 getFieldValueListByPage」时，
-    //    统一入口必须自动走**渐进全量扫描**并给出完整选项（= 用户线上真实故障场景）。
+    //    统一入口必须能给出**完整选项**（= 用户线上真实故障场景）。
+    //    注：2026-10-21 起「有条件」默认走**直接查询**快速路径；本用例专测**扫描引擎**，
+    //        故显式指定 engine:'scan'（扫描仍是必然可用的最终兜底）。
     {
       const PROV3 = 'fldProv3';
       const CITY3 = 'fldCity3';
@@ -1599,9 +1601,9 @@ async function run() {
       invalidateTableRecords();
       const r = await enumerateRefOptions('tblBig', CITY3, [
         { fieldId: PROV3, text: '浙', fieldType: FieldType.Text },
-      ]).promise;
+      ], { engine: 'scan' }).promise;
       check(
-        'F22 无选项域 → 自动走渐进全量扫描并完整（7 个取值全出）',
+        'F22 无选项域时扫描引擎给出完整选项（7 个取值全出）',
         r.source === 'scan' && r.complete === true && r.values.join(',') === '城0,城1,城2,城3,城4,城5,城6',
         { source: r.source, complete: r.complete, values: r.values }
       );
@@ -1638,6 +1640,7 @@ async function run() {
       const h = enumerateRefOptions('tblBig', CITY4, [
         { fieldId: PROV4, text: '浙', fieldType: FieldType.Text },
       ], {
+        engine: 'scan', // 本用例专测扫描引擎的渐进能力
         onOption: () => { callbacks += 1; },
         onScanProgress: (s) => { progressSeen = s; },
       });
@@ -1674,7 +1677,7 @@ async function run() {
       invalidateTableRecords();
       const r = await enumerateRefOptions('tblBig', CITY5, [
         { fieldId: PROV5, text: '浙', fieldType: FieldType.Text },
-      ], { maxScanPages: 3 }).promise;
+      ], { engine: 'scan', maxScanPages: 3 }).promise;
       check(
         'F22 扫描撞页数上限时如实标 truncated（不谎报完整）',
         r.truncated === true && r.complete === false && r.source === 'scan',
@@ -2545,6 +2548,204 @@ async function run() {
       check(
         'F27 OptionReference 增加 fieldType 字段（随配置持久化）',
         /interface OptionReference[\s\S]{0,600}fieldType\?: FieldType/.test(typesSrc),
+        null
+      );
+    }
+  }
+
+  /* ============================================================
+   * F28 有条件引用选项「计算慢」修复（2026-10-21 用户实测第二轮反馈）
+   *
+   * 症状：选了上级字段后，子级下拉长时间停在「正在穷举选项…已扫描 0 条」，
+   *      很久（实测十几秒）才刷出选项。用户原话：
+   *      「按道理有了条件直接查询应该是很快的啊」—— 用户是对的。
+   *
+   * 根因（端到端复现确认，见 .workbuddy/memory/2026-10-21.md）：
+   *   ① 旧实现在有条件下**首选逐项存在性探测**，请求数 = **选项域大小**：
+   *      200 个选项 → 200 次请求（并发 8，按 200ms/请求 ≈ 5s）；
+   *   ② 若宿主对 typed 条件「假空」（本项目已知坑），还要再跑 200 次**宽松复核**
+   *      才回退扫描 → 400 次请求 ≈ 10s，期间 onScanProgress **一次都不回调**
+   *      → UI 全程「已扫描 0 条」，用户以为卡死。
+   *
+   * 修复：有条件改为**「直接查询」优先**（filter 只放条件字段、每页 200 行、
+   *      本地自证、选项域找齐即停）—— 请求量 ∝ 匹配行数，不是选项域大小；
+   *      不可信 / 两级空才回退扫描，且扫描也支持「找齐即停」。
+   * ============================================================ */
+  {
+    const PROV = 'fldProv28';
+    const VAL = 'fldVal28';
+
+    /**
+     * @param {object} o
+     *  o.totalRows  满足条件的行数
+     *  o.domainSize 值字段选项域大小
+     *  o.filterMode 'ok' | 'empty'(带 filter 一律 0 条 = 假空) | 'ignore'(忽略 filter)
+     *  o.interleave 把不满足条件的行**交错**在满足条件的行之间（模拟真实表），
+     *               使「忽略 filter」能被首屏本地自证立刻发现
+     */
+    function makeBase28({ totalRows = 20000, domainSize = 200, filterMode = 'ok', interleave = false } = {}) {
+      const calls = { meta: 0, page: 0 };
+      const domain = Array.from({ length: domainSize }, (_, i) => `模组${i}`);
+      const rows = [];
+      for (let i = 0; i < totalRows; i += 1) {
+        const prov = interleave && i % 2 === 1 ? '产品B' : '企企云';
+        rows.push({ recordId: `m${i}`, fields: { [PROV]: prov, [VAL]: domain[i % domainSize] } });
+      }
+      if (!interleave) {
+        for (let i = 0; i < 300; i += 1) {
+          rows.push({ recordId: `x${i}`, fields: { [PROV]: '产品B', [VAL]: domain[i % domainSize] } });
+        }
+      }
+      const table = {
+        getFieldMetaList: async () => {
+          calls.meta += 1;
+          return [
+            { id: VAL, name: '模组', type: FieldType.SingleSelect, property: { options: domain.map((n, i) => ({ id: `o${i}`, name: n })) } },
+            { id: PROV, name: '产品线', type: FieldType.SingleSelect, property: { options: [] } },
+          ];
+        },
+        getRecordsByPage: async ({ filter, pageSize, pageToken }) => {
+          calls.page += 1;
+          let all = rows;
+          if (filter) {
+            if (filterMode === 'empty') all = [];
+            else if (filterMode === 'ignore') all = rows;
+            else if (filterMode === 'typed-empty') {
+              // 带 fieldType 的条件返回 0 条（假空），宽松条件正常生效
+              const typed = (filter.conditions ?? []).some((c) => c.fieldType !== undefined);
+              all = typed
+                ? []
+                : rows.filter((r) => (filter.conditions ?? []).every((c) => {
+                    const v = String((r.fields ?? {})[c.fieldId] ?? '');
+                    return c.operator === 'contains' ? v.includes(String(c.value)) : v === String(c.value);
+                  }));
+            } else {
+              all = rows.filter((r) => (filter.conditions ?? []).every((c) => {
+                const v = String((r.fields ?? {})[c.fieldId] ?? '');
+                return c.operator === 'contains' ? v.includes(String(c.value)) : v === String(c.value);
+              }));
+            }
+          }
+          const start = pageToken === undefined ? 0 : Number(pageToken);
+          const n = pageSize ?? 200;
+          const slice = all.slice(start, start + n);
+          const next = start + n;
+          return { records: slice, total: all.length, hasMore: next < all.length, pageToken: next < all.length ? String(next) : undefined };
+        },
+      };
+      return { base: { getTableById: async () => table, getTableMetaList: async () => [{ id: 'tbl28' }] }, calls };
+    }
+
+    const SPEC28 = [{ fieldId: PROV, text: '企企云', fieldType: FieldType.SingleSelect }];
+
+    // 1) ★ 核心：有条件下请求量必须 ∝ 匹配行数，**不得** ∝ 选项域大小
+    {
+      const { base, calls } = makeBase28({ totalRows: 30, domainSize: 200, filterMode: 'ok' });
+      selectBaseForTest({ base });
+      invalidateTableRecords();
+      const r = await enumerateRefOptions('tbl28', VAL, SPEC28, { valueFieldType: FieldType.SingleSelect }).promise;
+      check(
+        'F28 有条件下走「直接查询」而非逐项探测（请求数与选项域大小无关）',
+        r.source === 'query' && calls.page === 1,
+        { source: r.source, pageCalls: calls.page, domainSize: 200, values: r.values.length }
+      );
+      check(
+        'F28 命中 30 行 → 1 页即完，全部 30 个选项取到',
+        r.values.length === 30 && r.complete === true,
+        { values: r.values.length, complete: r.complete }
+      );
+      check('F28 未发出任何存在性探测（probes=0）', r.probes === 0, r.probes);
+    }
+
+    // 2) ★ 进度可观测：直接查询也必须回调扫描进度（修「已扫描 0 条」的观感根因）
+    {
+      const { base, calls } = makeBase28({ totalRows: 20000, domainSize: 200, filterMode: 'ok' });
+      selectBaseForTest({ base });
+      invalidateTableRecords();
+      const seen = [];
+      const r = await enumerateRefOptions('tbl28', VAL, SPEC28, {
+        valueFieldType: FieldType.SingleSelect,
+        onScanProgress: (s) => seen.push(s),
+      }).promise;
+      check(
+        'F28 直接查询期间有进度回调（UI 不再全程「已扫描 0 条」）',
+        seen.length > 0 && seen[seen.length - 1] > 0,
+        { progressSamples: seen.length, last: seen[seen.length - 1] ?? null, source: r.source }
+      );
+      check(
+        'F28 选项域 200 且取值覆盖 → 首屏（选项域找齐）即判完整、不白扫大表',
+        r.source === 'query' && r.complete === true && calls.page === 1 && r.values.length === 200,
+        { source: r.source, pageCalls: calls.page, values: r.values.length, complete: r.complete }
+      );
+    }
+
+    // 3) 假空（typed+loose 都 0 条）→ 仍**必须**回退扫描拿到全部选项（首轮修复不得回归）
+    {
+      const { base, calls } = makeBase28({ totalRows: 20000, domainSize: 200, filterMode: 'empty' });
+      selectBaseForTest({ base });
+      invalidateTableRecords();
+      const r = await enumerateRefOptions('tbl28', VAL, SPEC28, { valueFieldType: FieldType.SingleSelect }).promise;
+      check(
+        'F28 假空时回退扫描并取到全部 200 个选项（首轮修复不回归）',
+        r.values.length === 200 && r.complete === true,
+        { values: r.values.length, source: r.source, complete: r.complete }
+      );
+    }
+
+    // 4) 假空回退扫描时「找齐即停」：选项域小、取值集中在前面几页 → 不得扫全表
+    {
+      const { base, calls } = makeBase28({ totalRows: 20000, domainSize: 8, filterMode: 'empty' });
+      selectBaseForTest({ base });
+      invalidateTableRecords();
+      const r = await enumerateRefOptions('tbl28', VAL, SPEC28, { valueFieldType: FieldType.SingleSelect }).promise;
+      check(
+        'F28 假空回退扫描时「选项域找齐即停」（不为 8 个选项白扫 2 万行）',
+        r.values.length === 8 && r.complete === true && calls.page < 20,
+        { values: r.values.length, pageCalls: calls.page, complete: r.complete }
+      );
+    }
+
+    // 5) typed 条件被误解析、宽松可用的宿主 → 直接查询的宽松复核兜住
+    {
+      const { base } = makeBase28({ totalRows: 50, domainSize: 12, filterMode: 'typed-empty' });
+      selectBaseForTest({ base });
+      invalidateTableRecords();
+      const r = await enumerateRefOptions('tbl28', VAL, SPEC28, { valueFieldType: FieldType.SingleSelect }).promise;
+      check(
+        'F28 typed 条件假空但宽松可用 → 直接查询宽松复核兜住（12 个选项全出）',
+        r.values.length === 12 && r.complete === true,
+        { values: r.values.length, source: r.source, complete: r.complete }
+      );
+    }
+
+    // 6) 宿主忽略 filter → 直接查询自证失败 → 回退扫描，仍得正确选项
+    {
+      const { base } = makeBase28({ totalRows: 300, domainSize: 3, filterMode: 'ignore', interleave: true });
+      selectBaseForTest({ base });
+      invalidateTableRecords();
+      const r = await enumerateRefOptions('tbl28', VAL, SPEC28, { valueFieldType: FieldType.SingleSelect }).promise;
+      check(
+        'F28 宿主忽略 filter → 直接查询自证失败并回退扫描，仍得该条件下 3 个选项',
+        r.source === 'scan' &&
+          r.values.length === 3 &&
+          ['模组0', '模组1', '模组2'].every((o) => r.values.includes(o)) &&
+          r.complete === true,
+        { source: r.source, values: r.values }
+      );
+    }
+
+    // 7) 静态保障：统一入口必须有「直接查询」源标记（否则被回退成慢路径无人知）
+    {
+      const fs28 = await import('node:fs');
+      const cache28 = fs28.readFileSync(new URL('../src/services/tableRecordCache.ts', import.meta.url), 'utf8');
+      check(
+        'F28 统一入口含「直接查询」引擎（source: query）',
+        /queryDistinctByConditions/.test(cache28) && /source:\s*'query'/.test(cache28),
+        null
+      );
+      check(
+        'F28 扫描引擎支持「选项域找齐即停」（declaredOptions）',
+        /declaredOptions/.test(cache28) && /stoppedEarly/.test(cache28),
         null
       );
     }
