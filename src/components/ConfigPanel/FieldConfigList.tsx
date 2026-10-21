@@ -1,17 +1,28 @@
 import React, { useState } from 'react';
 import { FieldType } from '@lark-base-open/js-sdk';
-import { DateAutoFillConfig, FieldConfig, OptionReference, UNIQUE_CHECKABLE_TYPES } from '../../types';
+import { DateAutoFillConfig, FieldConfig, FormFieldRef, OptionReference, UNIQUE_CHECKABLE_TYPES } from '../../types';
 import { FIELD_TYPE_LABEL } from '../../utils/fieldMapper';
 import { FieldTypeIcon } from '../../utils/fieldTypeIcons';
 import { describeOffset } from '../../utils/dateCalc';
 import { Button, Input, Switch, Typography } from '@douyinfe/semi-ui';
-import { IconSearch, IconLink, IconCalendar } from '@douyinfe/semi-icons';
+import { IconSearch, IconLink, IconCalendar, IconLayers } from '@douyinfe/semi-icons';
 import { OptionRefEditor } from './OptionRefEditor';
 import { DateAutoFillEditor } from './DateAutoFillEditor';
+import { FormRefEditor, RefBlockOption } from './FormRefEditor';
 
 interface Props {
   fields: FieldConfig[];
   onChange: (fields: FieldConfig[]) => void;
+  /**
+   * ★ 本字段所在区块的 tableId（用于「表单取值」的来源候选里排除自身区块）。
+   * 未传时「表单取值」入口不显示 —— 保证未接入的调用方行为完全不变。
+   */
+  currentTableId?: string;
+  /**
+   * ★ 本表单中的其它区块（主表 + 其它子表），供「表单取值」选择来源。
+   * 未传 / 为空时「表单取值」入口不显示。
+   */
+  otherBlocks?: RefBlockOption[];
 }
 
 /** 可配置「引用选项」的字段类型（单选/多选） */
@@ -29,15 +40,20 @@ function isDateField(t: FieldType): boolean {
   return t === FieldType.DateTime;
 }
 
-export function FieldConfigList({ fields, onChange }: Props) {
+export function FieldConfigList({ fields, onChange, currentTableId, otherBlocks }: Props) {
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [overIndex, setOverIndex] = useState<number | null>(null);
   // P2-10：字段搜索（大表下快速定位字段）。搜索时禁用拖拽排序，避免索引错乱。
   const [keyword, setKeyword] = useState('');
   // 引用选项编辑器：正在编辑的字段索引（null = 关闭）
   const [refEditIndex, setRefEditIndex] = useState<number | null>(null);
+  // 表单取值编辑器：正在编辑的字段索引（null = 关闭）
+  const [formRefEditIndex, setFormRefEditIndex] = useState<number | null>(null);
   // 日期联动预填编辑器：正在编辑的字段索引（null = 关闭）
   const [dateEditIndex, setDateEditIndex] = useState<number | null>(null);
+
+  /** 是否可用「表单取值」：调用方提供了其它区块候选（旧调用方不传 → 入口不出现，零变化） */
+  const formRefAvailable = (otherBlocks?.length ?? 0) > 0;
 
   const update = (idx: number, patch: Partial<FieldConfig>) => {
     onChange(fields.map((f, i) => (i === idx ? { ...f, ...patch } : f)));
@@ -200,13 +216,26 @@ export function FieldConfigList({ fields, onChange }: Props) {
                   <Button
                     size="small"
                     theme="borderless"
-                    type={f.optionRef ? 'primary' : 'tertiary'}
+                    type={f.optionRef && !f.formRef ? 'primary' : 'tertiary'}
                     icon={<IconLink />}
                     onClick={() => setRefEditIndex(idx)}
+                    title="选项来自源数据表的历史记录（读服务端，需源表查看权限）"
                   >
                     {f.optionRef
                       ? `已启用引用选项${f.optionRef.conditions.length ? `（${f.optionRef.conditions.length} 个条件）` : ''}`
                       : '引用选项…'}
+                  </Button>
+                )}
+                {isSelectField(f.fieldType) && formRefAvailable && (
+                  <Button
+                    size="small"
+                    theme="borderless"
+                    type={f.formRef ? 'primary' : 'tertiary'}
+                    icon={<IconLayers />}
+                    onClick={() => setFormRefEditIndex(idx)}
+                    title="选项来自本表单其他区块已录入的值（纯本地、零请求、实时联动）"
+                  >
+                    {f.formRef ? '已启用表单取值' : '表单取值…'}
                   </Button>
                 )}
               </div>
@@ -238,6 +267,19 @@ export function FieldConfigList({ fields, onChange }: Props) {
           onSave={(optionRef: OptionReference | undefined) => {
             update(refEditIndex, { optionRef });
             setRefEditIndex(null);
+          }}
+        />
+      )}
+      {formRefEditIndex !== null && fields[formRefEditIndex] && (
+        <FormRefEditor
+          visible
+          field={fields[formRefEditIndex]}
+          currentTableId={currentTableId ?? ''}
+          otherBlocks={otherBlocks ?? []}
+          onCancel={() => setFormRefEditIndex(null)}
+          onSave={(formRef: FormFieldRef | undefined) => {
+            update(formRefEditIndex, { formRef });
+            setFormRefEditIndex(null);
           }}
         />
       )}

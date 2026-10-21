@@ -18,8 +18,10 @@ import { IconUpload } from '@douyinfe/semi-icons';
 import { PersonSelector, BitableUser } from './PersonSelector';
 import { LinkSelector } from './LinkSelector';
 import { RefOptionSelect } from './RefOptionSelect';
+import { FormRefSelect } from './FormRefSelect';
 import { fuzzyOptionFilter } from './fuzzyOptionFilter';
 import { hasOptionRef } from '../../utils/optionRef';
+import { FormScope, resolveOptionMode } from '../../utils/formFieldRef';
 import { FormValues } from '../../types';
 
 interface Props {
@@ -31,6 +33,11 @@ interface Props {
   tableId: string;
   /** 当前记录值（主表值 / 子表当前行值）：引用选项的联动条件据此实时过滤 */
   formValues?: FormValues;
+  /**
+   * ★ 全表单值作用域（主表 + 各子表行值）：仅供「表单内跨区块取值」（formRef）使用。
+   * 未配置任何 formRef 的表单**完全不传**（见 FormRenderer），保证旧配置渲染路径零变化。
+   */
+  formScope?: FormScope | null;
   /** 失焦回调（唯一性校验在此时触发） */
   onBlur?: () => void;
   /** 唯一性校验状态；undefined / 'idle' 时右侧不显示任何提示 */
@@ -166,6 +173,7 @@ export function FieldRenderer({
   disabled,
   tableId,
   formValues,
+  formScope,
   onBlur,
   uniqueStatus,
   uniqueHint,
@@ -174,15 +182,18 @@ export function FieldRenderer({
   compact,
 }: Props) {
   const options = (field.options ?? []).map((o) => ({ value: o.name, label: o.name }));
+  /** 选项来源模式：formRef（表单内跨区块取值）优先 → optionRef（源表引用） → 固定选项 */
+  const optionMode = resolveOptionMode(field);
 
   // ★ 配置态实时预览：人员/关联/引用选项控件都要拉表数据，配置页一打开就并发一堆请求 → 卡顿。
   //   预览只展示控件形态即可，数据加载留给真正的填写态（且填写态也是下拉展开才加载）。
+  //   注意：formRef（表单内跨区块取值）是**纯本地计算、零请求**，不需要在这里屏蔽。
   if (
     preview &&
     (field.fieldType === FieldType.User ||
       field.fieldType === FieldType.SingleLink ||
       field.fieldType === FieldType.DuplexLink ||
-      hasOptionRef(field))
+      (optionMode === 'optionRef' && hasOptionRef(field)))
   ) {
     return <Input style={fullWidth} disabled placeholder="预览模式不加载数据" />;
   }
@@ -243,8 +254,20 @@ export function FieldRenderer({
       );
 
     case FieldType.SingleSelect:
-      // 配置了引用选项：选项从源表动态取（支持条件过滤与省-市级联）
-      if (hasOptionRef(field)) {
+      // ① 配置了「表单内跨区块取值」：选项来自本表单其他区块已录入的值（纯本地、零请求）
+      if (optionMode === 'formRef') {
+        return (
+          <FormRefSelect
+            field={field}
+            value={value}
+            onChange={onChange}
+            disabled={disabled}
+            scope={formScope ?? null}
+          />
+        );
+      }
+      // ② 配置了引用选项：选项从源表动态取（支持条件过滤与省-市级联）
+      if (optionMode === 'optionRef') {
         return (
           <RefOptionSelect
             field={field}
@@ -270,7 +293,19 @@ export function FieldRenderer({
       );
 
     case FieldType.MultiSelect:
-      if (hasOptionRef(field)) {
+      if (optionMode === 'formRef') {
+        return (
+          <FormRefSelect
+            field={field}
+            value={value}
+            onChange={onChange}
+            disabled={disabled}
+            multiple
+            scope={formScope ?? null}
+          />
+        );
+      }
+      if (optionMode === 'optionRef') {
         return (
           <RefOptionSelect
             field={field}

@@ -3,6 +3,7 @@ import { FieldType } from '@lark-base-open/js-sdk';
 import { FormPluginConfig, FormValues, ConditionalState, FieldError, UniqueFieldState } from '../../types';
 import { isFieldRequired, isHiddenField } from '../../utils/validator';
 import { getOptionRefDependencies } from '../../utils/optionRef';
+import { FormScope } from '../../utils/formFieldRef';
 import { FieldRenderer } from './FieldRenderer';
 
 interface Props {
@@ -18,6 +19,8 @@ interface Props {
   onFieldBlur?: (fieldId: string) => void;
   /** 配置态实时预览：数据驱动控件不加载数据 */
   preview?: boolean;
+  /** ★ 全表单值作用域（仅当有字段配置了 formRef 时才下传） */
+  formScope?: FormScope | null;
 }
 
 /**
@@ -35,6 +38,7 @@ export const MainForm = React.memo(function MainForm({
   uniqueState,
   onFieldBlur,
   preview,
+  formScope,
 }: Props) {
   const setField = (fieldId: string, v: unknown) => {
     const next: FormValues = { ...values, [fieldId]: v };
@@ -73,6 +77,7 @@ export const MainForm = React.memo(function MainForm({
                 onChange={(v) => setField(f.fieldId, v)}
                 disabled={f.readonly}
                 formValues={values}
+                formScope={formScope}
                 onBlur={onFieldBlur ? () => onFieldBlur(f.fieldId) : undefined}
                 uniqueStatus={
                   f.unique?.enabled ? (uniqueState?.[f.fieldId]?.status ?? 'idle') : undefined

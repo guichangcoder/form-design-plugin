@@ -7,6 +7,7 @@ import {
   UniqueFieldState,
 } from '../../types';
 import { isFieldRequired } from '../../utils/validator';
+import { FormScope } from '../../utils/formFieldRef';
 import {
   SUB_ROW_ACTION_WIDTH,
   SUB_ROW_INDEX_WIDTH,
@@ -34,6 +35,8 @@ interface Props {
   onFieldBlur?: (fieldId: string, rowIndex: number) => void;
   /** 配置态实时预览：数据驱动控件不加载数据 */
   preview?: boolean;
+  /** ★ 全表单值作用域（仅当有字段配置了 formRef 时才下传） */
+  formScope?: FormScope | null;
 }
 
 /**
@@ -60,6 +63,7 @@ export const SubFormTable = React.memo(function SubFormTable({
   uniqueState,
   onFieldBlur,
   preview,
+  formScope,
 }: Props) {
   const showActionColumn = sub.allowMultiple && rows.length > 1;
   const { columns, minWidth, empty } = buildSubColumns(sub, cond, rows.length, showActionColumn);
@@ -144,6 +148,7 @@ export const SubFormTable = React.memo(function SubFormTable({
                         onChange={(v) => changeCell(idx, c.fieldId, v)}
                         disabled={field.readonly}
                         formValues={row}
+                        formScope={formScope}
                         onBlur={onFieldBlur ? () => onFieldBlur(c.fieldId, idx) : undefined}
                         uniqueStatus={
                           field.unique?.enabled

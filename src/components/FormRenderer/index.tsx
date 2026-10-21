@@ -20,6 +20,12 @@ import {
   FULL_SCAN_TOTAL_LIMIT,
 } from '../../services/uniqueCheck';
 import { resolveAutoFill, markManualEdits } from '../../utils/dateAutoFill';
+import {
+  FormScope,
+  buildFormScope,
+  formHasAnyFormRef,
+  formRefValuesSignature,
+} from '../../utils/formFieldRef';
 import { toast } from '../../utils/toast';
 import { applyThemeColor } from '../../utils/theme';
 import { Button, Typography } from '@douyinfe/semi-ui';
@@ -328,6 +334,58 @@ export function FormRenderer({ config, onBackToConfig, preview, metaStale, onRel
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [subTableIds]);
 
+  /**
+   * ★ 表单内跨区块取值（formRef）的作用域。
+   *
+   * 三道保险，确保「零破坏 + 不穿透 memo」：
+   *  ① `formHasAnyFormRef` 为假（旧配置 / 未使用该功能）→ **完全不构建、不传**，
+   *     下游 MainForm / SubForm 收到的 prop 与今日完全一致 → 渲染路径零变化；
+   *  ② 依赖里放的是 `formRefValuesSignature`（**只含被引用字段的实际取值**），
+   *     而不是 `mainValues` / `subValues` 本身 —— 在没被引用的字段里打字不会换 scope 身份，
+   *     因此不会穿透 React.memo 引发整树重渲染；
+   *  ③ 主表字段配置按引用静态（字段配置是低频变更），不参与签名。
+   */
+  const hasFormRefFeature = useMemo(
+    () => formHasAnyFormRef(config.mainTable.fields, config.subTables),
+    [config.mainTable.fields, config.subTables]
+  );
+  const formRefSig = useMemo(
+    () =>
+      hasFormRefFeature
+        ? formRefValuesSignature(
+            config.mainTable.tableId,
+            config.mainTable.fields,
+            mainValues,
+            config.subTables,
+            subValues
+          )
+        : '',
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [hasFormRefFeature, config.mainTable.tableId, mainValues, config.subTables, subValues]
+  );
+  const formScope: FormScope | null = useMemo(() => {
+    if (!hasFormRefFeature) return null;
+    const blockLabels: Record<string, string> = {
+      [config.mainTable.tableId]:
+        config.mainTable.sectionName || config.mainTable.tableName || '主表信息',
+    };
+    config.subTables.forEach((s, i) => {
+      blockLabels[s.tableId] = s.sectionName || s.tableName || `子表${i + 1}`;
+    });
+    return buildFormScope(config.mainTable.tableId, mainValues, subValues, config.subTables, {
+      mainFields: config.mainTable.fields,
+      blockLabels,
+    });
+    // ★ 依赖 formRefSig 而非 mainValues/subValues：身份只在「被引用字段的值」变化时更新
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    hasFormRefFeature,
+    formRefSig,
+    config.mainTable.tableId,
+    config.mainTable.fields,
+    config.subTables,
+  ]);
+
   // 应用配置的主题色
   useEffect(() => {
     applyThemeColor(config.themeColor);
@@ -525,6 +583,7 @@ export function FormRenderer({ config, onBackToConfig, preview, metaStale, onRel
             uniqueState={mainUnique}
             onFieldBlur={handleMainBlur}
             preview={preview}
+            formScope={formScope || undefined}
           />
         </div>
       </div>
@@ -543,6 +602,7 @@ export function FormRenderer({ config, onBackToConfig, preview, metaStale, onRel
               uniqueState={subUnique[sub.tableId]}
               onFieldBlur={handleSubBlur(sub.tableId)}
               preview={preview}
+              formScope={formScope || undefined}
             />
           </div>
         </div>

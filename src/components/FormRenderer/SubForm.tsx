@@ -3,6 +3,7 @@ import { FieldType } from '@lark-base-open/js-sdk';
 import { SubTableConfig, FormValues, ConditionalState, FieldError, UniqueFieldState } from '../../types';
 import { isFieldRequired, isHiddenField } from '../../utils/validator';
 import { getOptionRefDependencies } from '../../utils/optionRef';
+import { FormScope } from '../../utils/formFieldRef';
 import {
   appendRow,
   applyRowFieldChange,
@@ -29,6 +30,8 @@ interface Props {
   onFieldBlur?: (fieldId: string, rowIndex: number) => void;
   /** 配置态实时预览：数据驱动控件不加载数据 */
   preview?: boolean;
+  /** ★ 全表单值作用域（仅当有字段配置了 formRef 时才下传） */
+  formScope?: FormScope | null;
 }
 
 /**
@@ -45,7 +48,7 @@ export const SubForm = React.memo(function SubForm(props: Props) {
   return <SubFormVertical {...props} />;
 });
 
-function SubFormVertical({ sub, rows, onChange, cond, errors, uniqueState, onFieldBlur, preview }: Props) {
+function SubFormVertical({ sub, rows, onChange, cond, errors, uniqueState, onFieldBlur, preview, formScope }: Props) {
   const updateRow = (idx: number, fieldId: string, v: unknown) =>
     onChange(rows.map((r, i) => (i === idx ? applyRowFieldChange(sub.fields, r, fieldId, v) : r)));
 
@@ -105,6 +108,7 @@ function SubFormVertical({ sub, rows, onChange, cond, errors, uniqueState, onFie
                   onChange={(v) => updateRow(idx, f.fieldId, v)}
                   disabled={f.readonly}
                   formValues={row}
+                  formScope={formScope}
                   onBlur={onFieldBlur ? () => onFieldBlur(f.fieldId, idx) : undefined}
                   uniqueStatus={
                     f.unique?.enabled

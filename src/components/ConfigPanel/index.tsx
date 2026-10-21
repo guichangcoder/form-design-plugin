@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from 'react';
-import { FormPluginConfig, CONFIG_VERSION, genId } from '../../types';
+import React, { useEffect, useMemo, useState } from 'react';
+import { FormPluginConfig, CONFIG_VERSION, genId, FieldConfig } from '../../types';
 import { useTableMeta } from '../../hooks/useTableMeta';
 import { useFieldMeta } from '../../hooks/useFieldMeta';
 import { getLinkTargetTableId, metaToFieldConfig } from '../../services/baseService';
@@ -82,6 +82,31 @@ export function ConfigPanel({ initialConfig, onSave, onCancel, appMode, baseToke
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mainFields]);
+
+  /**
+   * ★ 「表单取值」的来源候选区块 = 本表单的全部区块（主表 + 各子表）。
+   * 调用方按需过滤掉「当前区块」（编辑器内也会再兜一层，避免自引用）。
+   * 仅影响配置面板的可选项，不参与任何持久化。
+   */
+  const refBlocks = useMemo(() => {
+    const out: { tableId: string; label: string; fields: FieldConfig[] }[] = [];
+    if (draft.mainTable.tableId) {
+      out.push({
+        tableId: draft.mainTable.tableId,
+        label: `${draft.mainTable.sectionName || draft.mainTable.tableName || '主表信息'}（主表）`,
+        fields: draft.mainTable.fields,
+      });
+    }
+    draft.subTables.forEach((s, i) => {
+      if (!s.tableId) return;
+      out.push({
+        tableId: s.tableId,
+        label: `${s.sectionName || s.tableName || `子表${i + 1}`}（子表）`,
+        fields: s.fields,
+      });
+    });
+    return out;
+  }, [draft.mainTable, draft.subTables]);
 
   const updateMainTable = (tableId: any) => {
     const t = tables.find((x) => x.id === tableId);
@@ -282,6 +307,8 @@ export function ConfigPanel({ initialConfig, onSave, onCancel, appMode, baseToke
             <FieldConfigList
               fields={draft.mainTable.fields}
               onChange={(f) => setDraft((d) => ({ ...d, mainTable: { ...d.mainTable, fields: f } }))}
+              currentTableId={draft.mainTable.tableId}
+              otherBlocks={refBlocks}
             />
           </div>
         </div>
@@ -298,6 +325,7 @@ export function ConfigPanel({ initialConfig, onSave, onCancel, appMode, baseToke
             sub={sub}
             tables={tables}
             mainTableId={draft.mainTable.tableId}
+            otherBlocks={refBlocks}
             onChange={(s) =>
                 setDraft((d) => ({
                   ...d,

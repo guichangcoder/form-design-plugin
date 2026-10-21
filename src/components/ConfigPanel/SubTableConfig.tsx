@@ -4,6 +4,7 @@ import { useFieldMeta } from '../../hooks/useFieldMeta';
 import { getLinkFields, metaToFieldConfig } from '../../services/baseService';
 import { resolveSubLayout } from '../../utils/subTableLayout';
 import { FieldConfigList } from './FieldConfigList';
+import { RefBlockOption } from './FormRefEditor';
 import { Select, Switch, InputNumber, Input, Button, Typography } from '@douyinfe/semi-ui';
 import { IconClose } from '@douyinfe/semi-icons';
 
@@ -12,11 +13,13 @@ interface Props {
   index?: number;
   tables: { id: string; name: string }[];
   mainTableId?: string;
+  /** ★ 本表单全部区块（含主表与其它子表）：供「表单取值」选择来源 */
+  otherBlocks?: RefBlockOption[];
   onChange: (sub: SubTableConfig) => void;
   onRemove: () => void;
 }
 
-export function SubTableConfig({ sub, index, tables, mainTableId, onChange, onRemove }: Props) {
+export function SubTableConfig({ sub, index, tables, mainTableId, otherBlocks, onChange, onRemove }: Props) {
   const { fields } = useFieldMeta(sub.tableId || undefined);
   const [linkFields, setLinkFields] = useState<{ fieldId: string; fieldName: string }[]>([]);
 
@@ -210,6 +213,8 @@ export function SubTableConfig({ sub, index, tables, mainTableId, onChange, onRe
             <FieldConfigList
               fields={sub.fields}
               onChange={(f) => onChange({ ...sub, fields: f })}
+              currentTableId={sub.tableId}
+              otherBlocks={otherBlocks}
             />
           </div>
         </>

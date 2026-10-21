@@ -38,6 +38,7 @@ const KEEP_FIELDS: ReadonlyArray<keyof FieldConfig> = [
   'defaultValue',  // 用户决策
   'readonly',      // 用户决策
   'optionRef',     // 用户决策（选项引用：源表/源字段/条件，体积很小）
+  'formRef',       // ★ 用户决策（表单内跨区块取值：来源区块/字段，体积很小）
   'unique',        // 用户决策（唯一性校验开关与提示文案）
   'dateAutoFill',  // 用户决策（日期联动预填：来源字段/偏移，体积很小）
   // ⚠️ 新增任何字段级配置都必须登记到这里，否则保存时被剥离 → 发布后该配置静默丢失
@@ -73,6 +74,7 @@ function untrimField(stub: any): FieldConfig {
     options: stub.options,
     linkTableId: stub.linkTableId,
     optionRef: stub.optionRef,
+    formRef: stub.formRef,
     unique: stub.unique,
     dateAutoFill: stub.dateAutoFill,
   };

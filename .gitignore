@@ -14,3 +14,6 @@ deploy/
 
 # 回归测试本地输出
 tests/out.txt
+
+# 回归测试 esbuild 副产物（渲染层引入 CSS 时生成）
+tests/regression.bundle.css

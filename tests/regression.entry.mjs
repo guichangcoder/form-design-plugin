@@ -2751,6 +2751,603 @@ async function run() {
     }
   }
 
+  /* ============================================================
+   * F29 表单内跨区块取值（formFieldRef）—— 2026-10-21 新增的**可选**功能
+   *
+   * 需求：某子表字段的选项，来自**同一张表单中另一个区块**（主表 / 另一张子表）
+   *      用户**已录入**的值（例：合同主表下 3 条产品明细 → 收款计划的「产品」只出这 3 个）。
+   *
+   * ★ 与 optionRef 完全并列、互不干扰：
+   *   - 纯本地计算、**零网络请求**（断言 API 调用数为 0）；
+   *   - formRef 优先于 optionRef，未配置时行为与今日**完全一致**（零破坏）；
+   *   - 新增持久化字段必须登记进 configSize 白名单，否则「配置者保存成功、别人打开静默失效」。
+   * ============================================================ */
+  {
+    const {
+      buildFormScope,
+      hasFormRef,
+      resolveOptionMode,
+      collectFormRefOptions,
+      formHasAnyFormRef,
+      formRefValuesSignature,
+      canBeRefSource,
+      describeRefSource,
+    } = await import('../src/utils/formFieldRef.ts');
+
+    const T_MAIN = 'tblMain29';
+    const T_SUB_A = 'tblSubA29';
+    const T_SUB_B = 'tblSubB29';
+    const F_PROD = 'fldProd29'; // 子表A 的产品（单选）
+    const F_TAGS = 'fldTags29'; // 子表A 的标签（多选）
+    const F_PLAN = 'fldPlan29'; // 子表B 的产品（要被引用的字段）
+    const F_REGION = 'fldRegion29'; // 主表的大区（单选）
+
+    const mainFields = [
+      { fieldId: F_REGION, fieldName: '大区', fieldType: FieldType.SingleSelect, visible: true, required: false },
+      { fieldId: F_PLAN, fieldName: '产品', fieldType: FieldType.SingleSelect, visible: true, required: false },
+    ];
+    const subA = {
+      tableId: T_SUB_A,
+      fields: [
+        { fieldId: F_PROD, fieldName: '产品', fieldType: FieldType.SingleSelect, visible: true, required: false },
+        { fieldId: F_TAGS, fieldName: '标签', fieldType: FieldType.MultiSelect, visible: true, required: false },
+      ],
+    };
+    const subTables = [
+      subA,
+      {
+        tableId: T_SUB_B,
+        fields: [
+          { fieldId: F_PLAN, fieldName: '产品', fieldType: FieldType.SingleSelect, visible: true, required: false },
+        ],
+      },
+    ];
+    const mainValues = { [F_REGION]: '华东', [F_PLAN]: '主表产品X' };
+    const subValues = {
+      [T_SUB_A]: [
+        { [F_PROD]: '产品甲', [F_TAGS]: [{ text: '红' }, { text: '蓝' }] },
+        { [F_PROD]: '产品乙', [F_TAGS]: [{ text: '蓝' }] },
+        { [F_PROD]: '产品甲', [F_TAGS]: [] }, // 重复值 → 必须去重
+        { [F_PROD]: '', [F_TAGS]: [] }, // 空值 → 必须跳过
+      ],
+      [T_SUB_B]: [{ [F_PLAN]: '' }],
+    };
+    const scope = buildFormScope(T_MAIN, mainValues, subValues, subTables, {
+      mainFields,
+      blockLabels: { [T_MAIN]: '合同', [T_SUB_A]: '产品明细', [T_SUB_B]: '收款计划' },
+    });
+
+    // 1) 子表 → 其他子表：遍历全部行、去重、保序、跳过空值
+    {
+      const field = {
+        fieldId: F_PLAN,
+        fieldName: '产品',
+        fieldType: FieldType.SingleSelect,
+        visible: true,
+        required: false,
+        formRef: { sourceTableId: T_SUB_A, sourceFieldId: F_PROD },
+      };
+      const opts = collectFormRefOptions(field.formRef, scope);
+      check(
+        'F29 子表→子表：取来源全部行的值并去重（产品甲/产品乙，顺序稳定）',
+        opts.join(',') === '产品甲,产品乙',
+        opts
+      );
+      check('F29 子表→子表：空单元格被跳过（不产生空选项）', !opts.includes(''), opts);
+      check('F29 resolveOptionMode 判定为 formRef', resolveOptionMode(field) === 'formRef', null);
+      check('F29 hasFormRef 识别完整配置', hasFormRef(field) === true, null);
+    }
+
+    // 2) 子表 → 主表：取主表该字段的单个值
+    {
+      const field = {
+        fieldId: F_PLAN,
+        fieldName: '产品',
+        fieldType: FieldType.SingleSelect,
+        visible: true,
+        required: false,
+        formRef: { sourceTableId: T_MAIN, sourceFieldId: F_REGION },
+      };
+      const opts = collectFormRefOptions(field.formRef, scope);
+      check('F29 子表→主表：取主表字段的单值', opts.join(',') === '华东', opts);
+    }
+
+    // 3) 来源字段是多选 → 单元格拆成多个独立选项（复用 extractOptionTexts）
+    {
+      const field = {
+        fieldId: F_PLAN,
+        fieldName: '产品',
+        fieldType: FieldType.SingleSelect,
+        visible: true,
+        required: false,
+        formRef: { sourceTableId: T_SUB_A, sourceFieldId: F_TAGS, sourceFieldType: FieldType.MultiSelect },
+      };
+      const opts = collectFormRefOptions(field.formRef, scope);
+      check('F29 来源是多选 → 按单元格拆成独立选项（红/蓝）', opts.join(',') === '红,蓝', opts);
+      // 同样的数据、类型未记录（旧配置）→ 保持单值，绝不误拆
+      const legacy = collectFormRefOptions({ ...field.formRef, sourceFieldType: undefined }, scope);
+      check(
+        'F29 多选类型未记录（旧配置）→ 不拆，退化为整格文本（零迁移）',
+        legacy.length === 2 && legacy.every((v) => typeof v === 'string') && legacy[0] !== '红',
+        legacy
+      );
+    }
+
+    // 4) aggregate='single'：只取来源的第一条非空值
+    {
+      const single = collectFormRefOptions(
+        { sourceTableId: T_SUB_A, sourceFieldId: F_PROD, aggregate: 'single' },
+        scope
+      );
+      check('F29 aggregate=single 只取第一个非空值', single.join(',') === '产品甲', single);
+    }
+
+    // 5) 来源区块无行 / 空作用域 → 空集（不抛错）
+    {
+      check('F29 作用域为 null 时返回空集（不抛错）', collectFormRefOptions({ sourceTableId: T_SUB_A, sourceFieldId: F_PROD }, null).length === 0, null);
+      const emptyScope = buildFormScope(T_MAIN, {}, {}, subTables, { mainFields });
+      check(
+        'F29 来源子表无行 → 空集',
+        collectFormRefOptions({ sourceTableId: T_SUB_A, sourceFieldId: F_PROD }, emptyScope).length === 0,
+        null
+      );
+    }
+
+    // 6) ★ 零破坏：未配置 formRef 时判定为 optionRef / static，与今日完全一致
+    {
+      check(
+        'F29 未配置 formRef 且无 optionRef → static（固定选项，行为不变）',
+        resolveOptionMode({ fieldId: 'x', fieldName: 'x', fieldType: FieldType.SingleSelect, visible: true, required: false }) === 'static',
+        null
+      );
+      check(
+        'F29 未配置 formRef 但配置了 optionRef → optionRef（原路径不变）',
+        resolveOptionMode({
+          fieldId: 'x',
+          fieldName: 'x',
+          fieldType: FieldType.SingleSelect,
+          visible: true,
+          required: false,
+          optionRef: { tableId: 't', fieldId: 'f', conditions: [] },
+        }) === 'optionRef',
+        null
+      );
+      check(
+        'F29 两者都配置 → formRef 优先（互不干扰、优先级确定）',
+        resolveOptionMode({
+          fieldId: 'x',
+          fieldName: 'x',
+          fieldType: FieldType.SingleSelect,
+          visible: true,
+          required: false,
+          optionRef: { tableId: 't', fieldId: 'f', conditions: [] },
+          formRef: { sourceTableId: T_SUB_A, sourceFieldId: F_PROD },
+        }) === 'formRef',
+        null
+      );
+      check(
+        'F29 formRef 配置不完整（缺 sourceFieldId）→ 视为未配置（不抢 optionRef）',
+        resolveOptionMode({
+          fieldId: 'x',
+          fieldName: 'x',
+          fieldType: FieldType.SingleSelect,
+          visible: true,
+          required: false,
+          optionRef: { tableId: 't', fieldId: 'f', conditions: [] },
+          formRef: { sourceTableId: T_SUB_A, sourceFieldId: '' },
+        }) === 'optionRef',
+        null
+      );
+    }
+
+    // 7) ★ formHasAnyFormRef：决定「是否构建并下传作用域」——旧配置必须为假（渲染路径零变化）
+    {
+      check(
+        'F29 无 formRef 的表单 → formHasAnyFormRef=false（不构建作用域，旧路径零变化）',
+        formHasAnyFormRef(mainFields, subTables) === false,
+        null
+      );
+      const withRef = [
+        { ...subTables[0] },
+        {
+          ...subTables[1],
+          fields: [
+            {
+              ...subTables[1].fields[0],
+              formRef: { sourceTableId: T_SUB_A, sourceFieldId: F_PROD },
+            },
+          ],
+        },
+      ];
+      check('F29 任一字段配了 formRef → formHasAnyFormRef=true', formHasAnyFormRef(mainFields, withRef) === true, null);
+    }
+
+    // 8) ★ memo 保命线：作用域值签名只随「被引用的字段值」变化
+    {
+      const withRef = [
+        subA,
+        {
+          ...subTables[1],
+          fields: [
+            {
+              ...subTables[1].fields[0],
+              formRef: { sourceTableId: T_SUB_A, sourceFieldId: F_PROD },
+            },
+          ],
+        },
+      ];
+      const sigOf = (mv, sv) => formRefValuesSignature(T_MAIN, mainFields, mv, withRef, sv);
+      const s0 = sigOf(mainValues, subValues);
+      // 改「未被引用」的主表值 → 签名必须不变（否则 typed 时 memo 会被穿透）
+      const s1 = sigOf({ ...mainValues, [F_PLAN]: '改了个无关的值' }, subValues);
+      check('F29 改未被引用的字段 → 作用域签名不变（不穿透 React.memo）', s0 === s1, null);
+      // 改「被引用」的来源字段值 → 签名必须变化（否则选项不更新）
+      const s2 = sigOf(mainValues, {
+        ...subValues,
+        [T_SUB_A]: [{ [F_PROD]: '产品丙', [F_TAGS]: [] }],
+      });
+      check('F29 改被引用的来源字段 → 作用域签名变化（选项实时更新）', s0 !== s2, null);
+      // 未被引用字段的**新增行**（其它列变化）也要保持稳定
+      const s3 = sigOf(mainValues, {
+        ...subValues,
+        [T_SUB_B]: [{ [F_PLAN]: '随便填' }],
+      });
+      check('F29 改动非来源区块 → 签名不变', s0 === s3, null);
+      // 无 formRef 的表单 → 签名恒为空串（不构建作用域）
+      check(
+        'F29 表单无 formRef → 签名恒为空（短路，不做任何遍历开销）',
+        formRefValuesSignature(T_MAIN, mainFields, mainValues, subTables, subValues) === '',
+        null
+      );
+    }
+
+    // 9) 来源字段候选过滤：不可产出选项的类型（附件/人员等）不得作为来源
+    {
+      check('F29 单选/多选/文本可作为取值来源', canBeRefSource(FieldType.SingleSelect) && canBeRefSource(FieldType.MultiSelect) && canBeRefSource(FieldType.Text), null);
+      check('F29 附件/人员不可作为取值来源（无法产出选项文本）', !canBeRefSource(FieldType.Attachment) && !canBeRefSource(FieldType.User), null);
+    }
+
+    // 10) 来源描述（UI 文案）：能拿到配置时给出「区块·字段」
+    {
+      const desc = describeRefSource({ sourceTableId: T_SUB_A, sourceFieldId: F_PROD }, scope);
+      check('F29 来源描述包含区块名与字段名', desc === '产品明细·产品', desc);
+      const descMain = describeRefSource({ sourceTableId: T_MAIN, sourceFieldId: F_REGION }, scope);
+      check('F29 主表来源描述正确', descMain === '合同·大区', descMain);
+    }
+
+    // 11) ★ 零网络请求：整条链路不得触发任何 Base API（本地纯计算）
+    {
+      const calls = { field: 0, record: 0, table: 0 };
+      const trapBase = {
+        getTableList: async () => {
+          calls.table += 1;
+          return [];
+        },
+        getTable: (id) => ({
+          getFieldMetaList: async () => {
+            calls.field += 1;
+            return [];
+          },
+          getRecordsByPage: async () => {
+            calls.record += 1;
+            return { records: [], hasMore: false };
+          },
+          getFieldValueListByPage: async () => {
+            calls.field += 1;
+            return { values: [], hasMore: false };
+          },
+        }),
+      };
+      selectBaseForTest({ base: trapBase });
+      const field = {
+        fieldId: F_PLAN,
+        fieldName: '产品',
+        fieldType: FieldType.SingleSelect,
+        visible: true,
+        required: false,
+        formRef: { sourceTableId: T_SUB_A, sourceFieldId: F_PROD },
+      };
+      const opts = collectFormRefOptions(field.formRef, scope);
+      check(
+        'F29 取值链路零网络请求（纯本地）',
+        opts.length === 2 && calls.table === 0 && calls.field === 0 && calls.record === 0,
+        { opts, calls }
+      );
+    }
+
+    // 12) ★ 持久化登记：formRef 必须在 configSize 白名单里，否则「配好保存成功、别人打开静默失效」
+    {
+      const fs29 = await import('node:fs');
+      const sizeSrc = fs29.readFileSync(new URL('../src/services/configSize.ts', import.meta.url), 'utf8');
+      check('F29 configSize KEEP_FIELDS 登记了 formRef（防瘦身剥离）', /'formRef'/.test(sizeSrc), null);
+      check('F29 configSize untrimField 还原 formRef', /formRef:\s*stub\.formRef/.test(sizeSrc), null);
+
+      // 端到端：序列化 → 反序列化，formRef 必须原样存活
+      const cfg = {
+        forms: [
+          {
+            id: 'f1',
+            version: 1,
+            formTitle: 't',
+            formDescription: '',
+            themeColor: '#000',
+            mainTable: { tableId: T_MAIN, tableName: '合同', sectionName: '', fields: mainFields },
+            subTables: [
+              {
+                tableId: T_SUB_B,
+                linkFieldId: 'lk',
+                sectionName: '',
+                allowMultiple: true,
+                maxRows: 10,
+                layout: 'vertical',
+                fields: [
+                  {
+                    fieldId: F_PLAN,
+                    fieldName: '产品',
+                    fieldType: FieldType.SingleSelect,
+                    visible: true,
+                    required: false,
+                    options: [{ id: 'o1', name: '枚举带来的选项' }],
+                    formRef: {
+                      sourceTableId: T_SUB_A,
+                      sourceFieldId: F_PROD,
+                      sourceFieldType: FieldType.SingleSelect,
+                      aggregate: 'distinctSet',
+                    },
+                  },
+                ],
+              },
+            ],
+            conditionalRules: [],
+          },
+        ],
+        defaultFormId: 'f1',
+      };
+      const thin = serializeConfig(cfg);
+      const thinField = thin.forms[0].subTables[0].fields[0];
+      check(
+        'F29 序列化后 formRef 完整保留（含 sourceFieldType / aggregate）',
+        thinField.formRef &&
+          thinField.formRef.sourceTableId === T_SUB_A &&
+          thinField.formRef.sourceFieldId === F_PROD &&
+          thinField.formRef.sourceFieldType === FieldType.SingleSelect &&
+          thinField.formRef.aggregate === 'distinctSet',
+        thinField.formRef
+      );
+      check(
+        'F29 运行时可重取的 options 仍被剥离（瘦身不受影响）',
+        thinField.options === undefined && thinField.fieldName === undefined,
+        { options: thinField.options, fieldName: thinField.fieldName }
+      );
+      const bytes = new (await import('node:buffer')).Buffer.from(JSON.stringify(thin)).length;
+      check('F29 体积远小于 10240 上限（formRef 体积极小）', bytes < 4096, { bytes });
+    }
+
+    // 13) ★ 静态保障：渲染层与配置层的接线（防止未来重构把入口悄悄摘掉）
+    {
+      const fs29 = await import('node:fs');
+      const read29 = (rel) => fs29.readFileSync(new URL(rel, import.meta.url), 'utf8');
+      const fieldRenderer = read29('../src/components/FormRenderer/FieldRenderer.tsx');
+      check(
+        'F29 FieldRenderer 按 resolveOptionMode 分流（唯一判断入口）',
+        /resolveOptionMode\(field\)/.test(fieldRenderer) && /optionMode === 'formRef'/.test(fieldRenderer),
+        null
+      );
+      check(
+        'F29 FieldRenderer 渲染 FormRefSelect 并传入 scope',
+        /FormRefSelect/.test(fieldRenderer) && /scope=\{formScope/.test(fieldRenderer),
+        null
+      );
+      check(
+        'F29 未配置 formRef 时 optionRef 路径保持不变（零破坏证据：仍走 RefOptionSelect）',
+        // optionRef 分流分支必须仍然存在，且 preview 屏蔽仍只针对真正的 optionRef（不是 formRef）
+        /optionMode === 'optionRef'/.test(fieldRenderer) &&
+          /<RefOptionSelect/.test(fieldRenderer) &&
+          /optionMode === 'optionRef' && hasOptionRef\(field\)/.test(fieldRenderer),
+        null
+      );
+      const formRenderer = read29('../src/components/FormRenderer/index.tsx');
+      check(
+        'F29 FormRenderer 仅在 formHasAnyFormRef 为真时构建作用域（旧配置零变化）',
+        /formHasAnyFormRef\(/.test(formRenderer) && /if \(!hasFormRefFeature\) return null/.test(formRenderer),
+        null
+      );
+      check(
+        'F29 作用域身份由「值签名」守门（不穿透 React.memo）',
+        /formRefValuesSignature\(/.test(formRenderer) && /formRefSig/.test(formRenderer),
+        null
+      );
+      check(
+        'F29 三个表单组件均透传 formScope',
+        /formScope=\{formScope/.test(read29('../src/components/FormRenderer/MainForm.tsx')) &&
+          /formScope=\{formScope/.test(read29('../src/components/FormRenderer/SubForm.tsx')) &&
+          /formScope=\{formScope/.test(read29('../src/components/FormRenderer/SubFormTable.tsx')),
+        null
+      );
+      // FormRefSelect 必须零请求：不得出现任何服务端读取调用 / 服务端模块 import
+      const formRefSelect = read29('../src/components/FormRenderer/FormRefSelect.tsx');
+      check(
+        'F29 FormRefSelect 不含任何服务端读取（零请求控件）',
+        !/enumerateRefOptions|searchAllRows|getRecordsByPage|loadRowsByConditions|tableRecordCache|optionRef'/.test(
+          formRefSelect
+        ),
+        null
+      );
+      const cfgList = read29('../src/components/ConfigPanel/FieldConfigList.tsx');
+      check(
+        'F29 配置面板有「表单取值」入口，且未传 otherBlocks 时不显示（旧调用方零变化）',
+        /FormRefEditor/.test(cfgList) && /formRefAvailable/.test(cfgList) && /otherBlocks\?\.length/.test(cfgList),
+        null
+      );
+      const cfgPanel = read29('../src/components/ConfigPanel/index.tsx');
+      check(
+        'F29 ConfigPanel 把全部区块作为来源候选下传',
+        /refBlocks/.test(cfgPanel) && /otherBlocks=\{refBlocks\}/.test(cfgPanel),
+        null
+      );
+      const refEditor = read29('../src/components/ConfigPanel/FormRefEditor.tsx');
+      check(
+        'F29 来源候选排除当前区块（防自引用）',
+        /b\.tableId !== currentTableId/.test(refEditor) || /otherBlocks \?\? \[\]\)\.filter/.test(refEditor),
+        null
+      );
+    }
+
+    // 14) ★ 端到端复现（真实渲染）：静态正则查不出「配置了 formRef 的字段实际渲染成了哪个控件」，
+    //     必须真渲染一次，断言两条路径的**实际输出**互不相同且各自正确。
+    {
+      const React = (await import('react')).default;
+      // ★ 必须用 server.browser 入口：`react-dom/server` 在 platform=node 下会解析到
+      //   server.node.js，它 `require('stream')` —— 在 ESM bundle 里是 "Dynamic require
+      //   not supported"（bundle 无法内联 Node 内置模块）。browser 入口无此依赖。
+      const { renderToStaticMarkup } = await import('react-dom/server.browser');
+      const { FieldRenderer } = await import('../src/components/FormRenderer/FieldRenderer.tsx');
+
+      const t_a = 'tblSubA29';
+      const f_prod = 'fldProd29';
+      const f_plan = 'fldPlan29';
+      const subs29 = [
+        {
+          tableId: t_a,
+          fields: [{ fieldId: f_prod, fieldName: '产品', fieldType: FieldType.SingleSelect, visible: true, required: false }],
+        },
+        {
+          tableId: T_SUB_B,
+          fields: [{ fieldId: f_plan, fieldName: '产品', fieldType: FieldType.SingleSelect, visible: true, required: false }],
+        },
+      ];
+      const sc = buildFormScope(
+        T_MAIN,
+        {},
+        { [t_a]: [{ [f_prod]: '产品A' }, { [f_prod]: '产品B' }], [T_SUB_B]: [{}] },
+        subs29,
+        { mainFields: [], blockLabels: { [T_MAIN]: '合同', [t_a]: '产品明细' } }
+      );
+      const render = (f, extra = {}) =>
+        renderToStaticMarkup(
+          React.createElement(FieldRenderer, {
+            field: f,
+            value: '',
+            onChange: () => {},
+            tableId: T_SUB_B,
+            formValues: {},
+            ...extra,
+          })
+        );
+
+      // ① 配了 formRef → 渲染本地取值控件（占位提示来自本功能，绝非引用选项的懒加载文案）
+      const htmlRef = render({
+        fieldId: f_plan,
+        fieldName: '产品',
+        fieldType: FieldType.SingleSelect,
+        visible: true,
+        required: false,
+        formRef: { sourceTableId: t_a, sourceFieldId: f_prod, sourceFieldType: FieldType.SingleSelect },
+      }, { formScope: sc });
+      check('F29 端到端：formRef 字段渲染出选择控件', /semi-select/.test(htmlRef), { len: htmlRef.length });
+      check(
+        'F29 端到端：formRef 字段走本地取值文案（不是引用选项的「点击展开（加载全部选项）」）',
+        /从上方已录入的值中选择/.test(htmlRef) && !/点击展开（加载全部选项）/.test(htmlRef),
+        null
+      );
+      check('F29 端到端：formRef 字段不显示「已扫描 / 正在穷举」等加载态', !/已扫描|正在穷举/.test(htmlRef), null);
+
+      // ② 未配置 formRef、配了 optionRef（旧配置）→ 仍走引用选项控件，文案不变（零破坏）
+      //    ★ 这条是最关键的零破坏证据：同样的渲染器、同样的入参形状，只有 field 配置不同
+      const htmlOpt = render({
+        fieldId: f_plan,
+        fieldName: '产品',
+        fieldType: FieldType.SingleSelect,
+        visible: true,
+        required: false,
+        optionRef: { tableId: t_a, fieldId: f_prod, conditions: [] },
+      });
+      check('F29 端到端：旧 optionRef 字段仍渲染选择控件（零破坏）', /semi-select/.test(htmlOpt), { len: htmlOpt.length });
+      check(
+        'F29 端到端：旧 optionRef 文案与今日一致（点击展开（加载全部选项））',
+        /点击展开（加载全部选项）/.test(htmlOpt),
+        null
+      );
+      check('F29 端到端：两条路径的实际输出互不相同（确实分流了）', htmlRef !== htmlOpt, null);
+
+      // ③ 两者都配 → 必须渲染 formRef 那一套（优先级在渲染层的体现）
+      const htmlBoth = render({
+        fieldId: f_plan,
+        fieldName: '产品',
+        fieldType: FieldType.SingleSelect,
+        visible: true,
+        required: false,
+        optionRef: { tableId: t_a, fieldId: f_prod, conditions: [] },
+        formRef: { sourceTableId: t_a, sourceFieldId: f_prod, sourceFieldType: FieldType.SingleSelect },
+      }, { formScope: sc });
+      check(
+        'F29 端到端：两者都配置 → 渲染 formRef 路径（优先级生效）',
+        /从上方已录入的值中选择/.test(htmlBoth) && !/点击展开（加载全部选项）/.test(htmlBoth),
+        null
+      );
+
+      // ④ 来源尚未录入 → 明确的占位提示（不空白、不报错）
+      const emptySc = buildFormScope(T_MAIN, {}, { [t_a]: [{}], [T_SUB_B]: [{}] }, subs29, {
+        mainFields: [],
+        blockLabels: { [T_MAIN]: '合同', [t_a]: '产品明细' },
+      });
+      const htmlEmpty = render({
+        fieldId: f_plan,
+        fieldName: '产品',
+        fieldType: FieldType.SingleSelect,
+        visible: true,
+        required: false,
+        formRef: { sourceTableId: t_a, sourceFieldId: f_prod, sourceFieldType: FieldType.SingleSelect },
+      }, { formScope: emptySc });
+      check(
+        'F29 端到端：来源尚未录入 → 提示「请先填写「产品明细·产品」」',
+        /请先填写/.test(htmlEmpty) && /产品明细·产品/.test(htmlEmpty),
+        null
+      );
+
+      // ⑤ 零请求：整条渲染链路（含 formRef 取值）不得触碰任何 Base API
+      const apiCalls = { table: 0, field: 0, record: 0 };
+      selectBaseForTest({
+        base: {
+          getTableList: async () => {
+            apiCalls.table += 1;
+            return [];
+          },
+          getTable: () => ({
+            getFieldMetaList: async () => {
+              apiCalls.field += 1;
+              return [];
+            },
+            getRecordsByPage: async () => {
+              apiCalls.record += 1;
+              return { records: [], hasMore: false };
+            },
+            getFieldValueListByPage: async () => {
+              apiCalls.field += 1;
+              return { values: [], hasMore: false };
+            },
+          }),
+        },
+      });
+      render(
+        {
+          fieldId: f_plan,
+          fieldName: '产品',
+          fieldType: FieldType.SingleSelect,
+          visible: true,
+          required: false,
+          formRef: { sourceTableId: t_a, sourceFieldId: f_prod, sourceFieldType: FieldType.SingleSelect },
+        },
+        { formScope: sc }
+      );
+      check(
+        'F29 端到端：渲染配置了 formRef 的表单零 Base API 调用',
+        apiCalls.table === 0 && apiCalls.field === 0 && apiCalls.record === 0,
+        apiCalls
+      );
+    }
+  }
+
   const failed = results.filter((r) => !r.pass);
   log(`\n=== ${results.length - failed.length}/${results.length} 通过 ===`);
   if (failed.length) process.exit(1);

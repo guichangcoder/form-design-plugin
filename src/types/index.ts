@@ -90,6 +90,44 @@ export interface DateAutoFillConfig {
   unit: 'day' | 'month' | 'year';
 }
 
+/**
+ * ★ 表单内跨区块取值（FormFieldRef）—— 2026-10-21 新增的**可选**能力。
+ *
+ * 需求：某子表字段的选项，来自**同一张表单中另一个区块**（主表或另一张子表）
+ * 用户**已录入**的字段值。例：合同主表下建了 3 条「产品明细」子表记录，
+ * 另一张「收款计划」子表的「产品」字段，其选项只应是这 3 条明细里填过的产品。
+ *
+ * 与 `optionRef`（服务端引用选项）的区别：
+ * - `optionRef`：选项来自**源数据表的已有记录**，需读服务端（受权限约束）；
+ * - `formFieldRef`：选项来自**本表单当前正在填写的值**（内存中），
+ *   **零网络请求**、实时联动、不要求填写者有源表读权限。
+ *
+ * 两者的关系：**互不相干、可并存**。取值时 `formFieldRef` 优先（更即时、更贴合
+ * 「本次录入」语义）；未配置 `formFieldRef` 时行为与今日**完全一致**。
+ */
+export interface FormFieldRef {
+  /** 来源区块的 tableId（主表 或 另一张子表 的表 ID） */
+  sourceTableId: string;
+  /** 来源区块中作为选项来源的字段 ID（通常是单选/多选/文本） */
+  sourceFieldId: string;
+  /**
+   * 来源字段类型（配置时由元信息记录）。
+   * 用途：来源是多选时一个单元格含多个选项 → 需拆成多条独立选项；
+   * 缺失时按单值处理（与 `extractOptionTexts` 的约定一致）。
+   */
+  sourceFieldType?: FieldType;
+  /**
+   * 取值聚合方式：
+   * - `distinctSet`（默认）＝把来源区块**所有行**的该字段值去重后作为选项集合。
+   *   子表来源即「已录入的 N 条明细里出现过的所有值」，符合「一条一个/可改选」预期。
+   * - `single`＝只取来源区块的单个值（主表来源时天然如此，可显式指定）。
+   */
+  aggregate?: 'distinctSet' | 'single';
+}
+
+/** 选项来源模式（供渲染层分流；formRef 优先于 optionRef） */
+export type OptionSourceMode = 'formRef' | 'optionRef' | 'static';
+
 /** 单个字段在表单中的配置 */
 export interface FieldConfig {
   fieldId: string;
@@ -113,6 +151,12 @@ export interface FieldConfig {
   linkTableId?: string;
   /** 选项引用（仅单选/多选）：配置后忽略固定 options，改为从源表动态取选项 */
   optionRef?: OptionReference;
+  /**
+   * ★ 表单内跨区块取值（仅单选/多选）：选项来自同一张表单里另一区块**已填写**的值。
+   * 纯本地计算、零请求；配置后优先于 optionRef 与固定 options。
+   * 旧配置无此字段 → 行为完全不变。
+   */
+  formRef?: FormFieldRef;
   /** 唯一性校验（提交时查重；仅 UNIQUE_CHECKABLE_TYPES 开放的字段类型生效） */
   unique?: UniqueConfig;
   /** 日期联动预填（仅日期字段，挂在被预填的目标字段上） */
