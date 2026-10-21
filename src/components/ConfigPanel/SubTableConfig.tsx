@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import type { SubTableConfig } from '../../types';
 import { useFieldMeta } from '../../hooks/useFieldMeta';
 import { getLinkFields, metaToFieldConfig } from '../../services/baseService';
+import { resolveSubLayout } from '../../utils/subTableLayout';
 import { FieldConfigList } from './FieldConfigList';
 import { Select, Switch, InputNumber, Input, Button, Typography } from '@douyinfe/semi-ui';
 import { IconClose } from '@douyinfe/semi-icons';
@@ -163,6 +164,47 @@ export function SubTableConfig({ sub, index, tables, mainTableId, onChange, onRe
               </span>
             )}
           </div>
+
+          {/* 展现形式：纵向卡片式（默认） / 横向表格式（超宽可左右滑动） */}
+          <div className="subcfg-row">
+            <Typography.Text type="tertiary" style={{ fontSize: 12, minWidth: 64 }}>
+              展现形式
+            </Typography.Text>
+            <div className="layout-choice">
+              <button
+                type="button"
+                className={`layout-choice-btn ${resolveSubLayout(sub) === 'vertical' ? 'active' : ''}`}
+                onClick={() => onChange({ ...sub, layout: 'vertical' })}
+              >
+                <span className="lcb-icon lcb-icon--vertical" />
+                <span className="lcb-text">
+                  <b>纵向卡片</b>
+                  <i>字段竖排，适合字段较少</i>
+                </span>
+              </button>
+              <button
+                type="button"
+                className={`layout-choice-btn ${resolveSubLayout(sub) === 'table' ? 'active' : ''}`}
+                onClick={() => onChange({ ...sub, layout: 'table' })}
+              >
+                <span className="lcb-icon lcb-icon--table" />
+                <span className="lcb-text">
+                  <b>横向表格</b>
+                  <i>一行一条记录，超宽可左右滑动</i>
+                </span>
+              </button>
+            </div>
+          </div>
+
+          {resolveSubLayout(sub) === 'table' && (
+            <Typography.Text
+              type="tertiary"
+              style={{ display: 'block', marginTop: 6, fontSize: 12, lineHeight: 1.7 }}
+            >
+              表格模式下表头吸顶、序号与删除按钮两侧固定；列宽按字段类型自动分配，
+              总宽超出容器时可左右滑动。
+            </Typography.Text>
+          )}
 
           <div style={{ marginTop: 10, borderTop: '1px dashed #e2e8f0', paddingTop: 10 }}>
             <FieldConfigList

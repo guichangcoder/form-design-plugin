@@ -263,6 +263,269 @@ button {
   background: var(--brand-soft) !important;
 }
 
+/* ---------- 子表展现形式选择（配置态） ---------- */
+.layout-choice {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
+.layout-choice-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 140px;
+  min-width: 0;
+  text-align: left;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+  transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+}
+
+.layout-choice-btn:hover {
+  border-color: var(--brand-line);
+  background: #fbfcfe;
+}
+
+.layout-choice-btn.active {
+  border-color: var(--brand);
+  background: var(--brand-soft);
+  box-shadow: 0 0 0 1px var(--brand) inset;
+}
+
+.layout-choice-btn .lcb-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.layout-choice-btn .lcb-text b {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.layout-choice-btn.active .lcb-text b {
+  color: var(--brand-deep);
+}
+
+.layout-choice-btn .lcb-text i {
+  font-size: 11px;
+  font-style: normal;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+/* 形态小图标：用纯 CSS 画出「卡片竖排」与「表格行」的示意 */
+.layout-choice-btn .lcb-icon {
+  flex: 0 0 22px;
+  width: 22px;
+  height: 20px;
+  position: relative;
+}
+
+.layout-choice-btn .lcb-icon--vertical::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border: 1px solid #cbd5e1;
+  border-radius: 3px;
+  background: repeating-linear-gradient(
+    180deg,
+    #e2e8f0 0,
+    #e2e8f0 2px,
+    transparent 2px,
+    transparent 7px
+  );
+}
+
+.layout-choice-btn .lcb-icon--table::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border: 1px solid #cbd5e1;
+  border-radius: 3px;
+  background: repeating-linear-gradient(
+    90deg,
+    #e2e8f0 0,
+    #e2e8f0 2px,
+    transparent 2px,
+    transparent 7px
+  );
+}
+
+.layout-choice-btn.active .lcb-icon--vertical::before,
+.layout-choice-btn.active .lcb-icon--table::before {
+  border-color: var(--brand);
+  background: none;
+}
+
+.layout-choice-btn.active .lcb-icon--vertical {
+  background: repeating-linear-gradient(
+    180deg,
+    var(--brand-line) 0,
+    var(--brand-line) 2px,
+    transparent 2px,
+    transparent 7px
+  );
+}
+
+.layout-choice-btn.active .lcb-icon--table {
+  background: repeating-linear-gradient(
+    90deg,
+    var(--brand-line) 0,
+    var(--brand-line) 2px,
+    transparent 2px,
+    transparent 7px
+  );
+}
+
+/* ============================================================
+   子表横向表格形态（sub.layout === 'table'）
+   要点：外层横向滚动 + sticky 表头/序号列/操作列（必须有不透明底色）
+   ============================================================ */
+.sub-table-scroll {
+  /* 容器不够宽时出现横向滚动条（需求：超宽可左右滑动） */
+  overflow-x: auto;
+  overflow-y: hidden;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+  /* 独立滚动区域，避免滑动时带动整个页面 */
+  overscroll-behavior-x: contain;
+}
+
+.sub-table {
+  border-collapse: separate;
+  border-spacing: 0;
+  width: 100%;
+  table-layout: fixed;
+}
+
+.sub-table th,
+.sub-table td {
+  border-bottom: 1px solid #eef2f7;
+  border-right: 1px solid #eef2f7;
+  padding: 8px 10px;
+  vertical-align: top;
+  text-align: left;
+  background: #fff;
+}
+
+.sub-table th:last-child,
+.sub-table td:last-child {
+  border-right: none;
+}
+
+.sub-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+/* 表头：吸顶 + 不透明底色（否则滚动时下层内容透出） */
+.sub-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  padding: 9px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #475569;
+  background: #f7f9fc;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.sub-table thead th .sub-th-label {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 序号列：左侧固定（左滑时保持可见） */
+.sub-table .st-cell-idx {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  width: 48px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--muted);
+  background: #fbfcfe;
+  white-space: nowrap;
+  /* 固定列右边界线，滑动时作为视觉分界 */
+  box-shadow: 1px 0 0 0 #e5e7eb;
+}
+
+.sub-table thead .st-cell-idx {
+  z-index: 4;
+  background: #f2f6fb;
+}
+
+/* 操作列：右侧固定（右滑到最右仍可删除该行） */
+.sub-table .st-cell-act {
+  position: sticky;
+  right: 0;
+  z-index: 2;
+  width: 56px;
+  text-align: center;
+  padding: 4px 2px;
+  background: #fbfcfe;
+  box-shadow: -1px 0 0 0 #e5e7eb;
+}
+
+.sub-table thead .st-cell-act {
+  z-index: 4;
+  background: #f2f6fb;
+}
+
+.sub-table tbody tr:hover td {
+  background: #fafcff;
+}
+
+.sub-table tbody tr:hover .st-cell-idx,
+.sub-table tbody tr:hover .st-cell-act {
+  background: #f4f8fd;
+}
+
+/* 该单元格因行级条件被隐藏：留空（不加占位符号） */
+.sub-table .st-cell-hidden {
+  background: #fafafa;
+}
+
+/* 单元格内校验错误：红框 + 下方小字 */
+.sub-table td.st-cell--error .semi-input-wrapper,
+.sub-table td.st-cell--error .semi-select,
+.sub-table td.st-cell--error .semi-datepicker {
+  border-color: #f5222d !important;
+}
+
+.sub-table .st-cell-err {
+  margin-top: 3px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: #f5222d;
+}
+
+/* 部分行必填提示（列头不给星时，改在需要的格子内提示） */
+.sub-table .st-cell-hint {
+  margin-top: 3px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: #d97706;
+}
+
+.sub-table .unique-badge-compact {
+  font-size: 11px;
+}
+
 /* ---------- 提交按钮 ---------- */
 .submit-btn {
   width: 100%;

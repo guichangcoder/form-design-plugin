@@ -118,6 +118,9 @@ export function serializeConfig(data: PluginData): any {
         sectionName: s.sectionName,
         allowMultiple: s.allowMultiple,
         maxRows: s.maxRows,
+        // ★ 展现形式（vertical / table）：纯用户决策，无法从 base 重取，必须保留。
+        //   漏登记 → 配置者保存成功、别人打开时静默退回纵向卡片（本项目踩过同类坑）。
+        layout: s.layout,
         fields: (s.fields ?? []).map(trimField),
       })),
       // 条件规则同样保留真实 tableId，与 dataConditions 声明集对齐。

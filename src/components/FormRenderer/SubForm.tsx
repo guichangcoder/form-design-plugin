@@ -3,8 +3,16 @@ import { FieldType } from '@lark-base-open/js-sdk';
 import { SubTableConfig, FormValues, ConditionalState, FieldError, UniqueFieldState } from '../../types';
 import { isFieldRequired, isHiddenField } from '../../utils/validator';
 import { getOptionRefDependencies } from '../../utils/optionRef';
+import {
+  appendRow,
+  applyRowFieldChange,
+  canAppendRow,
+  removeRowAt,
+  resolveSubLayout,
+} from '../../utils/subTableLayout';
 import { toast } from '../../utils/toast';
 import { FieldRenderer } from './FieldRenderer';
+import { SubFormTable } from './SubFormTable';
 import { Button } from '@douyinfe/semi-ui';
 import { IconPlus, IconMinus } from '@douyinfe/semi-icons';
 
@@ -24,43 +32,32 @@ interface Props {
 }
 
 /**
- * 子表字段渲染（逐行）。
+ * 子表渲染入口：按 sub.layout 分流到两种展现形式。
+ * - 'vertical'（缺省）→ 纵向卡片式，每条记录一张卡片
+ * - 'table'          → 横向表格式，每条记录一行，超宽可左右滑动
+ * 两者的行变更 / 级联清空 / 默认值填充都走 utils/subTableLayout.ts 的同一组纯函数。
  * ★ React.memo 包裹：理由同 MainForm —— 阻断日期联动写回引发的全树重渲染。
  */
-export const SubForm = React.memo(function SubForm({ sub, rows, onChange, cond, errors, uniqueState, onFieldBlur, preview }: Props) {
+export const SubForm = React.memo(function SubForm(props: Props) {
+  if (resolveSubLayout(props.sub) === 'table') {
+    return <SubFormTable {...props} />;
+  }
+  return <SubFormVertical {...props} />;
+});
+
+function SubFormVertical({ sub, rows, onChange, cond, errors, uniqueState, onFieldBlur, preview }: Props) {
   const updateRow = (idx: number, fieldId: string, v: unknown) =>
-    onChange(
-      rows.map((r, i) => {
-        if (i !== idx) return r;
-        const next: FormValues = { ...r, [fieldId]: v };
-        // 行内级联清空：引用选项依赖了被改字段的同行字段，父值一变即清空
-        for (const f of sub.fields) {
-          if (f.fieldId === fieldId) continue;
-          if (!getOptionRefDependencies(f).includes(fieldId)) continue;
-          if (next[f.fieldId] === undefined) continue;
-          next[f.fieldId] = f.fieldType === FieldType.MultiSelect ? [] : undefined;
-        }
-        return next;
-      })
-    );
+    onChange(rows.map((r, i) => (i === idx ? applyRowFieldChange(sub.fields, r, fieldId, v) : r)));
 
   const addRow = () => {
-    if (sub.maxRows && rows.length >= sub.maxRows) {
+    if (!canAppendRow(sub.maxRows, rows.length)) {
       toast(`最多添加 ${sub.maxRows} 条`, 'warning');
       return;
     }
-    const defaults = sub.fields.reduce<FormValues>((values, field) => {
-      if (field.defaultValue !== undefined) {
-        values[field.fieldId] = Array.isArray(field.defaultValue)
-          ? [...field.defaultValue]
-          : field.defaultValue;
-      }
-      return values;
-    }, {});
-    onChange([...rows, defaults]);
+    onChange(appendRow(rows, sub.fields));
   };
 
-  const removeRow = (idx: number) => onChange(rows.filter((_, i) => i !== idx));
+  const removeRow = (idx: number) => onChange(removeRowAt(rows, idx));
 
   // 仅排除「指向主表的关联字段」本身（提交逻辑自动注入主表 recordId，hydrate 时也会从
   // sub.fields 剔除）；其他关联字段照常渲染为记录选择器，供用户从目标表挑选记录。
@@ -130,4 +127,4 @@ export const SubForm = React.memo(function SubForm({ sub, rows, onChange, cond, 
       )}
     </div>
   );
-});
+}

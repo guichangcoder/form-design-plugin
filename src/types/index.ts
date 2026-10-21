@@ -125,6 +125,13 @@ export const UNIQUE_CHECKABLE_TYPES: FieldType[] = [
   FieldType.Currency,
 ];
 
+/**
+ * 子表展现形式：
+ * - vertical：纵向卡片式（默认）。每条记录一张卡片，字段竖排 —— 字段少时清晰。
+ * - table：横向表格式。每条记录一行、字段作列头；总宽超出容器时可左右滑动。
+ */
+export type SubTableLayout = 'vertical' | 'table';
+
 /** 子表配置 */
 export interface SubTableConfig {
   tableId: string;
@@ -140,6 +147,11 @@ export interface SubTableConfig {
   allowMultiple: boolean;
   /** 最多允许添加多少条（allowMultiple 时生效） */
   maxRows?: number;
+  /**
+   * 展现形式（缺省 = 'vertical'，旧配置无需迁移）。
+   * ⚠️ 新增/修改此项必须同步 configSize.ts 的序列化白名单，否则保存时被瘦身剥离。
+   */
+  layout?: SubTableLayout;
 }
 
 /** 条件显示规则 */

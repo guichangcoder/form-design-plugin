@@ -39,6 +39,11 @@ interface Props {
   uniqueHint?: string;
   /** 配置态实时预览：数据驱动控件（人员/关联/引用选项）不发起任何加载请求 */
   preview?: boolean;
+  /**
+   * 横向表格模式：唯一性校验徽标改为「控件下方紧凑小字」。
+   * 表格列宽有限，原来的右侧 84px 竖排文字会把列撑爆；hover 时通过 title 显示原因。
+   */
+  uniqueCompact?: boolean;
 }
 
 const fullWidth: React.CSSProperties = { width: '100%' };
@@ -68,6 +73,28 @@ function UniqueBadge({ status, hint }: { status: string; hint?: string }) {
       }}
     >
       <Typography.Text type={conf.type} size="small">
+        {conf.text}
+      </Typography.Text>
+    </div>
+  );
+}
+
+/**
+ * 横向表格模式下的紧凑唯一性提示：控件下方一行小字，不占横向空间。
+ * 完整原因（如权限不足）通过 title 悬浮展示，避免把列撑宽。
+ */
+function UniqueBadgeCompact({ status, hint }: { status: string; hint?: string }) {
+  const map: Record<string, { text: string; type: 'success' | 'danger' | 'warning' | 'tertiary' }> = {
+    checking: { text: '校验中…', type: 'tertiary' },
+    ok: { text: '✓ 可用', type: 'success' },
+    dup: { text: '✗ 已存在', type: 'danger' },
+    error: { text: '⚠ 无法校验', type: 'warning' },
+  };
+  const conf = map[status];
+  if (!conf) return null;
+  return (
+    <div className="unique-badge-compact" title={hint} style={{ marginTop: 3, lineHeight: 1.4 }}>
+      <Typography.Text type={conf.type} size="small" style={{ fontSize: 11 }}>
         {conf.text}
       </Typography.Text>
     </div>
@@ -138,6 +165,7 @@ export function FieldRenderer({
   uniqueStatus,
   uniqueHint,
   preview,
+  uniqueCompact,
 }: Props) {
   const options = (field.options ?? []).map((o) => ({ value: o.name, label: o.name }));
 
@@ -348,6 +376,15 @@ export function FieldRenderer({
 
   // 未配置唯一性校验的字段：保持原来的单控件布局（零改动风险）
   if (!uniqueStatus || uniqueStatus === 'idle') return <>{control}</>;
+  // 横向表格模式：徽标放控件下方，避免占横向空间撑宽列
+  if (uniqueCompact) {
+    return (
+      <div style={{ width: '100%' }}>
+        {control}
+        <UniqueBadgeCompact status={uniqueStatus} hint={uniqueHint} />
+      </div>
+    );
+  }
   // 配置了唯一性校验：控件占满剩余宽度，右侧固定显示校验结果
   return (
     <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8, width: '100%' }}>

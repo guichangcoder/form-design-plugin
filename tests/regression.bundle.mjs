@@ -29932,6 +29932,9 @@ function serializeConfig(data) {
         sectionName: s.sectionName,
         allowMultiple: s.allowMultiple,
         maxRows: s.maxRows,
+        // ★ 展现形式（vertical / table）：纯用户决策，无法从 base 重取，必须保留。
+        //   漏登记 → 配置者保存成功、别人打开时静默退回纵向卡片（本项目踩过同类坑）。
+        layout: s.layout,
         fields: (s.fields ?? []).map(trimField)
       })),
       // 条件规则同样保留真实 tableId，与 dataConditions 声明集对齐。
@@ -30327,6 +30330,109 @@ function resolveAutoFill(fields, values, manual, auto, keyOf) {
     changed = true;
   }
   return changed ? cur : null;
+}
+
+// src/utils/subTableLayout.ts
+var SUB_ROW_INDEX_WIDTH = 48;
+var SUB_ROW_ACTION_WIDTH = 56;
+function resolveSubLayout(sub) {
+  return sub.layout === "table" ? "table" : "vertical";
+}
+function suggestColumnWidth(field) {
+  switch (field.fieldType) {
+    case j5.Text:
+      return 200;
+    case j5.Number:
+    case j5.Currency:
+    case j5.Progress:
+    case j5.DateTime:
+      return 150;
+    case j5.SingleSelect:
+      return 160;
+    case j5.MultiSelect:
+      return 170;
+    case j5.Checkbox:
+      return 110;
+    case j5.Rating:
+      return 150;
+    case j5.Phone:
+    case j5.Url:
+    case j5.Email:
+      return 190;
+    case j5.User:
+      return 220;
+    case j5.Attachment:
+      return 230;
+    case j5.SingleLink:
+    case j5.DuplexLink:
+      return 230;
+    default:
+      return 180;
+  }
+}
+function buildSubColumns(sub, cond, rowCount, showActionColumn) {
+  const columns = [];
+  for (const f12 of sub.fields) {
+    if (f12.fieldId === sub.linkFieldId) continue;
+    if (!f12.visible) continue;
+    if (isHiddenField(cond, sub.tableId, f12.fieldId)) continue;
+    const requiredRows = [];
+    const hiddenRows = [];
+    for (let i3 = 0; i3 < rowCount; i3++) {
+      if (isFieldRequired(f12, sub.tableId, cond, i3)) requiredRows.push(i3);
+      if (isHiddenField(cond, sub.tableId, f12.fieldId, i3)) hiddenRows.push(i3);
+    }
+    const requiredEverywhere = rowCount > 0 && requiredRows.length === rowCount;
+    columns.push({
+      fieldId: f12.fieldId,
+      label: f12.label || f12.fieldName || f12.fieldId,
+      width: suggestColumnWidth(f12),
+      requiredRows,
+      requiredEverywhere,
+      partialRequired: requiredRows.length > 0 && !requiredEverywhere,
+      hiddenRows
+    });
+  }
+  const contentWidth = columns.reduce((sum, c11) => sum + c11.width, 0);
+  const fixedWidth = SUB_ROW_INDEX_WIDTH + (showActionColumn ? SUB_ROW_ACTION_WIDTH : 0);
+  return {
+    columns,
+    fixedWidth,
+    contentWidth,
+    minWidth: fixedWidth + contentWidth,
+    empty: columns.length === 0
+  };
+}
+function defaultRowValues(fields) {
+  return fields.reduce((values, field) => {
+    if (field.defaultValue !== void 0) {
+      values[field.fieldId] = Array.isArray(field.defaultValue) ? [...field.defaultValue] : field.defaultValue;
+    }
+    return values;
+  }, {});
+}
+function applyRowFieldChange(fields, row, fieldId, value) {
+  const next = { ...row, [fieldId]: value };
+  for (const f12 of fields) {
+    if (f12.fieldId === fieldId) continue;
+    if (!getOptionRefDependencies(f12).includes(fieldId)) continue;
+    if (next[f12.fieldId] === void 0) continue;
+    next[f12.fieldId] = f12.fieldType === j5.MultiSelect ? [] : void 0;
+  }
+  return next;
+}
+function updateRowAt(fields, rows, rowIndex, fieldId, value) {
+  return rows.map((r10, i3) => i3 === rowIndex ? applyRowFieldChange(fields, r10, fieldId, value) : r10);
+}
+function removeRowAt(rows, rowIndex) {
+  return rows.filter((_5, i3) => i3 !== rowIndex);
+}
+function appendRow(rows, fields) {
+  return [...rows, defaultRowValues(fields)];
+}
+function canAppendRow(maxRows, rowCount) {
+  if (!maxRows) return true;
+  return rowCount < maxRows;
 }
 
 // src/utils/permError.ts
@@ -33093,6 +33199,266 @@ async function run() {
     check(
       "F24 \u5E26 baseToken \u4E14\u7ED1\u5B9A\u6210\u529F\u7684\u914D\u7F6E\u4E0D\u505A\u8DE8 base \u4E22\u5F03\uFF08\u81EA\u63CF\u8FF0\u914D\u7F6E\uFF09",
       /\(!parsed\.baseToken \|\| !bound\)/.test(src),
+      null
+    );
+  }
+  {
+    const mkField = (over) => ({
+      fieldId: "f",
+      fieldName: "\u5B57\u6BB5",
+      fieldType: j5.Text,
+      visible: true,
+      required: false,
+      ...over
+    });
+    const subBase = {
+      tableId: SUB1,
+      tableName: "\u5B50\u88681",
+      linkFieldId: "fldLink1",
+      allowMultiple: true,
+      fields: [
+        mkField({ fieldId: "fldA", fieldName: "\u4EA7\u54C1", label: "\u4EA7\u54C1", required: true, fieldType: j5.Text }),
+        mkField({ fieldId: "fldB", fieldName: "\u6570\u91CF", label: "\u6570\u91CF", fieldType: j5.Number }),
+        mkField({ fieldId: "fldC", fieldName: "\u65E5\u671F", label: "\u65E5\u671F", fieldType: j5.DateTime }),
+        mkField({ fieldId: "fldD", fieldName: "\u9644\u4EF6", label: "\u9644\u4EF6", fieldType: j5.Attachment }),
+        mkField({ fieldId: "fldH", fieldName: "\u9690\u85CF\u5B57\u6BB5", label: "\u9690\u85CF\u5B57\u6BB5", visible: false }),
+        mkField({ fieldId: "fldLink1", fieldName: "\u5173\u8054\u4E3B\u8868", label: "\u5173\u8054\u4E3B\u8868", fieldType: j5.SingleLink })
+      ]
+    };
+    check("F25 layout \u7F3A\u7701\u89E3\u6790\u4E3A\u7EB5\u5411", resolveSubLayout({ ...subBase }) === "vertical", null);
+    check(
+      "F25 layout \u975E\u6CD5\u503C\u56DE\u9000\u7EB5\u5411",
+      resolveSubLayout({ ...subBase, layout: "weird" }) === "vertical",
+      null
+    );
+    check(
+      "F25 layout=table \u6B63\u786E\u89E3\u6790",
+      resolveSubLayout({ ...subBase, layout: "table" }) === "table",
+      null
+    );
+    const thin = serializeConfig({
+      forms: [
+        {
+          id: "form1",
+          version: "1.0.0",
+          formTitle: "T",
+          mainTable: { tableId: MAIN, tableName: "\u4E3B\u8868", fields: [] },
+          subTables: [{ ...subBase, layout: "table" }],
+          conditionalRules: []
+        }
+      ],
+      defaultFormId: "form1"
+    });
+    check("F25 layout=table \u968F\u5E8F\u5217\u5316\u4FDD\u7559", thin.forms[0].subTables[0].layout === "table", thin.forms[0].subTables[0].layout);
+    const thinVertical = serializeConfig({
+      forms: [
+        {
+          id: "form1",
+          version: "1.0.0",
+          formTitle: "T",
+          mainTable: { tableId: MAIN, tableName: "\u4E3B\u8868", fields: [] },
+          subTables: [{ ...subBase, layout: "vertical" }],
+          conditionalRules: []
+        }
+      ],
+      defaultFormId: "form1"
+    });
+    check(
+      "F25 layout=vertical \u4E5F\u5982\u5B9E\u4FDD\u7559\uFF08\u4E0D\u4F9D\u8D56\u7F3A\u7701\uFF09",
+      thinVertical.forms[0].subTables[0].layout === "vertical",
+      thinVertical.forms[0].subTables[0].layout
+    );
+    const form = {
+      id: "form1",
+      version: "1.0.0",
+      formTitle: "T",
+      mainTable: { tableId: MAIN, tableName: "\u4E3B\u8868", fields: [] },
+      subTables: [subBase],
+      conditionalRules: []
+    };
+    const emptyCond = computeConditionalState(form, {}, { [SUB1]: [{}, {}] });
+    const cols = buildSubColumns(subBase, emptyCond, 2, true);
+    check(
+      "F25 \u5217\u6A21\u578B\u542B 4 \u4E2A\u53EF\u89C1\u5B57\u6BB5\uFF08\u6392\u9664 visible=false \u4E0E\u5173\u8054\u5B57\u6BB5\uFF09",
+      cols.columns.map((c11) => c11.fieldId).join(",") === "fldA,fldB,fldC,fldD",
+      cols.columns.map((c11) => c11.fieldId)
+    );
+    check(
+      "F25 \u5217\u5BBD\u6309\u5B57\u6BB5\u7C7B\u578B\u5206\u914D\uFF08\u6587\u672C 200 / \u6570\u5B57\xB7\u65E5\u671F 150 / \u9644\u4EF6 230\uFF09",
+      cols.columns[0].width === 200 && cols.columns[1].width === 150 && cols.columns[2].width === 150 && cols.columns[3].width === 230,
+      cols.columns.map((c11) => c11.width)
+    );
+    check("F25 \u8868\u683C\u6700\u5C0F\u5BBD = \u5E8F\u53F748 + \u5185\u5BB9\u5217\u4E4B\u548C + \u64CD\u4F5C56", cols.minWidth === 48 + (200 + 150 + 150 + 230) + 56, {
+      minWidth: cols.minWidth,
+      contentWidth: cols.contentWidth
+    });
+    check("F25 \u5355\u884C\u6A21\u5F0F\uFF08\u4E0D\u53EF\u5220\uFF09\u4E0D\u9884\u7559\u64CD\u4F5C\u5217\u5BBD", buildSubColumns(subBase, emptyCond, 1, false).minWidth === 48 + (200 + 150 + 150 + 230), null);
+    check("F25 \u5168\u8868\u5FC5\u586B \u2192 \u5217\u5934\u663E\u793A\u661F\u53F7", cols.columns[0].requiredEverywhere === true, cols.columns[0]);
+    check("F25 \u975E\u5FC5\u586B\u5B57\u6BB5\u5217\u5934\u4E0D\u7ED9\u661F", cols.columns[1].requiredEverywhere === false, null);
+    const ruleForm = {
+      ...form,
+      conditionalRules: [
+        {
+          ruleId: "r1",
+          trigger: { tableId: MAIN, fieldId: "fldM1", operator: "equals", value: "x" },
+          actions: [
+            { type: "hide", tableId: SUB1, fieldIds: ["fldC"] },
+            // 主表触发 → 子表全表级隐藏
+            { type: "hide", tableId: SUB1, fieldIds: ["fldD"] }
+            // 同上
+          ]
+        }
+      ]
+    };
+    const hiddenCond = computeConditionalState(
+      ruleForm,
+      { fldM1: "x" },
+      { [SUB1]: [{}, {}] }
+    );
+    const colsHidden = buildSubColumns(subBase, hiddenCond, 2, true);
+    check(
+      "F25 \u5168\u8868\u7EA7\u9690\u85CF\u7684\u5B57\u6BB5\u6574\u5217\u79FB\u9664",
+      !colsHidden.columns.some((c11) => c11.fieldId === "fldC") && !colsHidden.columns.some((c11) => c11.fieldId === "fldD"),
+      colsHidden.columns.map((c11) => c11.fieldId)
+    );
+    const rowRuleForm = {
+      ...form,
+      conditionalRules: [
+        {
+          ruleId: "r2",
+          trigger: { tableId: SUB1, fieldId: "fldB", operator: "equals", value: 0 },
+          actions: [{ type: "hide", tableId: SUB1, fieldIds: ["fldC"] }]
+        }
+      ]
+    };
+    const rowCond = computeConditionalState(rowRuleForm, {}, { [SUB1]: [{ fldB: 0 }, { fldB: 5 }] });
+    const colsRow = buildSubColumns(subBase, rowCond, 2, true);
+    const colC = colsRow.columns.find((c11) => c11.fieldId === "fldC");
+    check("F25 \u884C\u7EA7\u9690\u85CF\uFF1A\u5217\u4FDD\u7559\uFF08\u4E0D\u6574\u5217\u79FB\u9664\uFF09", !!colC, colsRow.columns.map((c11) => c11.fieldId));
+    check("F25 \u884C\u7EA7\u9690\u85CF\uFF1A\u4EC5\u547D\u4E2D\u884C\u6807\u8BB0\u4E3A\u7559\u7A7A", colC.hiddenRows.join(",") === "0", colC.hiddenRows);
+    const reqRuleForm = {
+      ...form,
+      conditionalRules: [
+        {
+          ruleId: "r3",
+          trigger: { tableId: SUB1, fieldId: "fldB", operator: "equals", value: 0 },
+          actions: [{ type: "require", tableId: SUB1, fieldIds: ["fldC"] }]
+        }
+      ]
+    };
+    const reqCond = computeConditionalState(reqRuleForm, {}, { [SUB1]: [{ fldB: 0 }, { fldB: 5 }] });
+    const colCReq = buildSubColumns(subBase, reqCond, 2, true).columns.find((c11) => c11.fieldId === "fldC");
+    check("F25 \u90E8\u5206\u884C\u5FC5\u586B \u2192 \u5217\u5934\u4E0D\u7ED9\u661F", colCReq.requiredEverywhere === false, colCReq);
+    check("F25 \u90E8\u5206\u884C\u5FC5\u586B \u2192 \u6807\u8BB0 partialRequired \u4F9B\u5355\u5143\u683C\u5185\u63D0\u793A", colCReq.partialRequired === true, null);
+    check("F25 \u90E8\u5206\u884C\u5FC5\u586B \u2192 requiredRows \u7CBE\u786E\u5230\u547D\u4E2D\u884C", colCReq.requiredRows.join(",") === "0", colCReq.requiredRows);
+    const linkFields = [
+      mkField({ fieldId: "p", fieldName: "\u7701", label: "\u7701", fieldType: j5.SingleSelect }),
+      mkField({
+        fieldId: "c",
+        fieldName: "\u5E02",
+        label: "\u5E02",
+        fieldType: j5.SingleSelect,
+        optionRef: {
+          tableId: "tblCity",
+          fieldId: "fldCity",
+          conditions: [{ sourceFieldId: "fldProv", valueSource: "field", formFieldId: "p" }]
+        }
+      }),
+      mkField({
+        fieldId: "ms",
+        fieldName: "\u6807\u7B7E",
+        label: "\u6807\u7B7E",
+        fieldType: j5.MultiSelect,
+        optionRef: {
+          tableId: "tblCity",
+          fieldId: "fldCity",
+          conditions: [{ sourceFieldId: "fldProv", valueSource: "field", formFieldId: "p" }]
+        }
+      })
+    ];
+    const changed = applyRowFieldChange(linkFields, { p: "\u6D59\u6C5F", c: "\u676D\u5DDE", ms: ["A"] }, "p", "\u6C5F\u82CF");
+    check("F25 \u7EA7\u8054\uFF1A\u7236\u503C\u53D8\u66F4\u6E05\u7A7A\u5355\u9009\u53D6\u503C", changed.c === void 0, changed.c);
+    check("F25 \u7EA7\u8054\uFF1A\u7236\u503C\u53D8\u66F4\u6E05\u7A7A\u591A\u9009\u53D6\u503C\uFF08\u7F6E\u7A7A\u6570\u7EC4\uFF09", Array.isArray(changed.ms) && changed.ms.length === 0, changed.ms);
+    const unrelated = applyRowFieldChange(linkFields, { p: "\u6D59\u6C5F", c: "\u676D\u5DDE" }, "otherFld", 1);
+    check("F25 \u7EA7\u8054\uFF1A\u65E0\u5173\u5B57\u6BB5\u53D8\u66F4\u4E0D\u5F71\u54CD\u4E0B\u6E38\u53D6\u503C", unrelated.c === "\u676D\u5DDE", unrelated.c);
+    const noDeps = applyRowFieldChange(subBase.fields, { fldB: 1 }, "fldB", 2);
+    check("F25 \u65E0\u5F15\u7528\u4F9D\u8D56\u7684\u5B57\u6BB5\u53D8\u66F4\u4E0D\u6E05\u7A7A\u4EFB\u4F55\u503C", noDeps.fldB === 2, null);
+    const origRows = [{}, {}];
+    const rows2 = updateRowAt(subBase.fields, origRows, 1, "fldB", 7);
+    check("F25 updateRowAt \u53EA\u6539\u76EE\u6807\u884C", rows2[0].fldB === void 0 && rows2[1].fldB === 7, rows2);
+    check(
+      "F25 updateRowAt \u4E0D\u6539\u539F\u6570\u7EC4\uFF08\u7EAF\u51FD\u6570\uFF09",
+      origRows[1].fldB === void 0 && rows2 !== origRows,
+      origRows
+    );
+    const defSub = {
+      ...subBase,
+      fields: [mkField({ fieldId: "d1", defaultValue: "v1" }), mkField({ fieldId: "d2", defaultValue: ["a"] })]
+    };
+    const appended = appendRow([{}], defSub.fields);
+    check("F25 appendRow \u7528\u9ED8\u8BA4\u503C\u586B\u65B0\u884C", appended.length === 2 && appended[1].d1 === "v1", appended[1]);
+    check("F25 appendRow \u6570\u7EC4\u9ED8\u8BA4\u503C\u505A\u62F7\u8D1D\uFF08\u4E0D\u5171\u4EAB\u5F15\u7528\uFF09", appended[1].d2 !== defSub.fields[1].defaultValue, null);
+    check("F25 removeRowAt \u6309\u7D22\u5F15\u5220\u9664", removeRowAt([{ a: 1 }, { a: 2 }, { a: 3 }], 1).length === 2, null);
+    check("F25 canAppendRow \u53D7 maxRows \u7EA6\u675F", canAppendRow(2, 1) === true && canAppendRow(2, 2) === false, null);
+    check("F25 canAppendRow \u672A\u8BBE maxRows \u4E0D\u9650\u6761\u6570", canAppendRow(void 0, 99) === true, null);
+    const fs2 = await import("node:fs");
+    const cssSrc = fs2.readFileSync(new URL("../src/App.css", import.meta.url), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    check(
+      "F25 \u8868\u683C\u5BB9\u5668\u5F00\u542F\u6A2A\u5411\u6EDA\u52A8\uFF08overflow-x: auto\uFF09",
+      /\.sub-table-scroll\s*\{[^}]*overflow-x:\s*auto/.test(cssSrc),
+      null
+    );
+    check(
+      "F25 \u8868\u5934\u5438\u9876\uFF08thead th position: sticky + top: 0\uFF09",
+      /\.sub-table\s+thead\s+th\s*\{[^}]*position:\s*sticky[^}]*top:\s*0/.test(cssSrc),
+      null
+    );
+    check(
+      "F25 \u5E8F\u53F7\u5217\u5DE6\u4FA7\u56FA\u5B9A\uFF08sticky + left: 0\uFF09",
+      /\.sub-table\s+\.st-cell-idx\s*\{[^}]*position:\s*sticky[^}]*left:\s*0/.test(cssSrc),
+      null
+    );
+    check(
+      "F25 \u64CD\u4F5C\u5217\u53F3\u4FA7\u56FA\u5B9A\uFF08sticky + right: 0\uFF09",
+      /\.sub-table\s+\.st-cell-act\s*\{[^}]*position:\s*sticky[^}]*right:\s*0/.test(cssSrc),
+      null
+    );
+    check(
+      "F25 \u5438\u9876/\u56FA\u5B9A\u5217\u6709\u4E0D\u900F\u660E\u5E95\u8272\uFF08\u9632\u6EDA\u52A8\u7A7F\u900F\uFF09",
+      /\.sub-table\s+thead\s+th\s*\{[^}]*background:\s*#/.test(cssSrc) && /\.sub-table\s+\.st-cell-idx\s*\{[^}]*background:\s*#/.test(cssSrc),
+      null
+    );
+    const tableSrc = fs2.readFileSync(
+      new URL("../src/components/FormRenderer/SubFormTable.tsx", import.meta.url),
+      "utf8"
+    );
+    check("F25 \u8868\u683C\u5185\u590D\u7528\u540C\u4E00 FieldRenderer\uFF08\u529F\u80FD\u4E0E\u7EB5\u5411\u4E00\u81F4\uFF09", /<FieldRenderer/.test(tableSrc), null);
+    check("F25 \u8868\u683C min-width \u7531\u5217\u6A21\u578B\u8BA1\u7B97\uFF08\u975E\u786C\u7F16\u7801\uFF09", /style=\{\{\s*minWidth\s*\}\}/.test(tableSrc), null);
+    check("F25 \u8868\u683C\u6A21\u5F0F\u552F\u4E00\u6027\u5FBD\u6807\u8D70\u7D27\u51D1\u5F62\u6001\uFF08\u907F\u514D\u6491\u5BBD\u5217\uFF09", /uniqueCompact/.test(tableSrc), null);
+    check("F25 \u884C\u7EA7\u9690\u85CF\u5355\u5143\u683C\u7559\u7A7A\uFF08\u4E0D\u6E32\u67D3\u63A7\u4EF6\uFF09", /st-cell-hidden/.test(tableSrc), null);
+    const subFormSrc = fs2.readFileSync(
+      new URL("../src/components/FormRenderer/SubForm.tsx", import.meta.url),
+      "utf8"
+    );
+    check("F25 SubForm \u6309 layout \u5206\u6D41\u5230\u8868\u683C\u7EC4\u4EF6", /resolveSubLayout\(/.test(subFormSrc) && /SubFormTable/.test(subFormSrc), null);
+    check(
+      "F25 \u7EB5\u5411\u5206\u652F\u540C\u6837\u8D70\u5171\u7528\u7EAF\u51FD\u6570\uFF08\u4E24\u5F62\u6001\u5199\u5165\u884C\u4E3A\u4E00\u81F4\uFF09",
+      /applyRowFieldChange\(/.test(subFormSrc) && /appendRow\(/.test(subFormSrc),
+      null
+    );
+    const cfgSizeSrc = fs2.readFileSync(new URL("../src/services/configSize.ts", import.meta.url), "utf8");
+    check(
+      "F25 configSize \u5E8F\u5217\u5316\u767D\u540D\u5355\u542B layout\uFF08\u9632\u7626\u8EAB\u5265\u79BB\uFF09",
+      /layout:\s*s\.layout/.test(cfgSizeSrc),
+      null
+    );
+    const subCfgSrc = fs2.readFileSync(
+      new URL("../src/components/ConfigPanel/SubTableConfig.tsx", import.meta.url),
+      "utf8"
+    );
+    check(
+      "F25 \u914D\u7F6E\u9762\u677F\u63D0\u4F9B\u4E24\u79CD\u5C55\u73B0\u5F62\u5F0F\u5207\u6362",
+      /layout:\s*'vertical'/.test(subCfgSrc) && /layout:\s*'table'/.test(subCfgSrc),
       null
     );
   }

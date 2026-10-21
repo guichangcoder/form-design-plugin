@@ -16,6 +16,20 @@ import { resolveRefOptions, getOptionRefDependencies, hasOptionRef, conditionSpe
 import { applyDateOffset, isSameInstant, describeOffset, toDateOrNull } from '../src/utils/dateCalc';
 import { applyAutoFill, markManualEdits, resolveAutoFill, findAutoFillCycles, wouldCreateAutoFillCycle } from '../src/utils/dateAutoFill';
 import {
+  resolveSubLayout,
+  suggestColumnWidth,
+  buildSubColumns,
+  defaultRowValues,
+  applyRowFieldChange,
+  updateRowAt,
+  removeRowAt,
+  appendRow,
+  canAppendRow,
+  isCellHidden,
+  SUB_ROW_INDEX_WIDTH,
+  SUB_ROW_ACTION_WIDTH,
+} from '../src/utils/subTableLayout';
+import {
   checkDuplicates,
   checkOneValue,
   loadAllExistingValues,
@@ -1874,6 +1888,291 @@ async function run() {
     check(
       'F24 带 baseToken 且绑定成功的配置不做跨 base 丢弃（自描述配置）',
       /\(!parsed\.baseToken \|\| !bound\)/.test(src),
+      null
+    );
+  }
+
+  // —— F25：子表「展现形式」（纵向卡片 / 横向表格）——
+  // 覆盖：layout 缺省值、序列化白名单保留、列模型（列头/列宽/整列移除/逐行标记）、
+  //       行变更纯函数（级联清空 / 默认值 / maxRows）、源码级断言（表格横向滚动 + sticky）
+  {
+    const mkField = (over) => ({
+      fieldId: 'f',
+      fieldName: '字段',
+      fieldType: FieldType.Text,
+      visible: true,
+      required: false,
+      ...over,
+    });
+
+    const subBase = {
+      tableId: SUB1,
+      tableName: '子表1',
+      linkFieldId: 'fldLink1',
+      allowMultiple: true,
+      fields: [
+        mkField({ fieldId: 'fldA', fieldName: '产品', label: '产品', required: true, fieldType: FieldType.Text }),
+        mkField({ fieldId: 'fldB', fieldName: '数量', label: '数量', fieldType: FieldType.Number }),
+        mkField({ fieldId: 'fldC', fieldName: '日期', label: '日期', fieldType: FieldType.DateTime }),
+        mkField({ fieldId: 'fldD', fieldName: '附件', label: '附件', fieldType: FieldType.Attachment }),
+        mkField({ fieldId: 'fldH', fieldName: '隐藏字段', label: '隐藏字段', visible: false }),
+        mkField({ fieldId: 'fldLink1', fieldName: '关联主表', label: '关联主表', fieldType: FieldType.SingleLink }),
+      ],
+    };
+
+    // a) 缺省与非法值都解析为 vertical（旧配置零迁移）
+    check('F25 layout 缺省解析为纵向', resolveSubLayout({ ...subBase }) === 'vertical', null);
+    check(
+      'F25 layout 非法值回退纵向',
+      resolveSubLayout({ ...subBase, layout: 'weird' }) === 'vertical',
+      null
+    );
+    check(
+      'F25 layout=table 正确解析',
+      resolveSubLayout({ ...subBase, layout: 'table' }) === 'table',
+      null
+    );
+
+    // b) 序列化白名单：layout 必须随配置持久化（漏了 → 别人打开静默退回纵向）
+    const thin = serializeConfig({
+      forms: [
+        {
+          id: 'form1',
+          version: '1.0.0',
+          formTitle: 'T',
+          mainTable: { tableId: MAIN, tableName: '主表', fields: [] },
+          subTables: [{ ...subBase, layout: 'table' }],
+          conditionalRules: [],
+        },
+      ],
+      defaultFormId: 'form1',
+    });
+    check('F25 layout=table 随序列化保留', thin.forms[0].subTables[0].layout === 'table', thin.forms[0].subTables[0].layout);
+
+    const thinVertical = serializeConfig({
+      forms: [
+        {
+          id: 'form1',
+          version: '1.0.0',
+          formTitle: 'T',
+          mainTable: { tableId: MAIN, tableName: '主表', fields: [] },
+          subTables: [{ ...subBase, layout: 'vertical' }],
+          conditionalRules: [],
+        },
+      ],
+      defaultFormId: 'form1',
+    });
+    check(
+      'F25 layout=vertical 也如实保留（不依赖缺省）',
+      thinVertical.forms[0].subTables[0].layout === 'vertical',
+      thinVertical.forms[0].subTables[0].layout
+    );
+
+    // c) 列模型：可见字段成列、隐藏字段与关联字段不出现
+    const form = {
+      id: 'form1',
+      version: '1.0.0',
+      formTitle: 'T',
+      mainTable: { tableId: MAIN, tableName: '主表', fields: [] },
+      subTables: [subBase],
+      conditionalRules: [],
+    };
+    const emptyCond = computeConditionalState(form, {}, { [SUB1]: [{}, {}] });
+    const cols = buildSubColumns(subBase, emptyCond, 2, true);
+    check(
+      'F25 列模型含 4 个可见字段（排除 visible=false 与关联字段）',
+      cols.columns.map((c) => c.fieldId).join(',') === 'fldA,fldB,fldC,fldD',
+      cols.columns.map((c) => c.fieldId)
+    );
+    check('F25 列宽按字段类型分配（文本 200 / 数字·日期 150 / 附件 230）', 
+      cols.columns[0].width === 200 && cols.columns[1].width === 150 && cols.columns[2].width === 150 && cols.columns[3].width === 230,
+      cols.columns.map((c) => c.width)
+    );
+    check('F25 表格最小宽 = 序号48 + 内容列之和 + 操作56', cols.minWidth === 48 + (200 + 150 + 150 + 230) + 56, {
+      minWidth: cols.minWidth,
+      contentWidth: cols.contentWidth,
+    });
+    check('F25 单行模式（不可删）不预留操作列宽', buildSubColumns(subBase, emptyCond, 1, false).minWidth === 48 + (200 + 150 + 150 + 230), null);
+    check('F25 全表必填 → 列头显示星号', cols.columns[0].requiredEverywhere === true, cols.columns[0]);
+    check('F25 非必填字段列头不给星', cols.columns[1].requiredEverywhere === false, null);
+
+    // d) 条件规则：全表隐藏 → 整列移除；行级隐藏 → 列保留 + 该行标记留空
+    const ruleForm = {
+      ...form,
+      conditionalRules: [
+        {
+          ruleId: 'r1',
+          trigger: { tableId: MAIN, fieldId: 'fldM1', operator: 'equals', value: 'x' },
+          actions: [
+            { type: 'hide', tableId: SUB1, fieldIds: ['fldC'] }, // 主表触发 → 子表全表级隐藏
+            { type: 'hide', tableId: SUB1, fieldIds: ['fldD'] }, // 同上
+          ],
+        },
+      ],
+    };
+    const hiddenCond = computeConditionalState(
+      ruleForm,
+      { fldM1: 'x' },
+      { [SUB1]: [{}, {}] }
+    );
+    const colsHidden = buildSubColumns(subBase, hiddenCond, 2, true);
+    check(
+      'F25 全表级隐藏的字段整列移除',
+      !colsHidden.columns.some((c) => c.fieldId === 'fldC') && !colsHidden.columns.some((c) => c.fieldId === 'fldD'),
+      colsHidden.columns.map((c) => c.fieldId)
+    );
+
+    // 行级规则：子表 fldB 触发 → 只作用于同一子表的某一行
+    const rowRuleForm = {
+      ...form,
+      conditionalRules: [
+        {
+          ruleId: 'r2',
+          trigger: { tableId: SUB1, fieldId: 'fldB', operator: 'equals', value: 0 },
+          actions: [{ type: 'hide', tableId: SUB1, fieldIds: ['fldC'] }],
+        },
+      ],
+    };
+    const rowCond = computeConditionalState(rowRuleForm, {}, { [SUB1]: [{ fldB: 0 }, { fldB: 5 }] });
+    const colsRow = buildSubColumns(subBase, rowCond, 2, true);
+    const colC = colsRow.columns.find((c) => c.fieldId === 'fldC');
+    check('F25 行级隐藏：列保留（不整列移除）', !!colC, colsRow.columns.map((c) => c.fieldId));
+    check('F25 行级隐藏：仅命中行标记为留空', colC.hiddenRows.join(',') === '0', colC.hiddenRows);
+
+    // 行级必填：只有部分行必填 → 列头不给星，标 partialRequired
+    const reqRuleForm = {
+      ...form,
+      conditionalRules: [
+        {
+          ruleId: 'r3',
+          trigger: { tableId: SUB1, fieldId: 'fldB', operator: 'equals', value: 0 },
+          actions: [{ type: 'require', tableId: SUB1, fieldIds: ['fldC'] }],
+        },
+      ],
+    };
+    const reqCond = computeConditionalState(reqRuleForm, {}, { [SUB1]: [{ fldB: 0 }, { fldB: 5 }] });
+    const colCReq = buildSubColumns(subBase, reqCond, 2, true).columns.find((c) => c.fieldId === 'fldC');
+    check('F25 部分行必填 → 列头不给星', colCReq.requiredEverywhere === false, colCReq);
+    check('F25 部分行必填 → 标记 partialRequired 供单元格内提示', colCReq.partialRequired === true, null);
+    check('F25 部分行必填 → requiredRows 精确到命中行', colCReq.requiredRows.join(',') === '0', colCReq.requiredRows);
+
+    // e) 行变更纯函数：级联清空（引用选项依赖同行字段）/ 默认值 / 删除 / maxRows
+    const linkFields = [
+      mkField({ fieldId: 'p', fieldName: '省', label: '省', fieldType: FieldType.SingleSelect }),
+      mkField({
+        fieldId: 'c',
+        fieldName: '市',
+        label: '市',
+        fieldType: FieldType.SingleSelect,
+        optionRef: {
+          tableId: 'tblCity',
+          fieldId: 'fldCity',
+          conditions: [{ sourceFieldId: 'fldProv', valueSource: 'field', formFieldId: 'p' }],
+        },
+      }),
+      mkField({ fieldId: 'ms', fieldName: '标签', label: '标签', fieldType: FieldType.MultiSelect,
+        optionRef: {
+          tableId: 'tblCity',
+          fieldId: 'fldCity',
+          conditions: [{ sourceFieldId: 'fldProv', valueSource: 'field', formFieldId: 'p' }],
+        },
+      }),
+    ];
+    const changed = applyRowFieldChange(linkFields, { p: '浙江', c: '杭州', ms: ['A'] }, 'p', '江苏');
+    check('F25 级联：父值变更清空单选取值', changed.c === undefined, changed.c);
+    check('F25 级联：父值变更清空多选取值（置空数组）', Array.isArray(changed.ms) && changed.ms.length === 0, changed.ms);
+    // 与既有纵向行为一致：只要父字段触发 onChange 即清空下游（Semi 同值不触发 onChange，实际无副作用）
+    const unrelated = applyRowFieldChange(linkFields, { p: '浙江', c: '杭州' }, 'otherFld', 1);
+    check('F25 级联：无关字段变更不影响下游取值', unrelated.c === '杭州', unrelated.c);
+    const noDeps = applyRowFieldChange(subBase.fields, { fldB: 1 }, 'fldB', 2);
+    check('F25 无引用依赖的字段变更不清空任何值', noDeps.fldB === 2, null);
+
+    const origRows = [{}, {}];
+    const rows2 = updateRowAt(subBase.fields, origRows, 1, 'fldB', 7);
+    check('F25 updateRowAt 只改目标行', rows2[0].fldB === undefined && rows2[1].fldB === 7, rows2);
+    check(
+      'F25 updateRowAt 不改原数组（纯函数）',
+      origRows[1].fldB === undefined && rows2 !== origRows,
+      origRows
+    );
+
+    const defSub = {
+      ...subBase,
+      fields: [mkField({ fieldId: 'd1', defaultValue: 'v1' }), mkField({ fieldId: 'd2', defaultValue: ['a'] })],
+    };
+    const appended = appendRow([{}], defSub.fields);
+    check('F25 appendRow 用默认值填新行', appended.length === 2 && appended[1].d1 === 'v1', appended[1]);
+    check('F25 appendRow 数组默认值做拷贝（不共享引用）', appended[1].d2 !== defSub.fields[1].defaultValue, null);
+    check('F25 removeRowAt 按索引删除', removeRowAt([{ a: 1 }, { a: 2 }, { a: 3 }], 1).length === 2, null);
+    check('F25 canAppendRow 受 maxRows 约束', canAppendRow(2, 1) === true && canAppendRow(2, 2) === false, null);
+    check('F25 canAppendRow 未设 maxRows 不限条数', canAppendRow(undefined, 99) === true, null);
+
+    // f) 源码级断言：表格必须真横向滚动 + sticky 表头/序号列/操作列（Semi 类 prop 静默失效的教训）
+    const fs2 = await import('node:fs');
+    const cssSrc = fs2
+      .readFileSync(new URL('../src/App.css', import.meta.url), 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '');
+    check(
+      'F25 表格容器开启横向滚动（overflow-x: auto）',
+      /\.sub-table-scroll\s*\{[^}]*overflow-x:\s*auto/.test(cssSrc),
+      null
+    );
+    check(
+      'F25 表头吸顶（thead th position: sticky + top: 0）',
+      /\.sub-table\s+thead\s+th\s*\{[^}]*position:\s*sticky[^}]*top:\s*0/.test(cssSrc),
+      null
+    );
+    check(
+      'F25 序号列左侧固定（sticky + left: 0）',
+      /\.sub-table\s+\.st-cell-idx\s*\{[^}]*position:\s*sticky[^}]*left:\s*0/.test(cssSrc),
+      null
+    );
+    check(
+      'F25 操作列右侧固定（sticky + right: 0）',
+      /\.sub-table\s+\.st-cell-act\s*\{[^}]*position:\s*sticky[^}]*right:\s*0/.test(cssSrc),
+      null
+    );
+    check(
+      'F25 吸顶/固定列有不透明底色（防滚动穿透）',
+      /\.sub-table\s+thead\s+th\s*\{[^}]*background:\s*#/.test(cssSrc) &&
+        /\.sub-table\s+\.st-cell-idx\s*\{[^}]*background:\s*#/.test(cssSrc),
+      null
+    );
+
+    const tableSrc = fs2.readFileSync(
+      new URL('../src/components/FormRenderer/SubFormTable.tsx', import.meta.url),
+      'utf8'
+    );
+    check('F25 表格内复用同一 FieldRenderer（功能与纵向一致）', /<FieldRenderer/.test(tableSrc), null);
+    check('F25 表格 min-width 由列模型计算（非硬编码）', /style=\{\{\s*minWidth\s*\}\}/.test(tableSrc), null);
+    check('F25 表格模式唯一性徽标走紧凑形态（避免撑宽列）', /uniqueCompact/.test(tableSrc), null);
+    check('F25 行级隐藏单元格留空（不渲染控件）', /st-cell-hidden/.test(tableSrc), null);
+
+    const subFormSrc = fs2.readFileSync(
+      new URL('../src/components/FormRenderer/SubForm.tsx', import.meta.url),
+      'utf8'
+    );
+    check('F25 SubForm 按 layout 分流到表格组件', /resolveSubLayout\(/.test(subFormSrc) && /SubFormTable/.test(subFormSrc), null);
+    check(
+      'F25 纵向分支同样走共用纯函数（两形态写入行为一致）',
+      /applyRowFieldChange\(/.test(subFormSrc) && /appendRow\(/.test(subFormSrc),
+      null
+    );
+
+    const cfgSizeSrc = fs2.readFileSync(new URL('../src/services/configSize.ts', import.meta.url), 'utf8');
+    check(
+      'F25 configSize 序列化白名单含 layout（防瘦身剥离）',
+      /layout:\s*s\.layout/.test(cfgSizeSrc),
+      null
+    );
+
+    const subCfgSrc = fs2.readFileSync(
+      new URL('../src/components/ConfigPanel/SubTableConfig.tsx', import.meta.url),
+      'utf8'
+    );
+    check(
+      'F25 配置面板提供两种展现形式切换',
+      /layout:\s*'vertical'/.test(subCfgSrc) && /layout:\s*'table'/.test(subCfgSrc),
       null
     );
   }
