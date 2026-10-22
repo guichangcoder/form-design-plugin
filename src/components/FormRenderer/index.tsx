@@ -25,7 +25,7 @@ import {
   formHasAnyUserDefault,
   resetUserDefaultDone,
 } from '../../utils/userDefault';
-import { getBridge } from '../../services/appContext';
+import { loadCurrentUserId } from '../../utils/currentUser';
 import {
   FormScope,
   buildFormScope,
@@ -34,6 +34,7 @@ import {
 } from '../../utils/formFieldRef';
 import { toast } from '../../utils/toast';
 import { applyThemeColor } from '../../utils/theme';
+import { hasTableLayoutSub } from '../../utils/subTableLayout';
 import { Button, Typography } from '@douyinfe/semi-ui';
 import { MainForm } from './MainForm';
 import { SubForm } from './SubForm';
@@ -298,7 +299,7 @@ export function FormRenderer({ config, onBackToConfig, preview, metaStale, onRel
    * ★ 人员字段「默认值＝当前用户」。
    *
    * 与日期联动的区别：这是**一次性初始化**（不是持续联动）。
-   * - 打开表单时取一次 `getBridge().getUserId()`，把配置了开关的人员字段填成当前用户；
+   * - 打开表单时取一次当前用户身份（utils/currentUser.ts 共享缓存），把配置了开关的人员字段填成当前用户；
    * - 之后**绝不再插手**：用户改选/删除都尊重（由 userDefaultDone 集合守门）；
    * - 没配置该开关 → 本 effect 直接 return，**一次请求都不发**（零破坏）。
    *
@@ -328,17 +329,12 @@ export function FormRenderer({ config, onBackToConfig, preview, metaStale, onRel
     let alive = true;
 
     (async () => {
-      // 取当前用户（首次；失败则本次不填，等下次依赖变化再试）
+      // 取当前用户（走全表单共享缓存 utils/currentUser.ts：与 PersonSelector 共用一次请求；
+      // 该函数内部已兜异常，不会抛，失败时返回空串）
       if (meIdRef.current === null) {
-        try {
-          const id = await getBridge().getUserId();
-          if (!alive) return;
-          meIdRef.current = id || '';
-        } catch {
-          if (!alive) return;
-          // 取不到身份：登记为空串，避免每个字段都重复触发一次失败请求
-          meIdRef.current = '';
-        }
+        const id = await loadCurrentUserId();
+        if (!alive) return;
+        meIdRef.current = id || '';
       }
       const meId = meIdRef.current;
       if (!meId) return;
@@ -638,8 +634,17 @@ export function FormRenderer({ config, onBackToConfig, preview, metaStale, onRel
     }
   };
 
+  /**
+   * ★ 含横向表格子表 → 表单放宽到视口宽度（减少左右滑动）。
+   * 纵向卡片形态不需要：表单越窄越好读，保持原 720px。
+   */
+  const hasWideSub = useMemo(
+    () => hasTableLayoutSub(config.subTables ?? []),
+    [config.subTables]
+  );
+
   return (
-    <div className="fill-form">
+    <div className={`fill-form${hasWideSub ? ' fill-form--wide' : ''}`}>
       {/* 表单标题区：网页表单风格，居中标题 + 描述，右上角保留配置入口 */}
       <div className="fill-head">
         <div className="fill-title">{config.formTitle || '未命名表单'}</div>

@@ -25,12 +25,27 @@ import { isFieldRequired, isHiddenField } from './validator';
 
 /** 序号列固定宽度（同时是左侧吸顶列） */
 export const SUB_ROW_INDEX_WIDTH = 48;
-/** 操作列固定宽度（右侧吸顶，放删除按钮） */
-export const SUB_ROW_ACTION_WIDTH = 56;
+/**
+ * 操作列固定宽度（右侧吸顶，放删除按钮）。
+ * 不能太窄：删除按钮是「图标 + 删除」文字形态（先前只有一个短横线图标，
+ * 用户反馈「仅是一个短红色横线」难以识别），需容得下 16px 图标 + 2 个汉字 + 内边距。
+ */
+export const SUB_ROW_ACTION_WIDTH = 88;
 
 /** 解析子表展现形式；缺省（含旧配置）视为纵向卡片 */
 export function resolveSubLayout(sub: SubTableConfig): SubTableLayout {
   return sub.layout === 'table' ? 'table' : 'vertical';
+}
+
+/**
+ * ★ 是否含「横向表格」子表 → 决定表单是否放宽到屏幕宽度。
+ *
+ * 需求背景：横版子表列多时，若外层容器仍锁在 720px（`.plugin-content` 的
+ * `max-width`），表格必然会左右滑动才能看完一行。把表单容器放宽到视口宽度
+ * 可显著减少滑动。纵向卡片形态则不需要（表单越窄越好读），保持原 720px。
+ */
+export function hasTableLayoutSub(subTables: Array<{ layout?: SubTableLayout }>): boolean {
+  return (subTables ?? []).some((s) => resolveSubLayout(s as SubTableConfig) === 'table');
 }
 
 /**

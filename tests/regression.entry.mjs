@@ -29,7 +29,9 @@ import {
   isCellHidden,
   SUB_ROW_INDEX_WIDTH,
   SUB_ROW_ACTION_WIDTH,
+  hasTableLayoutSub,
 } from '../src/utils/subTableLayout';
+import { resolvePersonLabel, buildNameMap } from '../src/utils/personLabel';
 import {
   checkDuplicates,
   checkOneValue,
@@ -2004,11 +2006,21 @@ async function run() {
       cols.columns[0].width === 200 && cols.columns[1].width === 150 && cols.columns[2].width === 150 && cols.columns[3].width === 230,
       cols.columns.map((c) => c.width)
     );
-    check('F25 表格最小宽 = 序号48 + 内容列之和 + 操作56', cols.minWidth === 48 + (200 + 150 + 150 + 230) + 56, {
-      minWidth: cols.minWidth,
-      contentWidth: cols.contentWidth,
-    });
-    check('F25 单行模式（不可删）不预留操作列宽', buildSubColumns(subBase, emptyCond, 1, false).minWidth === 48 + (200 + 150 + 150 + 230), null);
+    // 用常量而非硬编码数字：操作列宽 2026-10-22 由 56 → 88（删除按钮改为「图标+文字」）
+    check(
+      'F25 表格最小宽 = 序号列 + 内容列之和 + 操作列（均取常量）',
+      cols.minWidth === SUB_ROW_INDEX_WIDTH + (200 + 150 + 150 + 230) + SUB_ROW_ACTION_WIDTH,
+      {
+        minWidth: cols.minWidth,
+        contentWidth: cols.contentWidth,
+      }
+    );
+    check(
+      'F25 单行模式（不可删）不预留操作列宽',
+      buildSubColumns(subBase, emptyCond, 1, false).minWidth ===
+        SUB_ROW_INDEX_WIDTH + (200 + 150 + 150 + 230),
+      null
+    );
     check('F25 全表必填 → 列头显示星号', cols.columns[0].requiredEverywhere === true, cols.columns[0]);
     check('F25 非必填字段列头不给星', cols.columns[1].requiredEverywhere === false, null);
 
@@ -2233,6 +2245,48 @@ async function run() {
       /layout:\s*'vertical'/.test(subCfgSrc) && /layout:\s*'table'/.test(subCfgSrc),
       null
     );
+
+    /* ---- 2026-10-22 用户反馈 2：删除按钮可辨识 + 横版表单放宽到屏幕宽度 ---- */
+
+    const formRendererSrc25 = fs2.readFileSync(
+      new URL('../src/components/FormRenderer/index.tsx', import.meta.url),
+      'utf8'
+    );
+
+    // a) 删除按钮：先前只有一个 IconMinus（短红横线），改「垃圾桶图标 + 删除」文字
+    check('F25 横版删除按钮用垃圾桶图标（IconDelete，非短横线 IconMinus）',
+      /IconDelete/.test(tableSrc) && !/IconMinus/.test(tableSrc), null);
+    check('F25 横版删除按钮带「删除」文字（不只靠图标表意）',
+      /className="row-del-btn"[\s\S]{0,320}?删除\s*<\/Button>/.test(tableSrc), null);
+    check('F25 操作列宽足以容纳「图标+文字」（≥72px）',
+      SUB_ROW_ACTION_WIDTH >= 72, { SUB_ROW_ACTION_WIDTH });
+    check('F25 删除按钮有独立样式类 row-del-btn（淡红底 + 边框，非裸图标）',
+      /\.sub-table\s+\.st-cell-act\s+\.row-del-btn\s*\{[^}]*background:\s*#/.test(cssSrc) &&
+        /\.sub-table\s+\.st-cell-act\s+\.row-del-btn\s*\{[^}]*border:\s*1px\s+solid/.test(cssSrc),
+      null);
+    check('F25 删除按钮 hover 变实心红（交互反馈明确）',
+      /row-del-btn:hover\s*\{[^}]*background:\s*#dc2626/.test(cssSrc), null);
+    check('F25 行 hover 时不覆盖删除按钮底色（保持可辨）',
+      /tbody\s+tr:hover\s+\.st-cell-act\s+\.row-del-btn\s*\{[^}]*background:\s*#fee2e2/.test(cssSrc),
+      null);
+
+    // b) 横版表单放宽到屏幕宽度（减少左右滑动）
+    check('F25 hasTableLayoutSub：仅横版子表判定为 true，纵向/空为 false',
+      hasTableLayoutSub([{ layout: 'table' }]) === true &&
+        hasTableLayoutSub([{ layout: 'vertical' }, {}]) === false &&
+        hasTableLayoutSub([]) === false,
+      null);
+    check('F25 FormRenderer 依 hasTableLayoutSub 挂 fill-form--wide',
+      /hasTableLayoutSub\(/.test(formRendererSrc25) &&
+        /fill-form--wide/.test(formRendererSrc25),
+      null);
+    check('F25 宽屏类放宽容器 max-width（:has 命中 .fill-form--wide → max-width: none）',
+      /\.plugin-content:has\(\.fill-form--wide\)\s*\{[^}]*max-width:\s*none/.test(cssSrc),
+      null);
+    check('F25 纵向形态不加宽屏类（表单仍锁 720px，阅读体验不变）',
+      /\.plugin-content\s*\{[^}]*max-width:\s*720px/.test(cssSrc) &&
+        !/fill-form--wide[\s\S]{0,80}max-width:\s*720px/.test(cssSrc),
+      null);
   }
 
   /* ============================================================
@@ -3525,6 +3579,65 @@ async function run() {
       const personSel = read30('../src/components/FormRenderer/PersonSelector.tsx');
       check('F30 PersonSelector 把当前用户标签显示为「我（当前用户）」（否则只见裸 ID）',
         /我（当前用户）/.test(personSel), null);
+      // 2026-10-22 反馈修复：外层 Tag 与下拉框内已选值共用 displayName，避免框内漏出裸 open_id
+      // ★ 用**真实调用纯函数**验证，而非源码正则 —— 正则只能证明字样存在，
+      //   证明不了运行时产出正确（反向注入「回落裸 id」曾骗过正则断言）。
+      check('F30 人员显示名：有真名 → 显示真名',
+        resolvePersonLabel('ou_me', new Map([['ou_me', '史贵昌']]), 'ou_me') === '史贵昌', null);
+      check('F30 人员显示名：只有 id 的本人 → 「我（当前用户）」',
+        resolvePersonLabel('ou_me', new Map(), 'ou_me') === '我（当前用户）', null);
+      check('F30 人员显示名：身份未解析（meId 空）→ 中性占位，绝不显示 id',
+        resolvePersonLabel('ou_me', new Map(), '') === '当前用户', null);
+      const unknownLabel = resolvePersonLabel('ou_other1234567890abcdef', new Map(), 'ou_me');
+      check('F30 人员显示名：未知他人 → 截断，不含完整 id（不撑破布局）',
+        unknownLabel.includes('…') && !unknownLabel.includes('other1234567890'), unknownLabel);
+      check('F30 人员显示名：任何分支都不返回裸 id',
+        [
+          resolvePersonLabel('ou_me', new Map(), 'ou_me'),
+          resolvePersonLabel('ou_me', new Map(), ''),
+          resolvePersonLabel('ou_me', new Map([['ou_me', 'X']]), 'ou_me'),
+          resolvePersonLabel('ou_other1234567890abcdef', new Map(), 'ou_me'),
+        ].every((s) => s !== 'ou_me' && s !== 'ou_other1234567890abcdef'),
+        null);
+      check('F30 buildNameMap 只收真名（不把 id 当姓名）',
+        buildNameMap([{ id: 'a' }], [{ id: 'b' }]).size === 0 &&
+          buildNameMap([{ id: 'a', name: '甲' }], [{ id: 'b', enName: 'Bee' }]).get('b') === 'Bee',
+        null);
+
+      const personLabelSrc = read30('../src/utils/personLabel.ts');
+      check('F30 显示名逻辑抽成纯函数模块（可被真实调用，不靠正则兜）',
+        /export function resolvePersonLabel/.test(personLabelSrc) &&
+          /export function buildNameMap/.test(personLabelSrc),
+        null);
+      check('F30 PersonSelector 复用纯函数（显示逻辑单一实现，无第二套）',
+        /resolvePersonLabel\(id, labelMap, meId\)/.test(personSel) &&
+          /buildNameMap\(value \|\| \[\], candidates\)/.test(personSel),
+        null);
+      check('F30 PersonSelector 尺寸：外层 Tag、下拉选项、框内已选值三者同源',
+        /displayName\(u\.id\)/.test(personSel) &&
+          /label: displayName\(c\.id\)/.test(personSel) &&
+          /renderSelectedItem[\s\S]{0,400}?displayName\(/.test(personSel),
+        null);
+      check('F30 Semi 多选契约：renderSelectedItem 返回 { isRenderInTag, content }（返回裸节点会 Tag 套 Tag）',
+        /isRenderInTag:\s*true/.test(personSel), null);
+      check('F30 显示名不再回落到裸 open_id（已无 labelMap.get(u.id)||u.id 写法）',
+        !/labelMap\.get\(u\.id\)\s*\|\|\s*u\.id/.test(personSel), null);
+
+      // 2026-10-22：共享当前用户缓存（消除首帧闪烁 + 去掉重复请求）
+      const curUserUtil = read30('../src/utils/currentUser.ts');
+      check('F30 当前用户身份走共享缓存（PersonsSelector/FormRenderer 共用一次请求）',
+        /export function loadCurrentUserId/.test(curUserUtil) &&
+          /getCachedUserIdSync/.test(personSel) &&
+          /loadCurrentUserId/.test(personSel) &&
+          /loadCurrentUserId/.test(formRenderer),
+        null);
+      check('F30 PersonSelector 用同步缓存做 useState 初始值（首帧即正确，不闪裸 id）',
+        /useState\(\(\)\s*=>\s*getCachedUserIdSync\(\)\)/.test(personSel), null);
+      check('F30 共享缓存单飞去重（inflight 复用，不重复发请求）',
+        /inflight/.test(curUserUtil) && /if \(cached !== null\) return Promise\.resolve\(cached\)/.test(curUserUtil),
+        null);
+      check('F30 PersonSelector 不再自行直调 getBridge().getUserId（避免第二处请求）',
+        !/getBridge\(\)\.getUserId\(\)/.test(personSel), null);
     }
 
     // 11) 持久化往返：defaultToCurrentUser 瘦身后不丢

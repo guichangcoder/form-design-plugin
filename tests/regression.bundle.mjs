@@ -29582,6 +29582,39 @@ var init_optionRef = __esm({
   }
 });
 
+// src/utils/personLabel.ts
+function truncateId(id) {
+  return id.length > 18 ? `${id.slice(0, 10)}\u2026${id.slice(-4)}` : id;
+}
+function resolvePersonLabel(id, nameById, meId) {
+  if (!id) return "";
+  const named = nameById.get(id);
+  if (named) return named;
+  if (meId && id === meId) return SELF_PERSON_LABEL;
+  if (!meId) return UNKNOWN_PERSON_PLACEHOLDER;
+  return truncateId(id);
+}
+function buildNameMap(value, candidates) {
+  const map = /* @__PURE__ */ new Map();
+  (value || []).forEach((u10) => {
+    if (u10 && u10.id && (u10.name || u10.enName)) map.set(u10.id, u10.name || u10.enName);
+  });
+  (candidates || []).forEach((c11) => {
+    if (!c11 || !c11.id) return;
+    if (!c11.name && !c11.enName) return;
+    map.set(c11.id, c11.name || c11.enName);
+  });
+  return map;
+}
+var UNKNOWN_PERSON_PLACEHOLDER, SELF_PERSON_LABEL;
+var init_personLabel = __esm({
+  "src/utils/personLabel.ts"() {
+    "use strict";
+    UNKNOWN_PERSON_PLACEHOLDER = "\u5F53\u524D\u7528\u6237";
+    SELF_PERSON_LABEL = "\u6211\uFF08\u5F53\u524D\u7528\u6237\uFF09";
+  }
+});
+
 // src/utils/permError.ts
 function classifySdkError(e11, target) {
   const raw = String(e11?.message ?? e11 ?? "");
@@ -30092,12 +30125,12 @@ function scanDistinctValues(tableId, fieldId, conditions, opts) {
   );
   const useCache = opts?.useCache !== false;
   if (useCache) {
-    const cached = distinctScanCache.get(key2);
-    if (cached) {
-      cached.then((r10) => r10.values.forEach((v11) => opts?.onValue?.(v11))).catch(() => {
+    const cached2 = distinctScanCache.get(key2);
+    if (cached2) {
+      cached2.then((r10) => r10.values.forEach((v11) => opts?.onValue?.(v11))).catch(() => {
       });
       return { key: key2, cancel: () => {
-      }, promise: cached };
+      }, promise: cached2 };
     }
   }
   const declared = (opts?.declaredOptions ?? []).filter(Boolean);
@@ -150513,6 +150546,35 @@ var init_es = __esm({
   }
 });
 
+// src/utils/currentUser.ts
+function getCachedUserIdSync() {
+  return cached ?? "";
+}
+function loadCurrentUserId() {
+  if (cached !== null) return Promise.resolve(cached);
+  if (!inflight) {
+    inflight = (async () => {
+      try {
+        const id = await getBridge().getUserId();
+        cached = id || "";
+      } catch {
+        cached = "";
+      }
+      return cached;
+    })();
+  }
+  return inflight;
+}
+var cached, inflight;
+var init_currentUser = __esm({
+  "src/utils/currentUser.ts"() {
+    "use strict";
+    init_appContext();
+    cached = null;
+    inflight = null;
+  }
+});
+
 // src/components/FormRenderer/fuzzyOptionFilter.ts
 function fuzzyOptionFilter(input, option) {
   const q10 = (input || "").trim().toLowerCase();
@@ -150539,13 +150601,13 @@ function PersonSelector({ value, onChange, disabled, tableId, fieldId, preview }
   const [loading, setLoading] = (0, import_react62.useState)(false);
   const [opened, setOpened] = (0, import_react62.useState)(false);
   const meRef = (0, import_react62.useRef)(null);
-  const [meId, setMeId] = (0, import_react62.useState)("");
+  const [meId, setMeId] = (0, import_react62.useState)(() => getCachedUserIdSync());
   (0, import_react62.useEffect)(() => {
     if (preview) return;
     let alive = true;
     (async () => {
       try {
-        const id = await getBridge().getUserId();
+        const id = await loadCurrentUserId();
         if (id && alive) {
           meRef.current = { id, name: void 0 };
           setMeId(id);
@@ -150608,18 +150670,8 @@ function PersonSelector({ value, onChange, disabled, tableId, fieldId, preview }
       ]);
     }
   };
-  const labelMap = (0, import_react62.useMemo)(() => {
-    const map = /* @__PURE__ */ new Map();
-    (value || []).forEach((u10) => {
-      if (u10 && u10.id) map.set(u10.id, u10.name || u10.enName || "");
-    });
-    candidates.forEach((c11) => {
-      if (c11.id === meId && (!c11.name && !c11.enName)) return;
-      map.set(c11.id, c11._label);
-    });
-    if (meId && !map.get(meId)) map.set(meId, "\u6211\uFF08\u5F53\u524D\u7528\u6237\uFF09");
-    return map;
-  }, [candidates, value, meId]);
+  const labelMap = (0, import_react62.useMemo)(() => buildNameMap(value || [], candidates), [candidates, value]);
+  const displayName = (id) => resolvePersonLabel(id, labelMap, meId);
   const selectedIds = (value || []).map((u10) => u10.id);
   const apply = (ids) => {
     const pool = /* @__PURE__ */ new Map();
@@ -150639,7 +150691,7 @@ function PersonSelector({ value, onChange, disabled, tableId, fieldId, preview }
           type: "light",
           closable: !disabled,
           onClose: () => apply(selectedIds.filter((id) => id !== u10.id)),
-          children: labelMap.get(u10.id) || u10.id
+          children: displayName(u10.id)
         },
         u10.id
       )),
@@ -150657,7 +150709,11 @@ function PersonSelector({ value, onChange, disabled, tableId, fieldId, preview }
         placeholder: opened ? "\u641C\u7D22\u5E76\u9009\u62E9\u4EBA\u5458" : "\u70B9\u51FB\u5C55\u5F00\u4EE5\u52A0\u8F7D\u4EBA\u5458\u5217\u8868\uFF08\u4E0B\u62C9\u65F6\u624D\u52A0\u8F7D\uFF09",
         value: selectedIds,
         onChange: (ids) => apply(ids ?? []),
-        optionList: candidates.map((c11) => ({ value: c11.id, label: c11._label })),
+        optionList: candidates.map((c11) => ({ value: c11.id, label: displayName(c11.id) })),
+        renderSelectedItem: (optionNode) => ({
+          isRenderInTag: true,
+          content: displayName(String(optionNode?.value ?? ""))
+        }),
         emptyContent: loading ? "\u52A0\u8F7D\u4E2D\u2026" : opened ? "\u6682\u65E0\u53EF\u9009\u4EBA\u5458\uFF08\u586B\u5199\u540E\u5386\u53F2\u4EBA\u5458\u4F1A\u81EA\u52A8\u51FA\u73B0\uFF09" : "\u70B9\u51FB\u5C55\u5F00\u540E\u5C06\u52A0\u8F7D\u4EBA\u5458\uFF08\u542B\u300C\u5F53\u524D\u7528\u6237\u300D\uFF09"
       }
     )
@@ -150670,6 +150726,8 @@ var init_PersonSelector = __esm({
     import_react62 = __toESM(require_react(), 1);
     init_es();
     init_appContext();
+    init_currentUser();
+    init_personLabel();
     init_fuzzyOptionFilter();
     import_jsx_runtime = __toESM(require_jsx_runtime(), 1);
   }
@@ -150729,11 +150787,11 @@ function LinkSelector({
     if (preview || !opened || !targetTableId || !primaryFieldId) return;
     let alive = true;
     const key2 = `col:${targetTableId}:${primaryFieldId}`;
-    const cached = getHeadCache(key2);
-    if (cached) {
-      setHead(cached.rows.map((r10) => ({ recordId: r10.recordId, label: r10.text || r10.recordId })));
-      setHeadHasMore(cached.hasMore);
-      setHeadTotal(cached.total);
+    const cached2 = getHeadCache(key2);
+    if (cached2) {
+      setHead(cached2.rows.map((r10) => ({ recordId: r10.recordId, label: r10.text || r10.recordId })));
+      setHeadHasMore(cached2.hasMore);
+      setHeadTotal(cached2.total);
       setHeadDone(true);
       return;
     }
@@ -152572,9 +152630,12 @@ function resolveAutoFill(fields, values, manual, auto, keyOf) {
 init_dist();
 init_optionRef();
 var SUB_ROW_INDEX_WIDTH = 48;
-var SUB_ROW_ACTION_WIDTH = 56;
+var SUB_ROW_ACTION_WIDTH = 88;
 function resolveSubLayout(sub) {
   return sub.layout === "table" ? "table" : "vertical";
+}
+function hasTableLayoutSub(subTables) {
+  return (subTables ?? []).some((s) => resolveSubLayout(s) === "table");
 }
 function suggestColumnWidth(field) {
   switch (field.fieldType) {
@@ -152672,6 +152733,9 @@ function canAppendRow(maxRows, rowCount) {
   if (!maxRows) return true;
   return rowCount < maxRows;
 }
+
+// tests/regression.entry.mjs
+init_personLabel();
 
 // src/services/uniqueCheck.ts
 init_dist();
@@ -154735,11 +154799,19 @@ async function run() {
       cols.columns[0].width === 200 && cols.columns[1].width === 150 && cols.columns[2].width === 150 && cols.columns[3].width === 230,
       cols.columns.map((c11) => c11.width)
     );
-    check("F25 \u8868\u683C\u6700\u5C0F\u5BBD = \u5E8F\u53F748 + \u5185\u5BB9\u5217\u4E4B\u548C + \u64CD\u4F5C56", cols.minWidth === 48 + (200 + 150 + 150 + 230) + 56, {
-      minWidth: cols.minWidth,
-      contentWidth: cols.contentWidth
-    });
-    check("F25 \u5355\u884C\u6A21\u5F0F\uFF08\u4E0D\u53EF\u5220\uFF09\u4E0D\u9884\u7559\u64CD\u4F5C\u5217\u5BBD", buildSubColumns(subBase, emptyCond, 1, false).minWidth === 48 + (200 + 150 + 150 + 230), null);
+    check(
+      "F25 \u8868\u683C\u6700\u5C0F\u5BBD = \u5E8F\u53F7\u5217 + \u5185\u5BB9\u5217\u4E4B\u548C + \u64CD\u4F5C\u5217\uFF08\u5747\u53D6\u5E38\u91CF\uFF09",
+      cols.minWidth === SUB_ROW_INDEX_WIDTH + (200 + 150 + 150 + 230) + SUB_ROW_ACTION_WIDTH,
+      {
+        minWidth: cols.minWidth,
+        contentWidth: cols.contentWidth
+      }
+    );
+    check(
+      "F25 \u5355\u884C\u6A21\u5F0F\uFF08\u4E0D\u53EF\u5220\uFF09\u4E0D\u9884\u7559\u64CD\u4F5C\u5217\u5BBD",
+      buildSubColumns(subBase, emptyCond, 1, false).minWidth === SUB_ROW_INDEX_WIDTH + (200 + 150 + 150 + 230),
+      null
+    );
     check("F25 \u5168\u8868\u5FC5\u586B \u2192 \u5217\u5934\u663E\u793A\u661F\u53F7", cols.columns[0].requiredEverywhere === true, cols.columns[0]);
     check("F25 \u975E\u5FC5\u586B\u5B57\u6BB5\u5217\u5934\u4E0D\u7ED9\u661F", cols.columns[1].requiredEverywhere === false, null);
     const ruleForm = {
@@ -154941,6 +155013,60 @@ async function run() {
     check(
       "F25 \u914D\u7F6E\u9762\u677F\u63D0\u4F9B\u4E24\u79CD\u5C55\u73B0\u5F62\u5F0F\u5207\u6362",
       /layout:\s*'vertical'/.test(subCfgSrc) && /layout:\s*'table'/.test(subCfgSrc),
+      null
+    );
+    const formRendererSrc25 = fs2.readFileSync(
+      new URL("../src/components/FormRenderer/index.tsx", import.meta.url),
+      "utf8"
+    );
+    check(
+      "F25 \u6A2A\u7248\u5220\u9664\u6309\u94AE\u7528\u5783\u573E\u6876\u56FE\u6807\uFF08IconDelete\uFF0C\u975E\u77ED\u6A2A\u7EBF IconMinus\uFF09",
+      /IconDelete/.test(tableSrc) && !/IconMinus/.test(tableSrc),
+      null
+    );
+    check(
+      "F25 \u6A2A\u7248\u5220\u9664\u6309\u94AE\u5E26\u300C\u5220\u9664\u300D\u6587\u5B57\uFF08\u4E0D\u53EA\u9760\u56FE\u6807\u8868\u610F\uFF09",
+      /className="row-del-btn"[\s\S]{0,320}?删除\s*<\/Button>/.test(tableSrc),
+      null
+    );
+    check(
+      "F25 \u64CD\u4F5C\u5217\u5BBD\u8DB3\u4EE5\u5BB9\u7EB3\u300C\u56FE\u6807+\u6587\u5B57\u300D\uFF08\u226572px\uFF09",
+      SUB_ROW_ACTION_WIDTH >= 72,
+      { SUB_ROW_ACTION_WIDTH }
+    );
+    check(
+      "F25 \u5220\u9664\u6309\u94AE\u6709\u72EC\u7ACB\u6837\u5F0F\u7C7B row-del-btn\uFF08\u6DE1\u7EA2\u5E95 + \u8FB9\u6846\uFF0C\u975E\u88F8\u56FE\u6807\uFF09",
+      /\.sub-table\s+\.st-cell-act\s+\.row-del-btn\s*\{[^}]*background:\s*#/.test(cssSrc) && /\.sub-table\s+\.st-cell-act\s+\.row-del-btn\s*\{[^}]*border:\s*1px\s+solid/.test(cssSrc),
+      null
+    );
+    check(
+      "F25 \u5220\u9664\u6309\u94AE hover \u53D8\u5B9E\u5FC3\u7EA2\uFF08\u4EA4\u4E92\u53CD\u9988\u660E\u786E\uFF09",
+      /row-del-btn:hover\s*\{[^}]*background:\s*#dc2626/.test(cssSrc),
+      null
+    );
+    check(
+      "F25 \u884C hover \u65F6\u4E0D\u8986\u76D6\u5220\u9664\u6309\u94AE\u5E95\u8272\uFF08\u4FDD\u6301\u53EF\u8FA8\uFF09",
+      /tbody\s+tr:hover\s+\.st-cell-act\s+\.row-del-btn\s*\{[^}]*background:\s*#fee2e2/.test(cssSrc),
+      null
+    );
+    check(
+      "F25 hasTableLayoutSub\uFF1A\u4EC5\u6A2A\u7248\u5B50\u8868\u5224\u5B9A\u4E3A true\uFF0C\u7EB5\u5411/\u7A7A\u4E3A false",
+      hasTableLayoutSub([{ layout: "table" }]) === true && hasTableLayoutSub([{ layout: "vertical" }, {}]) === false && hasTableLayoutSub([]) === false,
+      null
+    );
+    check(
+      "F25 FormRenderer \u4F9D hasTableLayoutSub \u6302 fill-form--wide",
+      /hasTableLayoutSub\(/.test(formRendererSrc25) && /fill-form--wide/.test(formRendererSrc25),
+      null
+    );
+    check(
+      "F25 \u5BBD\u5C4F\u7C7B\u653E\u5BBD\u5BB9\u5668 max-width\uFF08:has \u547D\u4E2D .fill-form--wide \u2192 max-width: none\uFF09",
+      /\.plugin-content:has\(\.fill-form--wide\)\s*\{[^}]*max-width:\s*none/.test(cssSrc),
+      null
+    );
+    check(
+      "F25 \u7EB5\u5411\u5F62\u6001\u4E0D\u52A0\u5BBD\u5C4F\u7C7B\uFF08\u8868\u5355\u4ECD\u9501 720px\uFF0C\u9605\u8BFB\u4F53\u9A8C\u4E0D\u53D8\uFF09",
+      /\.plugin-content\s*\{[^}]*max-width:\s*720px/.test(cssSrc) && !/fill-form--wide[\s\S]{0,80}max-width:\s*720px/.test(cssSrc),
       null
     );
   }
@@ -156043,6 +156169,89 @@ async function run() {
       check(
         "F30 PersonSelector \u628A\u5F53\u524D\u7528\u6237\u6807\u7B7E\u663E\u793A\u4E3A\u300C\u6211\uFF08\u5F53\u524D\u7528\u6237\uFF09\u300D\uFF08\u5426\u5219\u53EA\u89C1\u88F8 ID\uFF09",
         /我（当前用户）/.test(personSel),
+        null
+      );
+      check(
+        "F30 \u4EBA\u5458\u663E\u793A\u540D\uFF1A\u6709\u771F\u540D \u2192 \u663E\u793A\u771F\u540D",
+        resolvePersonLabel("ou_me", /* @__PURE__ */ new Map([["ou_me", "\u53F2\u8D35\u660C"]]), "ou_me") === "\u53F2\u8D35\u660C",
+        null
+      );
+      check(
+        "F30 \u4EBA\u5458\u663E\u793A\u540D\uFF1A\u53EA\u6709 id \u7684\u672C\u4EBA \u2192 \u300C\u6211\uFF08\u5F53\u524D\u7528\u6237\uFF09\u300D",
+        resolvePersonLabel("ou_me", /* @__PURE__ */ new Map(), "ou_me") === "\u6211\uFF08\u5F53\u524D\u7528\u6237\uFF09",
+        null
+      );
+      check(
+        "F30 \u4EBA\u5458\u663E\u793A\u540D\uFF1A\u8EAB\u4EFD\u672A\u89E3\u6790\uFF08meId \u7A7A\uFF09\u2192 \u4E2D\u6027\u5360\u4F4D\uFF0C\u7EDD\u4E0D\u663E\u793A id",
+        resolvePersonLabel("ou_me", /* @__PURE__ */ new Map(), "") === "\u5F53\u524D\u7528\u6237",
+        null
+      );
+      const unknownLabel = resolvePersonLabel("ou_other1234567890abcdef", /* @__PURE__ */ new Map(), "ou_me");
+      check(
+        "F30 \u4EBA\u5458\u663E\u793A\u540D\uFF1A\u672A\u77E5\u4ED6\u4EBA \u2192 \u622A\u65AD\uFF0C\u4E0D\u542B\u5B8C\u6574 id\uFF08\u4E0D\u6491\u7834\u5E03\u5C40\uFF09",
+        unknownLabel.includes("\u2026") && !unknownLabel.includes("other1234567890"),
+        unknownLabel
+      );
+      check(
+        "F30 \u4EBA\u5458\u663E\u793A\u540D\uFF1A\u4EFB\u4F55\u5206\u652F\u90FD\u4E0D\u8FD4\u56DE\u88F8 id",
+        [
+          resolvePersonLabel("ou_me", /* @__PURE__ */ new Map(), "ou_me"),
+          resolvePersonLabel("ou_me", /* @__PURE__ */ new Map(), ""),
+          resolvePersonLabel("ou_me", /* @__PURE__ */ new Map([["ou_me", "X"]]), "ou_me"),
+          resolvePersonLabel("ou_other1234567890abcdef", /* @__PURE__ */ new Map(), "ou_me")
+        ].every((s) => s !== "ou_me" && s !== "ou_other1234567890abcdef"),
+        null
+      );
+      check(
+        "F30 buildNameMap \u53EA\u6536\u771F\u540D\uFF08\u4E0D\u628A id \u5F53\u59D3\u540D\uFF09",
+        buildNameMap([{ id: "a" }], [{ id: "b" }]).size === 0 && buildNameMap([{ id: "a", name: "\u7532" }], [{ id: "b", enName: "Bee" }]).get("b") === "Bee",
+        null
+      );
+      const personLabelSrc = read30("../src/utils/personLabel.ts");
+      check(
+        "F30 \u663E\u793A\u540D\u903B\u8F91\u62BD\u6210\u7EAF\u51FD\u6570\u6A21\u5757\uFF08\u53EF\u88AB\u771F\u5B9E\u8C03\u7528\uFF0C\u4E0D\u9760\u6B63\u5219\u515C\uFF09",
+        /export function resolvePersonLabel/.test(personLabelSrc) && /export function buildNameMap/.test(personLabelSrc),
+        null
+      );
+      check(
+        "F30 PersonSelector \u590D\u7528\u7EAF\u51FD\u6570\uFF08\u663E\u793A\u903B\u8F91\u5355\u4E00\u5B9E\u73B0\uFF0C\u65E0\u7B2C\u4E8C\u5957\uFF09",
+        /resolvePersonLabel\(id, labelMap, meId\)/.test(personSel) && /buildNameMap\(value \|\| \[\], candidates\)/.test(personSel),
+        null
+      );
+      check(
+        "F30 PersonSelector \u5C3A\u5BF8\uFF1A\u5916\u5C42 Tag\u3001\u4E0B\u62C9\u9009\u9879\u3001\u6846\u5185\u5DF2\u9009\u503C\u4E09\u8005\u540C\u6E90",
+        /displayName\(u\.id\)/.test(personSel) && /label: displayName\(c\.id\)/.test(personSel) && /renderSelectedItem[\s\S]{0,400}?displayName\(/.test(personSel),
+        null
+      );
+      check(
+        "F30 Semi \u591A\u9009\u5951\u7EA6\uFF1ArenderSelectedItem \u8FD4\u56DE { isRenderInTag, content }\uFF08\u8FD4\u56DE\u88F8\u8282\u70B9\u4F1A Tag \u5957 Tag\uFF09",
+        /isRenderInTag:\s*true/.test(personSel),
+        null
+      );
+      check(
+        "F30 \u663E\u793A\u540D\u4E0D\u518D\u56DE\u843D\u5230\u88F8 open_id\uFF08\u5DF2\u65E0 labelMap.get(u.id)||u.id \u5199\u6CD5\uFF09",
+        !/labelMap\.get\(u\.id\)\s*\|\|\s*u\.id/.test(personSel),
+        null
+      );
+      const curUserUtil = read30("../src/utils/currentUser.ts");
+      check(
+        "F30 \u5F53\u524D\u7528\u6237\u8EAB\u4EFD\u8D70\u5171\u4EAB\u7F13\u5B58\uFF08PersonsSelector/FormRenderer \u5171\u7528\u4E00\u6B21\u8BF7\u6C42\uFF09",
+        /export function loadCurrentUserId/.test(curUserUtil) && /getCachedUserIdSync/.test(personSel) && /loadCurrentUserId/.test(personSel) && /loadCurrentUserId/.test(formRenderer),
+        null
+      );
+      check(
+        "F30 PersonSelector \u7528\u540C\u6B65\u7F13\u5B58\u505A useState \u521D\u59CB\u503C\uFF08\u9996\u5E27\u5373\u6B63\u786E\uFF0C\u4E0D\u95EA\u88F8 id\uFF09",
+        /useState\(\(\)\s*=>\s*getCachedUserIdSync\(\)\)/.test(personSel),
+        null
+      );
+      check(
+        "F30 \u5171\u4EAB\u7F13\u5B58\u5355\u98DE\u53BB\u91CD\uFF08inflight \u590D\u7528\uFF0C\u4E0D\u91CD\u590D\u53D1\u8BF7\u6C42\uFF09",
+        /inflight/.test(curUserUtil) && /if \(cached !== null\) return Promise\.resolve\(cached\)/.test(curUserUtil),
+        null
+      );
+      check(
+        "F30 PersonSelector \u4E0D\u518D\u81EA\u884C\u76F4\u8C03 getBridge().getUserId\uFF08\u907F\u514D\u7B2C\u4E8C\u5904\u8BF7\u6C42\uFF09",
+        !/getBridge\(\)\.getUserId\(\)/.test(personSel),
         null
       );
     }

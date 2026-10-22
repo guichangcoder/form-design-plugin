@@ -17,3 +17,9 @@ tests/out.txt
 
 # 回归测试 esbuild 副产物（渲染层引入 CSS 时生成）
 tests/regression.bundle.css
+
+# 文档流水线（workbuddy-docx）本地工作区，不入库
+output/
+
+# Word/WPS 临时锁文件
+~$*.docx

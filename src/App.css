@@ -547,6 +547,55 @@ button {
   font-size: 11px;
 }
 
+/* ---------- 横版子表：删除按钮必须一眼可辨 ----------
+   用户反馈「仅是一个短红色横线」，无法识别为删除操作。
+   改为「垃圾桶图标 + 删除」文字 + 淡红底边框，行悬停时进一步加深。 */
+.sub-table .st-cell-act .row-del-btn {
+  color: #dc2626 !important;
+  background: #fef2f2 !important;
+  border: 1px solid #fecaca !important;
+  border-radius: 6px !important;
+  height: 26px !important;
+  padding: 0 8px !important;
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.sub-table .st-cell-act .row-del-btn:hover {
+  color: #ffffff !important;
+  background: #dc2626 !important;
+  border-color: #dc2626 !important;
+}
+
+/* 行悬停时保持按钮底色可辨（覆盖表头/单元格的统一 hover 白底） */
+.sub-table tbody tr:hover .st-cell-act .row-del-btn {
+  background: #fee2e2 !important;
+  border-color: #fca5a5 !important;
+}
+
+.sub-table tbody tr:hover .st-cell-act .row-del-btn:hover {
+  background: #dc2626 !important;
+  border-color: #dc2626 !important;
+}
+
+/* ---------- 含横版子表时：表单放宽到视口宽度（减少左右滑动） ----------
+   横版表格列多，若容器仍锁 720px（.plugin-content 的 max-width），
+   一行必须左右滑动才看得完。放宽到视口宽后，绝大多数表单可直接铺满。
+   纵向卡片形态不加此类（表单越窄越好读）。 */
+.plugin-content:has(.fill-form--wide) {
+  max-width: none;
+}
+
+.fill-form--wide {
+  max-width: 100%;
+}
+
+/* 宽屏时子表容器允许撑满卡片内宽（不再被表单最大宽二次限制） */
+.fill-form--wide .sub-table-scroll {
+  width: 100%;
+}
+
 /* ---------- 提交按钮 ---------- */
 .submit-btn {
   width: 100%;

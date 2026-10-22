@@ -20,7 +20,7 @@ import {
 import { toast } from '../../utils/toast';
 import { FieldRenderer } from './FieldRenderer';
 import { Button } from '@douyinfe/semi-ui';
-import { IconPlus, IconMinus } from '@douyinfe/semi-icons';
+import { IconPlus, IconDelete } from '@douyinfe/semi-icons';
 
 interface Props {
   sub: SubTableConfig;
@@ -171,13 +171,16 @@ export const SubFormTable = React.memo(function SubFormTable({
                 {showActionColumn && (
                   <td className="st-cell-act">
                     <Button
-                      theme="borderless"
+                      className="row-del-btn"
+                      theme="light"
                       type="danger"
                       size="small"
-                      icon={<IconMinus />}
+                      icon={<IconDelete />}
                       title={`删除第 ${idx + 1} 条`}
                       onClick={() => removeRow(idx)}
-                    />
+                    >
+                      删除
+                    </Button>
                   </td>
                 )}
               </tr>

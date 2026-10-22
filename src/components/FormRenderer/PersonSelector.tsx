@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Select, Tag, Space, Typography } from '@douyinfe/semi-ui';
-import { getBase, getBridge } from '../../services/appContext';
+import { getBase } from '../../services/appContext';
+import { getCachedUserIdSync, loadCurrentUserId } from '../../utils/currentUser';
+import { buildNameMap, resolvePersonLabel } from '../../utils/personLabel';
 import { fuzzyOptionFilter } from './fuzzyOptionFilter';
 
 /** 飞书多维表格「人员」字段单元格结构（IOpenUser 子集，足够写入使用） */
@@ -43,15 +45,16 @@ export function PersonSelector({ value, onChange, disabled, tableId, fieldId, pr
    * 当前用户 open_id（state 而非仅 ref）：用于把「默认值＝当前用户」填进来的
    * 无名人员标签显示成「我（当前用户）」，否则用户只会看到一个含义不明的「当前用户」。
    */
-  const [meId, setMeId] = useState('');
+  const [meId, setMeId] = useState(() => getCachedUserIdSync());
 
-  // 1) 打开即取「当前用户」（一次极轻调用，保证不开下拉也能选到自己）
+  // 1) 打开即取「当前用户」（走全表单共享缓存：若 FormRenderer 已解析过，
+  //    首帧就拿到 meId，直接显示「我（当前用户）」，不会先闪一串截断 open_id）
   useEffect(() => {
     if (preview) return;
     let alive = true;
     (async () => {
       try {
-        const id = await getBridge().getUserId();
+        const id = await loadCurrentUserId();
         if (id && alive) {
           meRef.current = { id, name: undefined };
           setMeId(id);
@@ -129,23 +132,14 @@ export function PersonSelector({ value, onChange, disabled, tableId, fieldId, pr
     }
   };
 
-  const labelMap = useMemo(() => {
-    const map = new Map<string, string>();
-    // value 里的旧 name（如历史“我（当前用户）”）先写入
-    (value || []).forEach((u) => {
-      if (u && u.id) map.set(u.id, u.name || u.enName || '');
-    });
-    // 候选中的最新/真实名称覆盖旧 name
-    candidates.forEach((c) => {
-      // 候选里对「当前用户」只登记了 id（SDK 无取姓名接口），不覆盖成 id 本身
-      if (c.id === meId && (!c.name && !c.enName)) return;
-      map.set(c.id, c._label);
-    });
-    // ★ 「默认值＝当前用户」填入的值只有 id（SDK 没有取姓名的接口）。
-    //   显示成「我（当前用户）」——明确告知这是本人，而不是一个含义不明的裸 ID。
-    if (meId && !map.get(meId)) map.set(meId, '我（当前用户）');
-    return map;
-  }, [candidates, value, meId]);
+  /** id → 姓名映射（只收真名；逻辑在 utils/personLabel.ts，可被测试真实调用） */
+  const labelMap = useMemo(() => buildNameMap(value || [], candidates), [candidates, value]);
+
+  /**
+   * ★ 统一显示名（外层 Tag 与下拉框内已选值**共用**）。
+   * 具体优先级与「绝不漏出裸 id」的成因见 utils/personLabel.ts（纯函数、有回归断言）。
+   */
+  const displayName = (id: string): string => resolvePersonLabel(id, labelMap, meId);
 
   const selectedIds = (value || []).map((u) => u.id);
 
@@ -172,7 +166,7 @@ export function PersonSelector({ value, onChange, disabled, tableId, fieldId, pr
             closable={!disabled}
             onClose={() => apply(selectedIds.filter((id) => id !== u.id))}
           >
-            {labelMap.get(u.id) || u.id}
+            {displayName(u.id)}
           </Tag>
         ))}
         {(!value || value.length === 0) && (
@@ -189,7 +183,20 @@ export function PersonSelector({ value, onChange, disabled, tableId, fieldId, pr
         placeholder={opened ? '搜索并选择人员' : '点击展开以加载人员列表（下拉时才加载）'}
         value={selectedIds}
         onChange={(ids) => apply((ids as string[]) ?? [])}
-        optionList={candidates.map((c) => ({ value: c.id, label: c._label }))}
+        optionList={candidates.map((c) => ({ value: c.id, label: displayName(c.id) }))}
+        /**
+         * ★ 下拉框内的已选值也必须走 displayName。否则 Semi 会回落到 optionList 的
+         *   label ——「当前用户」候选的 label 是裸 open_id（SDK 无取姓名接口），
+         *   于是出现「外层标签正常、框内是一串 ou_xxx」的割裂显示。
+         *
+         * ⚠️ Semi 多选契约：回调必须返回 `{ content, isRenderInTag }`，
+         *    由 Semi 自己在外层包 Tag（含关闭按钮）。返回裸 ReactNode 会导致
+         *    「Tag 套 Tag」+ 关闭按钮失效。
+         */
+        renderSelectedItem={(optionNode: Record<string, any>) => ({
+          isRenderInTag: true,
+          content: displayName(String(optionNode?.value ?? '')),
+        })}
         emptyContent={
           loading
             ? '加载中…'
