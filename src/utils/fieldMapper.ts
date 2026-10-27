@@ -15,9 +15,59 @@ export function isUnsupportedField(type: FieldType): boolean {
   return UNSUPPORTED_FIELD_TYPES.includes(type);
 }
 
+/**
+ * 可写入多维表格的字段类型**白名单**。
+ *
+ * 为什么用白名单而不是「只读/不支持」黑名单：
+ * 黑名单意味着「未列入即可写」，而 FieldType 是宿主不断扩展的开放枚举
+ * （NotSupport=0 / Object=25 / Denied=403 以及未来新增类型都会默认通过），
+ * 一旦某个不可写类型混进写负载，宿主会以一句无上下文的 `not support`
+ * 拒绝整条 addRecord —— 表现为「偶发、只有部分用户、隔一会儿又好了」。
+ * 白名单把「未知即拒绝」变成默认行为，新增类型必须在显式验证后才放行。
+ *
+ * ⚠️ 关于关联字段（SingleLink / DuplexLink）：
+ * 飞书**开放平台 REST API** 的「新增记录」文档把它们列为「不支持设置的字段类型」，
+ * 但 **JS-SDK 的 addRecord/addRecords 通过 transform 明确支持**（IOpenLink），
+ * 且本插件的主子表关联功能正依赖它，生产中一直正常。
+ * 因此这里保留两者 —— 照抄 REST API 清单会直接打断主子表写入。
+ *
+ * 明确排除的不可写类型：NotSupport(0) / Lookup(19) / Formula(20) /
+ * Location(22) / GroupChat(23) / Object(25) / Denied(403) /
+ * CreatedTime / ModifiedTime / CreatedUser / ModifiedUser / AutoNumber / Barcode。
+ */
+export const WRITABLE_FIELD_TYPES: FieldType[] = [
+  FieldType.Text,
+  FieldType.Number,
+  FieldType.SingleSelect,
+  FieldType.MultiSelect,
+  FieldType.DateTime,
+  FieldType.Checkbox,
+  FieldType.User,
+  FieldType.Phone,
+  FieldType.Url,
+  FieldType.Attachment,
+  FieldType.SingleLink,
+  FieldType.DuplexLink,
+  FieldType.Progress,
+  FieldType.Currency,
+  FieldType.Rating,
+  FieldType.Email,
+];
+
 /** 判断字段类型是否可录入（用于配置阶段过滤字段列表） */
 export function isInputtableField(type: FieldType): boolean {
-  return !isReadonlyField(type) && !isUnsupportedField(type);
+  return WRITABLE_FIELD_TYPES.includes(type);
+}
+
+/**
+ * 判断「运行时实际字段类型」是否可写入，用于提交前对写负载做最后一道把关。
+ *
+ * 与 isInputtableField 的区别：后者面向配置阶段（拿不到 meta 时的声明类型），
+ * 这里面向提交阶段（已从 table.getField().getMeta() 拿到真实类型）。
+ * 两者共用同一份白名单，避免「配置时拦住、提交时漏掉」的割裂。
+ */
+export function isWritableFieldType(type: FieldType): boolean {
+  return WRITABLE_FIELD_TYPES.includes(type);
 }
 
 /**

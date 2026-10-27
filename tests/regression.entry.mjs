@@ -42,6 +42,21 @@ import {
 } from '../src/services/uniqueCheck';
 import { classifySdkError } from '../src/utils/permError';
 import {
+  WRITABLE_FIELD_TYPES,
+  isWritableFieldType,
+  isInputtableField,
+} from '../src/utils/fieldMapper';
+import {
+  withWriteRetry,
+  isRetryableError,
+  retryDelayMs,
+  extractErrorCode,
+  extractErrorMessage,
+  RETRYABLE_CODES,
+} from '../src/utils/writeRetry';
+import { convertToSdkFormat } from '../src/utils/valueConverter';
+import { findStaleConfiguredField, describeStaleHit } from '../src/utils/metaStale';
+import {
   loadHeadColumn,
   loadHeadRows,
   loadRowsByConditions,
@@ -4240,6 +4255,234 @@ async function run() {
       const or32 = read32('../src/utils/optionRef.ts');
       check('F32 结构：resolveRefSelectVariant 以 hasOptionRef 为前置守门',
         /if \(!hasOptionRef\(field\)\) return null;/.test(or32), null);
+    }
+  }
+
+  // ==================================================================
+  // F33：线上「偶发 主表写入失败（not support）」根因与修复
+  //
+  // 用户反馈：只有个别用户偶发报错，其他人正常，同一个人隔一会儿又正常。
+  // 根因是三个叠加缺陷：
+  //   ① 字段类型判定用黑名单 → NotSupport(0)/Object(25)/Denied(403) 及
+  //      未来新增类型全部默认「可写」；
+  //   ② 提交阶段用表里**当前实际类型**转换，但 default 分支原样返回，
+  //      于是不可写字段被塞进 addRecord → 宿主整条拒绝并只报 `not support`；
+  //   ③ 写接口单次调用零重试，把官方明示的瞬时错误（1254607 Data not ready /
+  //      1254291 Write conflict / 1255040 超时）直接放大成用户可见失败；
+  //      叠加「Semi Button 的 loading 不阻止 onClick + handleSubmit 无防重入」，
+  //      双击本身就能制造并发写冲突。
+  // ==================================================================
+  {
+    log('\n--- F33 线上「偶发主表写入失败」根因修复 ---');
+
+    // ---------- 1) 白名单判定：未知/不可写类型必须一律拒绝 ----------
+    const writable = new Set(WRITABLE_FIELD_TYPES);
+    check('F33 白名单：文本/数字/单选/多选/日期/复选框可写',
+      [FieldType.Text, FieldType.Number, FieldType.SingleSelect, FieldType.MultiSelect,
+       FieldType.DateTime, FieldType.Checkbox].every((t) => writable.has(t)), null);
+    check('F33 白名单：人员/电话/超链接/附件可写（本插件已支持录入）',
+      [FieldType.User, FieldType.Phone, FieldType.Url, FieldType.Attachment]
+        .every((t) => writable.has(t)), null);
+    check('F33 ★ 白名单：NotSupport(0) / Object(25) / Denied(403) 一律不可写（原黑名单漏网）',
+      [FieldType.NotSupport, FieldType.Object, FieldType.Denied]
+        .every((t) => !writable.has(t) && !isWritableFieldType(t)), null);
+    check('F33 ★ 白名单：公式/查找引用/自动编号/创建人/修改人/创建时间/修改时间 不可写',
+      [FieldType.Formula, FieldType.Lookup, FieldType.AutoNumber, FieldType.CreatedUser,
+       FieldType.ModifiedUser, FieldType.CreatedTime, FieldType.ModifiedTime, FieldType.Barcode]
+        .every((t) => !isWritableFieldType(t)), null);
+    check('F33 ★ 白名单：群聊/地理位置不可写（写入结构非简单文本）',
+      [FieldType.GroupChat, FieldType.Location].every((t) => !isWritableFieldType(t)), null);
+    check('F33 ★ 白名单：未知类型默认拒绝（黑名单会放行，白名单必须拒绝）',
+      [6, 8, 9, 10, 12, 14, 16, 24, 26, 999].every((t) => !isWritableFieldType(t)), null);
+    check('F33 ★ 零破坏：关联字段 SingleLink/DuplexLink 必须保持可写（主子表功能依赖链写入）',
+      isWritableFieldType(FieldType.SingleLink) && isWritableFieldType(FieldType.DuplexLink), null);
+    check('F33 一致性：isInputtableField 与 isWritableFieldType 共用同一份白名单',
+      WRITABLE_FIELD_TYPES.every((t) => isInputtableField(t) && isWritableFieldType(t)), null);
+
+    // ---------- 2) 端到端：不可写字段不得进入写负载（真实调用 convertToSdkFormat）----------
+    // 场景：配置时字段是「文本」，之后表里被改成公式 —— 字段 id 仍在，但不可写
+    const liveTypes = {
+      fldText: FieldType.Text,
+      fldFormula: FieldType.Formula,   // 被改成公式
+      fldDenied: FieldType.Denied,     // 当前用户被拒（权限态）
+      fldAuto: FieldType.AutoNumber,   // 被改成自动编号
+    };
+    const chainBase = {
+      getTableById: async () => ({
+        getField: async (id) => ({
+          getMeta: async () => ({ id, name: id, type: liveTypes[id] }),
+        }),
+      }),
+    };
+    selectBaseForTest({ base: chainBase, bridge: {} });
+    const chainFields = Object.keys(liveTypes).map((id) => ({
+      fieldId: id, fieldName: id, label: id,
+      fieldType: FieldType.Text, // 配置里全部声明为文本（类型已漂移）
+      visible: true, required: false,
+    }));
+    const chainValues = { fldText: '张三', fldFormula: 'x', fldDenied: 'y', fldAuto: 'z' };
+    const payload = await convertToSdkFormat(chainFields, chainValues, 'tblMain');
+    check('F33 ★ 端到端：不可写字段（公式/Denied/自动编号）全部被排除在写负载之外',
+      !('fldFormula' in payload) && !('fldDenied' in payload) && !('fldAuto' in payload),
+      payload);
+    check('F33 ★ 端到端：可写字段仍正常写入（跳过不可写字段不能连坐整条记录）',
+      payload.fldText === '张三', payload);
+
+    // ---------- 3) 重试策略（纯函数真实调用）----------
+    let calls = 0;
+    const waits = [];
+    // ★ 必须自包 try/catch：重试逻辑一旦坏掉，这里会抛错并把后续用例全带停，
+    //   那样只会看到「测试执行异常」而看不到具体哪条断言失败（诊断性差）。
+    let rSucceed = { value: undefined, retries: -1, thrown: null };
+    try {
+      const got = await withWriteRetry(
+        async () => {
+          calls += 1;
+          if (calls < 3) { const e = new Error('Data not ready'); e.code = 1254607; throw e; }
+          return 'written';
+        },
+        { sleep: async (ms) => { waits.push(ms); } }
+      );
+      rSucceed = { ...got, thrown: null };
+    } catch (e) {
+      rSucceed.thrown = e;
+    }
+    check('F33 ★ 重试：Data not ready（1254607）第 3 次成功，retries=2',
+      rSucceed.value === 'written' && rSucceed.retries === 2 && calls === 3,
+      { retries: rSucceed.retries, calls, waits, thrown: String(rSucceed.thrown) });
+
+    let permCalls = 0;
+    let permThrew = null;
+    try {
+      await withWriteRetry(
+        async () => { permCalls += 1; const e = new Error('permission denied'); e.code = 1254302; throw e; },
+        { sleep: async () => {} }
+      );
+    } catch (e) { permThrew = e; }
+    check('F33 ★ 重试：权限错误立即抛出，不做无意义重试',
+      permCalls === 1 && !!permThrew, { permCalls });
+
+    let boundCalls = 0;
+    try {
+      await withWriteRetry(
+        async () => { boundCalls += 1; const e = new Error('Write conflict'); e.code = 1254291; throw e; },
+        { sleep: async () => {} }
+      );
+    } catch { /* 预期抛出 */ }
+    check('F33 ★ 重试有界：最多 3 次重试 = 4 次调用（不会无限重试打爆平台）',
+      boundCalls === 4, { boundCalls });
+
+    check('F33 重试判定：官方三类瞬时错误（1254291/1254607/1255040）均可重试',
+      [1254291, 1254607, 1255040].every((c) => RETRYABLE_CODES.includes(c)), RETRYABLE_CODES);
+    check('F33 重试判定：无 code 时按文案兜底识别 data not ready / timeout',
+      isRetryableError(new Error('data not ready, please try again later')) &&
+      isRetryableError(new Error('请求超时')), null);
+    check('F33 ★ 重试判定：`not support` 不重试（不可恢复错误重试无意义，只会拖长用户等待）',
+      isRetryableError(new Error('not support')) === false, null);
+    check('F33 重试延迟：0.5s 起递增且封顶 1.2s（符合官方 0.5~1s 建议）',
+      retryDelayMs(0) === 500 && retryDelayMs(1) === 800 && retryDelayMs(2) === 1100 &&
+      retryDelayMs(99) === 1200, [retryDelayMs(0), retryDelayMs(1), retryDelayMs(2), retryDelayMs(99)]);
+
+    // ---------- 4) 元数据失效判定：真实调用纯函数 findStaleConfiguredField ----------
+    // ★ 这一组必须真实调用纯函数，不能只正则断言 App.tsx 里出现了某个函数名：
+    //   曾注入 `return false && !isWritableFieldType(live)`（短路后永不生效），
+    //   正则断言依旧全绿 —— 静态断言证明不了运行时行为。
+    const cfgs = [
+      { fieldId: 'fldText', fieldName: '姓名', label: '姓名', fieldType: FieldType.Text, visible: true, required: false },
+      { fieldId: 'fldBad', fieldName: '编号', label: '编号', fieldType: FieldType.Text, visible: true, required: false },
+    ];
+    const okMetas = [
+      { id: 'fldText', type: FieldType.Text },
+      { id: 'fldBad', type: FieldType.Number },
+    ];
+    check('F33 元数据：字段都在且类型可写 → 不暂停提交（零破坏）',
+      findStaleConfiguredField(cfgs, okMetas, 'tblA') === null, null);
+    check('F33 ★ 元数据：字段被删除 → 命中 missing',
+      findStaleConfiguredField(cfgs, [{ id: 'fldText', type: FieldType.Text }], 'tblA')?.reason === 'missing',
+      findStaleConfiguredField(cfgs, [{ id: 'fldText', type: FieldType.Text }], 'tblA'));
+    check('F33 ★ 元数据：字段类型漂移成公式 → 命中 unwritable（原实现完全放行）',
+      findStaleConfiguredField(cfgs, [
+        { id: 'fldText', type: FieldType.Text },
+        { id: 'fldBad', type: FieldType.Formula },
+      ], 'tblA')?.reason === 'unwritable',
+      findStaleConfiguredField(cfgs, [
+        { id: 'fldText', type: FieldType.Text },
+        { id: 'fldBad', type: FieldType.Formula },
+      ], 'tblA'));
+    check('F33 ★ 元数据：类型漂移成 Denied（权限态）→ 命中 unwritable（解释「隔一会儿又正常」）',
+      findStaleConfiguredField(cfgs, [
+        { id: 'fldText', type: FieldType.Text },
+        { id: 'fldBad', type: FieldType.Denied },
+      ], 'tblA')?.reason === 'unwritable', null);
+    check('F33 ★ 元数据：类型漂移成 AutoNumber → 命中 unwritable',
+      findStaleConfiguredField(cfgs, [
+        { id: 'fldText', type: FieldType.Text },
+        { id: 'fldBad', type: FieldType.AutoNumber },
+      ], 'tblA')?.reason === 'unwritable', null);
+    check('F33 元数据：命中结果带回表 id / 字段 id / 展示名（错误提示可定位）',
+      (() => {
+        const h = findStaleConfiguredField(cfgs, [
+          { id: 'fldText', type: FieldType.Text },
+          { id: 'fldBad', type: FieldType.Formula },
+        ], 'tblZ');
+        return h?.tableId === 'tblZ' && h?.fieldId === 'fldBad' && h?.label === '编号';
+      })(), null);
+    check('F33 元数据：describeStaleHit 区分「字段没了」与「类型变了」',
+      describeStaleHit({ tableId: 't', fieldId: 'f', label: '甲', liveType: FieldType.NotSupport, reason: 'missing' }).includes('删除') &&
+      describeStaleHit({ tableId: 't', fieldId: 'f', label: '甲', liveType: FieldType.Formula, reason: 'unwritable' }).includes('类型'),
+      null);
+    check('F33 元数据：关联字段类型不误判（SingleLink/DuplexLink 可写）',
+      findStaleConfiguredField(
+        [{ fieldId: 'fldLink', fieldName: '关联', label: '关联', fieldType: FieldType.SingleLink, visible: true, required: false }],
+        [{ id: 'fldLink', type: FieldType.SingleLink }],
+        'tblA'
+      ) === null, null);
+
+    // ---------- 5) 错误码不再丢失（原实现只取 message，丢掉 code）----------
+    check('F33 诊断：extractErrorCode 支持数字 code',
+      extractErrorCode({ code: 1254607 }) === 1254607, null);
+    check('F33 诊断：extractErrorCode 支持字符串 code（桥接层可能序列化）',
+      extractErrorCode({ code: '1254607' }) === 1254607, null);
+    check('F33 诊断：extractErrorCode 无 code 时返回 undefined（不伪造 0）',
+      extractErrorCode({}) === undefined && extractErrorCode(null) === undefined, null);
+    check('F33 诊断：extractErrorMessage 兼容 SDK 已废弃的 msg 字段（TransferableError）',
+      extractErrorMessage({ msg: 'not support' }) === 'not support', null);
+
+    // ---------- 6) 结构性保障：防重入闸门 + 错误码透传（剥注释后断言）----------
+    {
+      const fs33 = await import('node:fs');
+      const strip33 = (src) =>
+        src.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|\s)\/\/[^\n]*/g, '$1');
+      const read33 = (rel) => strip33(fs33.readFileSync(new URL(rel, import.meta.url), 'utf8'));
+
+      const fr33 = read33('../src/components/FormRenderer/index.tsx');
+      check('F33 ★ 结构：handleSubmit 用同步 ref 做防重入闸门（state 挡不住同帧第二次点击）',
+        /submittingRef\.current\s*=\s*true/.test(fr33) &&
+        /if \(submittingRef\.current\)/.test(fr33), null);
+      check('F33 ★ 结构：闸门在 finally 中释放（任一出口都不能漏，否则提交永久失效）',
+        /finally\s*\{[\s\S]{0,200}?submittingRef\.current\s*=\s*false/.test(fr33), null);
+
+      const rs33 = read33('../src/services/recordService.ts');
+      check('F33 ★ 结构：主表 addRecord 走 withWriteRetry（原来单次调用零重试）',
+        /withWriteRetry\(\s*\(\)\s*=>\s*mainTable\.addRecord/.test(rs33), null);
+      check('F33 结构：子表 addRecords 同样走 withWriteRetry',
+        /withWriteRetry\(\s*\(\)\s*=>\s*subTable\.addRecords/.test(rs33), null);
+      check('F33 ★ 结构：错误文案保留 code（不再只取 message）',
+        /describeError/.test(rs33) && /code=/.test(rs33), null);
+
+      const vc33 = read33('../src/utils/valueConverter.ts');
+      check('F33 ★ 结构：提交前对**实际类型**做可写性把关（跳过而非整条失败）',
+        /isWritableFieldType\(meta\.type\)/.test(vc33), null);
+
+      const app33 = read33('../src/App.tsx');
+      check('F33 ★ 结构：元数据校验调用纯函数 findStaleConfiguredField（不再内联判类型）',
+        /findStaleConfiguredField\(configuredFields, metas, tid\)/.test(app33) &&
+        !/return !isWritableFieldType\(live\)/.test(app33), null);
+
+      const fm33 = read33('../src/utils/fieldMapper.ts');
+      check('F33 ★ 结构：可录入判定改为白名单（WRITABLE_FIELD_TYPES.includes）',
+        /WRITABLE_FIELD_TYPES\.includes\(type\)/.test(fm33) &&
+        !/!isReadonlyField\(type\)\s*&&\s*!isUnsupportedField\(type\)/.test(fm33), null);
     }
   }
 

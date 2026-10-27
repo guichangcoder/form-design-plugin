@@ -3,6 +3,7 @@ import { getLinkTargetTableId } from './baseService';
 import { convertToSdkFormat } from '../utils/valueConverter';
 import { isEmptyValue } from '../utils/validator';
 import { getBase } from './appContext';
+import { extractErrorCode, extractErrorMessage, withWriteRetry } from '../utils/writeRetry';
 
 export interface SubmitResult {
   success: boolean;
@@ -21,11 +22,24 @@ export interface SubmitResult {
 
 const BATCH_SIZE = 200;
 
+/**
+ * 生成带错误码的可诊断文案。
+ *
+ * 原实现只取 `(e as Error).message`，把 SDK `OpenError` 上的 `code`
+ * （如 1254607 / 1254291）直接丢掉，导致线上只看到一句 `not support`
+ * 这类无上下文文案，既无法定位也无法判断是否该重试。
+ */
+function describeError(e: unknown): string {
+  const msg = extractErrorMessage(e) || '未知错误';
+  const code = extractErrorCode(e);
+  return code === undefined ? msg : `${msg}（code=${code}）`;
+}
+
 async function getTableOrThrow(tableId: string, label: string) {
   try {
     return await getBase().getTableById(tableId);
   } catch (e) {
-    throw new Error(`${label}不可访问（tableId=${tableId}）：${(e as Error)?.message ?? String(e)}`);
+    throw new Error(`${label}不可访问（tableId=${tableId}）：${describeError(e)}`);
   }
 }
 
@@ -96,9 +110,28 @@ export async function submitForm(
     const mainFields = await convertToSdkFormat(visibleMainFields, mainValues, mainTableId);
     let mainRes;
     try {
-      mainRes = await mainTable.addRecord({ fields: mainFields as any });
+      /**
+       * ★ 有界重试（线上「偶发主表写入失败」修复）。
+       *
+       * 飞书多维表格底层按版本串行处理同一张表，官方明确「不支持并发」，
+       * 并建议调用方对 1254607 Data not ready / 1254291 Write conflict /
+       * 1255040 超时等瞬时错误加重试与 0.5–1 秒延迟。
+       * 原实现是**单次调用、零重试**，把平台抖动直接放大成用户可见的失败。
+       */
+      const r = await withWriteRetry(() => mainTable.addRecord({ fields: mainFields as any }), {
+        maxRetries: 3,
+        onRetry: ({ attempt, delay, error }) => {
+          console.warn(
+            `[recordService] 主表写入遇到可重试错误，${delay}ms 后第 ${attempt} 次重试：${describeError(error)}`
+          );
+        },
+      });
+      mainRes = r.value;
+      if (r.retries > 0) {
+        console.info(`[recordService] 主表写入重试 ${r.retries} 次后成功`);
+      }
     } catch (e) {
-      throw new Error(`主表写入失败（tableId=${mainTableId}）：${(e as Error)?.message ?? String(e)}`);
+      throw new Error(`主表写入失败（tableId=${mainTableId}）：${describeError(e)}`);
     }
     // 当前 SDK 类型直接返回 recordId 字符串；兼容旧宿主可能返回 { recordId } 的形态。
     mainRecordId =
@@ -158,7 +191,16 @@ export async function submitForm(
       for (let i = 0; i < records.length; i += BATCH_SIZE) {
         const batch = records.slice(i, i + BATCH_SIZE);
         try {
-          const res = await subTable.addRecords(batch as any);
+          // 与主表同策略：仅对确定未落库的瞬时错误有界重试
+          const r = await withWriteRetry(() => subTable.addRecords(batch as any), {
+            maxRetries: 3,
+            onRetry: ({ attempt, delay, error }) => {
+              console.warn(
+                `[recordService] 子表「${sub.tableName || sub.tableId}」写入遇到可重试错误，${delay}ms 后第 ${attempt} 次重试：${describeError(error)}`
+              );
+            },
+          });
+          const res = r.value;
           // ★ 记录本批成功创建的子记录 ID，供失败补偿删除（P0-2）
           const ids = extractRecordIds(res);
           if (ids.length > 0) {
@@ -174,7 +216,7 @@ export async function submitForm(
           }
         } catch (e) {
           throw new Error(
-            `子表写入失败（tableId=${sub.tableId}，关联字段=${sub.linkFieldId}，目标表=${linkTargetTableId}）：${(e as Error)?.message ?? String(e)}`
+            `子表写入失败（tableId=${sub.tableId}，关联字段=${sub.linkFieldId}，目标表=${linkTargetTableId}）：${describeError(e)}`
           );
         }
       }

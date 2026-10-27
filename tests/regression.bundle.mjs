@@ -29386,14 +29386,11 @@ var init_types = __esm({
 });
 
 // src/utils/fieldMapper.ts
-function isReadonlyField(type) {
-  return READONLY_FIELD_TYPES.includes(type);
-}
-function isUnsupportedField(type) {
-  return UNSUPPORTED_FIELD_TYPES.includes(type);
-}
 function isInputtableField(type) {
-  return !isReadonlyField(type) && !isUnsupportedField(type);
+  return WRITABLE_FIELD_TYPES.includes(type);
+}
+function isWritableFieldType(type) {
+  return WRITABLE_FIELD_TYPES.includes(type);
 }
 function extractSelectOptions(meta) {
   if (meta.type === j5.SingleSelect || meta.type === j5.MultiSelect) {
@@ -29401,12 +29398,30 @@ function extractSelectOptions(meta) {
   }
   return [];
 }
-var FIELD_TYPE_LABEL;
+var WRITABLE_FIELD_TYPES, FIELD_TYPE_LABEL;
 var init_fieldMapper = __esm({
   "src/utils/fieldMapper.ts"() {
     "use strict";
     init_dist();
     init_types();
+    WRITABLE_FIELD_TYPES = [
+      j5.Text,
+      j5.Number,
+      j5.SingleSelect,
+      j5.MultiSelect,
+      j5.DateTime,
+      j5.Checkbox,
+      j5.User,
+      j5.Phone,
+      j5.Url,
+      j5.Attachment,
+      j5.SingleLink,
+      j5.DuplexLink,
+      j5.Progress,
+      j5.Currency,
+      j5.Rating,
+      j5.Email
+    ];
     FIELD_TYPE_LABEL = {
       [j5.Text]: "\u591A\u884C\u6587\u672C",
       [j5.Number]: "\u6570\u5B57",
@@ -152150,6 +152165,7 @@ init_baseService();
 init_dist();
 init_appContext();
 init_baseService();
+init_fieldMapper();
 function convertCellValue(type, raw, field) {
   switch (type) {
     case j5.DateTime: {
@@ -152212,6 +152228,12 @@ async function convertToSdkFormat(fields, values, tableId) {
     }
     const fieldInstance = await table.getField(field.fieldId);
     const meta = await fieldInstance.getMeta();
+    if (!isWritableFieldType(meta.type)) {
+      console.warn(
+        `[valueConverter] \u8DF3\u8FC7\u4E0D\u53EF\u5199\u5B57\u6BB5\u300C${field.label || field.fieldName || field.fieldId}\u300D\uFF08fieldId=${field.fieldId}\uFF0C\u5F53\u524D\u5B9E\u9645\u7C7B\u578B=${j5[meta.type] ?? meta.type}\uFF09\u3002\u8BE5\u7C7B\u578B\u4E0D\u652F\u6301\u901A\u8FC7 API \u5199\u5165\uFF0C\u5DF2\u4ECE\u672C\u6B21\u63D0\u4EA4\u4E2D\u6392\u9664\u4EE5\u514D\u6574\u6761\u8BB0\u5F55\u5199\u5165\u5931\u8D25\u3002`
+      );
+      continue;
+    }
     result[field.fieldId] = convertCellValue(meta.type, raw, field);
   }
   return result;
@@ -152219,12 +152241,108 @@ async function convertToSdkFormat(fields, values, tableId) {
 
 // src/services/recordService.ts
 init_appContext();
+
+// src/utils/writeRetry.ts
+var RETRYABLE_CODES = [
+  1254291,
+  // Write conflict
+  1254607,
+  // Data not ready
+  1255040,
+  // 请求超时
+  1255001,
+  // InternalError
+  1255002,
+  // RpcError
+  1255003,
+  // MarshalError
+  1255004,
+  // UmMarshalError
+  1255005
+  // ConvError
+];
+var RETRYABLE_PATTERNS = [
+  /write\s*conflict/i,
+  /data\s*not\s*ready/i,
+  /please\s*try\s*again/i,
+  /try\s*again\s*later/i,
+  /timeout|timed\s*out|请求超时|超时/i,
+  /internal\s*error|rpc\s*error/i,
+  /服务繁忙|系统繁忙|请稍后重试/i
+];
+function extractErrorCode(e11) {
+  if (!e11 || typeof e11 !== "object") return void 0;
+  const candidates = [
+    e11.code,
+    e11.errCode,
+    e11.detailCode
+  ];
+  for (const c11 of candidates) {
+    if (typeof c11 === "number" && Number.isFinite(c11)) return c11;
+    if (typeof c11 === "string" && /^\d+$/.test(c11)) return Number(c11);
+  }
+  return void 0;
+}
+function extractErrorMessage(e11) {
+  if (!e11) return "";
+  if (typeof e11 === "string") return e11;
+  const msg = e11.message;
+  if (typeof msg === "string" && msg) return msg;
+  const deprecatedMsg = e11.msg;
+  if (typeof deprecatedMsg === "string" && deprecatedMsg) return deprecatedMsg;
+  try {
+    return String(e11);
+  } catch {
+    return "";
+  }
+}
+function isRetryableError(e11) {
+  const code = extractErrorCode(e11);
+  if (code !== void 0) return RETRYABLE_CODES.includes(code);
+  const text = extractErrorMessage(e11);
+  if (!text) return false;
+  return RETRYABLE_PATTERNS.some((p11) => p11.test(text));
+}
+function retryDelayMs(attempt) {
+  const base = 500;
+  const step = 300;
+  const cap = 1200;
+  return Math.min(base + step * attempt, cap);
+}
+var defaultSleep = (ms2) => new Promise((r10) => setTimeout(r10, ms2));
+async function withWriteRetry(fn2, options = {}) {
+  const maxRetries = options.maxRetries ?? 3;
+  const sleep = options.sleep ?? defaultSleep;
+  const shouldRetry = options.shouldRetry ?? isRetryableError;
+  let retries = 0;
+  for (; ; ) {
+    try {
+      const value = await fn2();
+      return { value, retries };
+    } catch (e11) {
+      if (retries >= maxRetries || !shouldRetry(e11)) {
+        throw e11;
+      }
+      const delay = retryDelayMs(retries);
+      retries += 1;
+      options.onRetry?.({ attempt: retries, delay, error: e11 });
+      await sleep(delay);
+    }
+  }
+}
+
+// src/services/recordService.ts
 var BATCH_SIZE = 200;
+function describeError(e11) {
+  const msg = extractErrorMessage(e11) || "\u672A\u77E5\u9519\u8BEF";
+  const code = extractErrorCode(e11);
+  return code === void 0 ? msg : `${msg}\uFF08code=${code}\uFF09`;
+}
 async function getTableOrThrow(tableId, label) {
   try {
     return await getBase().getTableById(tableId);
   } catch (e11) {
-    throw new Error(`${label}\u4E0D\u53EF\u8BBF\u95EE\uFF08tableId=${tableId}\uFF09\uFF1A${e11?.message ?? String(e11)}`);
+    throw new Error(`${label}\u4E0D\u53EF\u8BBF\u95EE\uFF08tableId=${tableId}\uFF09\uFF1A${describeError(e11)}`);
   }
 }
 function extractRecordIds(res) {
@@ -152262,9 +152380,20 @@ async function submitForm(config, mainValues, subValues, cond) {
     const mainFields = await convertToSdkFormat(visibleMainFields, mainValues, mainTableId);
     let mainRes;
     try {
-      mainRes = await mainTable.addRecord({ fields: mainFields });
+      const r10 = await withWriteRetry(() => mainTable.addRecord({ fields: mainFields }), {
+        maxRetries: 3,
+        onRetry: ({ attempt, delay, error }) => {
+          console.warn(
+            `[recordService] \u4E3B\u8868\u5199\u5165\u9047\u5230\u53EF\u91CD\u8BD5\u9519\u8BEF\uFF0C${delay}ms \u540E\u7B2C ${attempt} \u6B21\u91CD\u8BD5\uFF1A${describeError(error)}`
+          );
+        }
+      });
+      mainRes = r10.value;
+      if (r10.retries > 0) {
+        console.info(`[recordService] \u4E3B\u8868\u5199\u5165\u91CD\u8BD5 ${r10.retries} \u6B21\u540E\u6210\u529F`);
+      }
     } catch (e11) {
-      throw new Error(`\u4E3B\u8868\u5199\u5165\u5931\u8D25\uFF08tableId=${mainTableId}\uFF09\uFF1A${e11?.message ?? String(e11)}`);
+      throw new Error(`\u4E3B\u8868\u5199\u5165\u5931\u8D25\uFF08tableId=${mainTableId}\uFF09\uFF1A${describeError(e11)}`);
     }
     mainRecordId = typeof mainRes === "string" ? mainRes : mainRes.recordId;
     if (!mainRecordId) {
@@ -152309,7 +152438,15 @@ async function submitForm(config, mainValues, subValues, cond) {
       for (let i3 = 0; i3 < records.length; i3 += BATCH_SIZE) {
         const batch = records.slice(i3, i3 + BATCH_SIZE);
         try {
-          const res = await subTable.addRecords(batch);
+          const r10 = await withWriteRetry(() => subTable.addRecords(batch), {
+            maxRetries: 3,
+            onRetry: ({ attempt, delay, error }) => {
+              console.warn(
+                `[recordService] \u5B50\u8868\u300C${sub.tableName || sub.tableId}\u300D\u5199\u5165\u9047\u5230\u53EF\u91CD\u8BD5\u9519\u8BEF\uFF0C${delay}ms \u540E\u7B2C ${attempt} \u6B21\u91CD\u8BD5\uFF1A${describeError(error)}`
+              );
+            }
+          });
+          const res = r10.value;
           const ids = extractRecordIds(res);
           if (ids.length > 0) {
             createdSubRecords.push({
@@ -152324,7 +152461,7 @@ async function submitForm(config, mainValues, subValues, cond) {
           }
         } catch (e11) {
           throw new Error(
-            `\u5B50\u8868\u5199\u5165\u5931\u8D25\uFF08tableId=${sub.tableId}\uFF0C\u5173\u8054\u5B57\u6BB5=${sub.linkFieldId}\uFF0C\u76EE\u6807\u8868=${linkTargetTableId}\uFF09\uFF1A${e11?.message ?? String(e11)}`
+            `\u5B50\u8868\u5199\u5165\u5931\u8D25\uFF08tableId=${sub.tableId}\uFF0C\u5173\u8054\u5B57\u6BB5=${sub.linkFieldId}\uFF0C\u76EE\u6807\u8868=${linkTargetTableId}\uFF09\uFF1A${describeError(e11)}`
           );
         }
       }
@@ -153273,6 +153410,46 @@ async function checkDuplicates(config, mainValues, subValues, cond) {
 
 // tests/regression.entry.mjs
 init_permError();
+init_fieldMapper();
+
+// src/utils/metaStale.ts
+init_dist();
+init_fieldMapper();
+function findStaleConfiguredField(configured, metas, tableId) {
+  const byId = new Map(metas.map((m10) => [m10.id, m10.type]));
+  for (const f12 of configured) {
+    if (!byId.has(f12.fieldId)) {
+      return {
+        tableId,
+        fieldId: f12.fieldId,
+        label: f12.label || f12.fieldName || f12.fieldId,
+        liveType: j5.NotSupport,
+        reason: "missing"
+      };
+    }
+  }
+  for (const f12 of configured) {
+    const live = byId.get(f12.fieldId);
+    if (!isWritableFieldType(live)) {
+      return {
+        tableId,
+        fieldId: f12.fieldId,
+        label: f12.label || f12.fieldName || f12.fieldId,
+        liveType: live,
+        reason: "unwritable"
+      };
+    }
+  }
+  return null;
+}
+function describeStaleHit(hit) {
+  if (hit.reason === "missing") {
+    return `\u5B57\u6BB5\u300C${hit.label}\u300D\u5DF2\u88AB\u5220\u9664\u6216\u91CD\u547D\u540D`;
+  }
+  return `\u5B57\u6BB5\u300C${hit.label}\u300D\u7684\u7C7B\u578B\u5DF2\u53D8\u6210\u4E0D\u53EF\u5199\u5165\u7684\u7C7B\u578B`;
+}
+
+// tests/regression.entry.mjs
 init_tableRecordCache();
 var results = [];
 function log2(line) {
@@ -157246,6 +157423,331 @@ async function run() {
       check(
         "F32 \u7ED3\u6784\uFF1AresolveRefSelectVariant \u4EE5 hasOptionRef \u4E3A\u524D\u7F6E\u5B88\u95E8",
         /if \(!hasOptionRef\(field\)\) return null;/.test(or32),
+        null
+      );
+    }
+  }
+  {
+    log2("\n--- F33 \u7EBF\u4E0A\u300C\u5076\u53D1\u4E3B\u8868\u5199\u5165\u5931\u8D25\u300D\u6839\u56E0\u4FEE\u590D ---");
+    const writable = new Set(WRITABLE_FIELD_TYPES);
+    check(
+      "F33 \u767D\u540D\u5355\uFF1A\u6587\u672C/\u6570\u5B57/\u5355\u9009/\u591A\u9009/\u65E5\u671F/\u590D\u9009\u6846\u53EF\u5199",
+      [
+        j5.Text,
+        j5.Number,
+        j5.SingleSelect,
+        j5.MultiSelect,
+        j5.DateTime,
+        j5.Checkbox
+      ].every((t3) => writable.has(t3)),
+      null
+    );
+    check(
+      "F33 \u767D\u540D\u5355\uFF1A\u4EBA\u5458/\u7535\u8BDD/\u8D85\u94FE\u63A5/\u9644\u4EF6\u53EF\u5199\uFF08\u672C\u63D2\u4EF6\u5DF2\u652F\u6301\u5F55\u5165\uFF09",
+      [j5.User, j5.Phone, j5.Url, j5.Attachment].every((t3) => writable.has(t3)),
+      null
+    );
+    check(
+      "F33 \u2605 \u767D\u540D\u5355\uFF1ANotSupport(0) / Object(25) / Denied(403) \u4E00\u5F8B\u4E0D\u53EF\u5199\uFF08\u539F\u9ED1\u540D\u5355\u6F0F\u7F51\uFF09",
+      [j5.NotSupport, j5.Object, j5.Denied].every((t3) => !writable.has(t3) && !isWritableFieldType(t3)),
+      null
+    );
+    check(
+      "F33 \u2605 \u767D\u540D\u5355\uFF1A\u516C\u5F0F/\u67E5\u627E\u5F15\u7528/\u81EA\u52A8\u7F16\u53F7/\u521B\u5EFA\u4EBA/\u4FEE\u6539\u4EBA/\u521B\u5EFA\u65F6\u95F4/\u4FEE\u6539\u65F6\u95F4 \u4E0D\u53EF\u5199",
+      [
+        j5.Formula,
+        j5.Lookup,
+        j5.AutoNumber,
+        j5.CreatedUser,
+        j5.ModifiedUser,
+        j5.CreatedTime,
+        j5.ModifiedTime,
+        j5.Barcode
+      ].every((t3) => !isWritableFieldType(t3)),
+      null
+    );
+    check(
+      "F33 \u2605 \u767D\u540D\u5355\uFF1A\u7FA4\u804A/\u5730\u7406\u4F4D\u7F6E\u4E0D\u53EF\u5199\uFF08\u5199\u5165\u7ED3\u6784\u975E\u7B80\u5355\u6587\u672C\uFF09",
+      [j5.GroupChat, j5.Location].every((t3) => !isWritableFieldType(t3)),
+      null
+    );
+    check(
+      "F33 \u2605 \u767D\u540D\u5355\uFF1A\u672A\u77E5\u7C7B\u578B\u9ED8\u8BA4\u62D2\u7EDD\uFF08\u9ED1\u540D\u5355\u4F1A\u653E\u884C\uFF0C\u767D\u540D\u5355\u5FC5\u987B\u62D2\u7EDD\uFF09",
+      [6, 8, 9, 10, 12, 14, 16, 24, 26, 999].every((t3) => !isWritableFieldType(t3)),
+      null
+    );
+    check(
+      "F33 \u2605 \u96F6\u7834\u574F\uFF1A\u5173\u8054\u5B57\u6BB5 SingleLink/DuplexLink \u5FC5\u987B\u4FDD\u6301\u53EF\u5199\uFF08\u4E3B\u5B50\u8868\u529F\u80FD\u4F9D\u8D56\u94FE\u5199\u5165\uFF09",
+      isWritableFieldType(j5.SingleLink) && isWritableFieldType(j5.DuplexLink),
+      null
+    );
+    check(
+      "F33 \u4E00\u81F4\u6027\uFF1AisInputtableField \u4E0E isWritableFieldType \u5171\u7528\u540C\u4E00\u4EFD\u767D\u540D\u5355",
+      WRITABLE_FIELD_TYPES.every((t3) => isInputtableField(t3) && isWritableFieldType(t3)),
+      null
+    );
+    const liveTypes = {
+      fldText: j5.Text,
+      fldFormula: j5.Formula,
+      // 被改成公式
+      fldDenied: j5.Denied,
+      // 当前用户被拒（权限态）
+      fldAuto: j5.AutoNumber
+      // 被改成自动编号
+    };
+    const chainBase = {
+      getTableById: async () => ({
+        getField: async (id) => ({
+          getMeta: async () => ({ id, name: id, type: liveTypes[id] })
+        })
+      })
+    };
+    __setAppForTest({ base: chainBase, bridge: {} });
+    const chainFields = Object.keys(liveTypes).map((id) => ({
+      fieldId: id,
+      fieldName: id,
+      label: id,
+      fieldType: j5.Text,
+      // 配置里全部声明为文本（类型已漂移）
+      visible: true,
+      required: false
+    }));
+    const chainValues = { fldText: "\u5F20\u4E09", fldFormula: "x", fldDenied: "y", fldAuto: "z" };
+    const payload = await convertToSdkFormat(chainFields, chainValues, "tblMain");
+    check(
+      "F33 \u2605 \u7AEF\u5230\u7AEF\uFF1A\u4E0D\u53EF\u5199\u5B57\u6BB5\uFF08\u516C\u5F0F/Denied/\u81EA\u52A8\u7F16\u53F7\uFF09\u5168\u90E8\u88AB\u6392\u9664\u5728\u5199\u8D1F\u8F7D\u4E4B\u5916",
+      !("fldFormula" in payload) && !("fldDenied" in payload) && !("fldAuto" in payload),
+      payload
+    );
+    check(
+      "F33 \u2605 \u7AEF\u5230\u7AEF\uFF1A\u53EF\u5199\u5B57\u6BB5\u4ECD\u6B63\u5E38\u5199\u5165\uFF08\u8DF3\u8FC7\u4E0D\u53EF\u5199\u5B57\u6BB5\u4E0D\u80FD\u8FDE\u5750\u6574\u6761\u8BB0\u5F55\uFF09",
+      payload.fldText === "\u5F20\u4E09",
+      payload
+    );
+    let calls = 0;
+    const waits = [];
+    let rSucceed = { value: void 0, retries: -1, thrown: null };
+    try {
+      const got = await withWriteRetry(
+        async () => {
+          calls += 1;
+          if (calls < 3) {
+            const e11 = new Error("Data not ready");
+            e11.code = 1254607;
+            throw e11;
+          }
+          return "written";
+        },
+        { sleep: async (ms2) => {
+          waits.push(ms2);
+        } }
+      );
+      rSucceed = { ...got, thrown: null };
+    } catch (e11) {
+      rSucceed.thrown = e11;
+    }
+    check(
+      "F33 \u2605 \u91CD\u8BD5\uFF1AData not ready\uFF081254607\uFF09\u7B2C 3 \u6B21\u6210\u529F\uFF0Cretries=2",
+      rSucceed.value === "written" && rSucceed.retries === 2 && calls === 3,
+      { retries: rSucceed.retries, calls, waits, thrown: String(rSucceed.thrown) }
+    );
+    let permCalls = 0;
+    let permThrew = null;
+    try {
+      await withWriteRetry(
+        async () => {
+          permCalls += 1;
+          const e11 = new Error("permission denied");
+          e11.code = 1254302;
+          throw e11;
+        },
+        { sleep: async () => {
+        } }
+      );
+    } catch (e11) {
+      permThrew = e11;
+    }
+    check(
+      "F33 \u2605 \u91CD\u8BD5\uFF1A\u6743\u9650\u9519\u8BEF\u7ACB\u5373\u629B\u51FA\uFF0C\u4E0D\u505A\u65E0\u610F\u4E49\u91CD\u8BD5",
+      permCalls === 1 && !!permThrew,
+      { permCalls }
+    );
+    let boundCalls = 0;
+    try {
+      await withWriteRetry(
+        async () => {
+          boundCalls += 1;
+          const e11 = new Error("Write conflict");
+          e11.code = 1254291;
+          throw e11;
+        },
+        { sleep: async () => {
+        } }
+      );
+    } catch {
+    }
+    check(
+      "F33 \u2605 \u91CD\u8BD5\u6709\u754C\uFF1A\u6700\u591A 3 \u6B21\u91CD\u8BD5 = 4 \u6B21\u8C03\u7528\uFF08\u4E0D\u4F1A\u65E0\u9650\u91CD\u8BD5\u6253\u7206\u5E73\u53F0\uFF09",
+      boundCalls === 4,
+      { boundCalls }
+    );
+    check(
+      "F33 \u91CD\u8BD5\u5224\u5B9A\uFF1A\u5B98\u65B9\u4E09\u7C7B\u77AC\u65F6\u9519\u8BEF\uFF081254291/1254607/1255040\uFF09\u5747\u53EF\u91CD\u8BD5",
+      [1254291, 1254607, 1255040].every((c11) => RETRYABLE_CODES.includes(c11)),
+      RETRYABLE_CODES
+    );
+    check(
+      "F33 \u91CD\u8BD5\u5224\u5B9A\uFF1A\u65E0 code \u65F6\u6309\u6587\u6848\u515C\u5E95\u8BC6\u522B data not ready / timeout",
+      isRetryableError(new Error("data not ready, please try again later")) && isRetryableError(new Error("\u8BF7\u6C42\u8D85\u65F6")),
+      null
+    );
+    check(
+      "F33 \u2605 \u91CD\u8BD5\u5224\u5B9A\uFF1A`not support` \u4E0D\u91CD\u8BD5\uFF08\u4E0D\u53EF\u6062\u590D\u9519\u8BEF\u91CD\u8BD5\u65E0\u610F\u4E49\uFF0C\u53EA\u4F1A\u62D6\u957F\u7528\u6237\u7B49\u5F85\uFF09",
+      isRetryableError(new Error("not support")) === false,
+      null
+    );
+    check(
+      "F33 \u91CD\u8BD5\u5EF6\u8FDF\uFF1A0.5s \u8D77\u9012\u589E\u4E14\u5C01\u9876 1.2s\uFF08\u7B26\u5408\u5B98\u65B9 0.5~1s \u5EFA\u8BAE\uFF09",
+      retryDelayMs(0) === 500 && retryDelayMs(1) === 800 && retryDelayMs(2) === 1100 && retryDelayMs(99) === 1200,
+      [retryDelayMs(0), retryDelayMs(1), retryDelayMs(2), retryDelayMs(99)]
+    );
+    const cfgs = [
+      { fieldId: "fldText", fieldName: "\u59D3\u540D", label: "\u59D3\u540D", fieldType: j5.Text, visible: true, required: false },
+      { fieldId: "fldBad", fieldName: "\u7F16\u53F7", label: "\u7F16\u53F7", fieldType: j5.Text, visible: true, required: false }
+    ];
+    const okMetas = [
+      { id: "fldText", type: j5.Text },
+      { id: "fldBad", type: j5.Number }
+    ];
+    check(
+      "F33 \u5143\u6570\u636E\uFF1A\u5B57\u6BB5\u90FD\u5728\u4E14\u7C7B\u578B\u53EF\u5199 \u2192 \u4E0D\u6682\u505C\u63D0\u4EA4\uFF08\u96F6\u7834\u574F\uFF09",
+      findStaleConfiguredField(cfgs, okMetas, "tblA") === null,
+      null
+    );
+    check(
+      "F33 \u2605 \u5143\u6570\u636E\uFF1A\u5B57\u6BB5\u88AB\u5220\u9664 \u2192 \u547D\u4E2D missing",
+      findStaleConfiguredField(cfgs, [{ id: "fldText", type: j5.Text }], "tblA")?.reason === "missing",
+      findStaleConfiguredField(cfgs, [{ id: "fldText", type: j5.Text }], "tblA")
+    );
+    check(
+      "F33 \u2605 \u5143\u6570\u636E\uFF1A\u5B57\u6BB5\u7C7B\u578B\u6F02\u79FB\u6210\u516C\u5F0F \u2192 \u547D\u4E2D unwritable\uFF08\u539F\u5B9E\u73B0\u5B8C\u5168\u653E\u884C\uFF09",
+      findStaleConfiguredField(cfgs, [
+        { id: "fldText", type: j5.Text },
+        { id: "fldBad", type: j5.Formula }
+      ], "tblA")?.reason === "unwritable",
+      findStaleConfiguredField(cfgs, [
+        { id: "fldText", type: j5.Text },
+        { id: "fldBad", type: j5.Formula }
+      ], "tblA")
+    );
+    check(
+      "F33 \u2605 \u5143\u6570\u636E\uFF1A\u7C7B\u578B\u6F02\u79FB\u6210 Denied\uFF08\u6743\u9650\u6001\uFF09\u2192 \u547D\u4E2D unwritable\uFF08\u89E3\u91CA\u300C\u9694\u4E00\u4F1A\u513F\u53C8\u6B63\u5E38\u300D\uFF09",
+      findStaleConfiguredField(cfgs, [
+        { id: "fldText", type: j5.Text },
+        { id: "fldBad", type: j5.Denied }
+      ], "tblA")?.reason === "unwritable",
+      null
+    );
+    check(
+      "F33 \u2605 \u5143\u6570\u636E\uFF1A\u7C7B\u578B\u6F02\u79FB\u6210 AutoNumber \u2192 \u547D\u4E2D unwritable",
+      findStaleConfiguredField(cfgs, [
+        { id: "fldText", type: j5.Text },
+        { id: "fldBad", type: j5.AutoNumber }
+      ], "tblA")?.reason === "unwritable",
+      null
+    );
+    check(
+      "F33 \u5143\u6570\u636E\uFF1A\u547D\u4E2D\u7ED3\u679C\u5E26\u56DE\u8868 id / \u5B57\u6BB5 id / \u5C55\u793A\u540D\uFF08\u9519\u8BEF\u63D0\u793A\u53EF\u5B9A\u4F4D\uFF09",
+      (() => {
+        const h11 = findStaleConfiguredField(cfgs, [
+          { id: "fldText", type: j5.Text },
+          { id: "fldBad", type: j5.Formula }
+        ], "tblZ");
+        return h11?.tableId === "tblZ" && h11?.fieldId === "fldBad" && h11?.label === "\u7F16\u53F7";
+      })(),
+      null
+    );
+    check(
+      "F33 \u5143\u6570\u636E\uFF1AdescribeStaleHit \u533A\u5206\u300C\u5B57\u6BB5\u6CA1\u4E86\u300D\u4E0E\u300C\u7C7B\u578B\u53D8\u4E86\u300D",
+      describeStaleHit({ tableId: "t", fieldId: "f", label: "\u7532", liveType: j5.NotSupport, reason: "missing" }).includes("\u5220\u9664") && describeStaleHit({ tableId: "t", fieldId: "f", label: "\u7532", liveType: j5.Formula, reason: "unwritable" }).includes("\u7C7B\u578B"),
+      null
+    );
+    check(
+      "F33 \u5143\u6570\u636E\uFF1A\u5173\u8054\u5B57\u6BB5\u7C7B\u578B\u4E0D\u8BEF\u5224\uFF08SingleLink/DuplexLink \u53EF\u5199\uFF09",
+      findStaleConfiguredField(
+        [{ fieldId: "fldLink", fieldName: "\u5173\u8054", label: "\u5173\u8054", fieldType: j5.SingleLink, visible: true, required: false }],
+        [{ id: "fldLink", type: j5.SingleLink }],
+        "tblA"
+      ) === null,
+      null
+    );
+    check(
+      "F33 \u8BCA\u65AD\uFF1AextractErrorCode \u652F\u6301\u6570\u5B57 code",
+      extractErrorCode({ code: 1254607 }) === 1254607,
+      null
+    );
+    check(
+      "F33 \u8BCA\u65AD\uFF1AextractErrorCode \u652F\u6301\u5B57\u7B26\u4E32 code\uFF08\u6865\u63A5\u5C42\u53EF\u80FD\u5E8F\u5217\u5316\uFF09",
+      extractErrorCode({ code: "1254607" }) === 1254607,
+      null
+    );
+    check(
+      "F33 \u8BCA\u65AD\uFF1AextractErrorCode \u65E0 code \u65F6\u8FD4\u56DE undefined\uFF08\u4E0D\u4F2A\u9020 0\uFF09",
+      extractErrorCode({}) === void 0 && extractErrorCode(null) === void 0,
+      null
+    );
+    check(
+      "F33 \u8BCA\u65AD\uFF1AextractErrorMessage \u517C\u5BB9 SDK \u5DF2\u5E9F\u5F03\u7684 msg \u5B57\u6BB5\uFF08TransferableError\uFF09",
+      extractErrorMessage({ msg: "not support" }) === "not support",
+      null
+    );
+    {
+      const fs33 = await import("node:fs");
+      const strip33 = (src) => src.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|\s)\/\/[^\n]*/g, "$1");
+      const read33 = (rel) => strip33(fs33.readFileSync(new URL(rel, import.meta.url), "utf8"));
+      const fr33 = read33("../src/components/FormRenderer/index.tsx");
+      check(
+        "F33 \u2605 \u7ED3\u6784\uFF1AhandleSubmit \u7528\u540C\u6B65 ref \u505A\u9632\u91CD\u5165\u95F8\u95E8\uFF08state \u6321\u4E0D\u4F4F\u540C\u5E27\u7B2C\u4E8C\u6B21\u70B9\u51FB\uFF09",
+        /submittingRef\.current\s*=\s*true/.test(fr33) && /if \(submittingRef\.current\)/.test(fr33),
+        null
+      );
+      check(
+        "F33 \u2605 \u7ED3\u6784\uFF1A\u95F8\u95E8\u5728 finally \u4E2D\u91CA\u653E\uFF08\u4EFB\u4E00\u51FA\u53E3\u90FD\u4E0D\u80FD\u6F0F\uFF0C\u5426\u5219\u63D0\u4EA4\u6C38\u4E45\u5931\u6548\uFF09",
+        /finally\s*\{[\s\S]{0,200}?submittingRef\.current\s*=\s*false/.test(fr33),
+        null
+      );
+      const rs33 = read33("../src/services/recordService.ts");
+      check(
+        "F33 \u2605 \u7ED3\u6784\uFF1A\u4E3B\u8868 addRecord \u8D70 withWriteRetry\uFF08\u539F\u6765\u5355\u6B21\u8C03\u7528\u96F6\u91CD\u8BD5\uFF09",
+        /withWriteRetry\(\s*\(\)\s*=>\s*mainTable\.addRecord/.test(rs33),
+        null
+      );
+      check(
+        "F33 \u7ED3\u6784\uFF1A\u5B50\u8868 addRecords \u540C\u6837\u8D70 withWriteRetry",
+        /withWriteRetry\(\s*\(\)\s*=>\s*subTable\.addRecords/.test(rs33),
+        null
+      );
+      check(
+        "F33 \u2605 \u7ED3\u6784\uFF1A\u9519\u8BEF\u6587\u6848\u4FDD\u7559 code\uFF08\u4E0D\u518D\u53EA\u53D6 message\uFF09",
+        /describeError/.test(rs33) && /code=/.test(rs33),
+        null
+      );
+      const vc33 = read33("../src/utils/valueConverter.ts");
+      check(
+        "F33 \u2605 \u7ED3\u6784\uFF1A\u63D0\u4EA4\u524D\u5BF9**\u5B9E\u9645\u7C7B\u578B**\u505A\u53EF\u5199\u6027\u628A\u5173\uFF08\u8DF3\u8FC7\u800C\u975E\u6574\u6761\u5931\u8D25\uFF09",
+        /isWritableFieldType\(meta\.type\)/.test(vc33),
+        null
+      );
+      const app33 = read33("../src/App.tsx");
+      check(
+        "F33 \u2605 \u7ED3\u6784\uFF1A\u5143\u6570\u636E\u6821\u9A8C\u8C03\u7528\u7EAF\u51FD\u6570 findStaleConfiguredField\uFF08\u4E0D\u518D\u5185\u8054\u5224\u7C7B\u578B\uFF09",
+        /findStaleConfiguredField\(configuredFields, metas, tid\)/.test(app33) && !/return !isWritableFieldType\(live\)/.test(app33),
+        null
+      );
+      const fm33 = read33("../src/utils/fieldMapper.ts");
+      check(
+        "F33 \u2605 \u7ED3\u6784\uFF1A\u53EF\u5F55\u5165\u5224\u5B9A\u6539\u4E3A\u767D\u540D\u5355\uFF08WRITABLE_FIELD_TYPES.includes\uFF09",
+        /WRITABLE_FIELD_TYPES\.includes\(type\)/.test(fm33) && !/!isReadonlyField\(type\)\s*&&\s*!isUnsupportedField\(type\)/.test(fm33),
         null
       );
     }

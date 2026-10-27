@@ -23,6 +23,7 @@ import {
 } from './services/configService';
 import { getBase, getBaseToken, isWorkspaceAvailable } from './services/appContext';
 import { getFieldMetaList } from './services/baseService';
+import { findStaleConfiguredField, describeStaleHit } from './utils/metaStale';
 import { probeHost, probeOneLine } from './services/probe';
 import { exportDiagnosticBundle } from './services/diagExport';
 
@@ -277,7 +278,7 @@ export default function App() {
           try {
             const d = dataRef.current;
             if (!d || d.forms.length === 0) return;
-            // 轻量校验：配置引用的字段是否都还存在（拿不到 meta 视为失效）
+            // 轻量校验：配置引用的字段是否都还存在、类型是否仍可写（拿不到 meta 视为失效）
             for (const form of d.forms) {
               const tableIds = [
                 form.mainTable.tableId,
@@ -285,15 +286,25 @@ export default function App() {
               ].filter(Boolean);
               for (const tid of tableIds) {
                 const metas = await getFieldMetaList(tid);
-                const ids = new Set(metas.map((m) => m.id));
-                const configuredIds =
+                const configuredFields =
                   tid === form.mainTable.tableId
-                    ? form.mainTable.fields.map((f) => f.fieldId)
-                    : (form.subTables.find((s) => s.tableId === tid)?.fields ?? []).map(
-                        (f) => f.fieldId
-                      );
-                if (configuredIds.some((fid) => !ids.has(fid))) {
-                  console.warn('[App] 检测到表结构变化（字段缺失），暂停提交:', tid);
+                    ? form.mainTable.fields
+                    : (form.subTables.find((s) => s.tableId === tid)?.fields ?? []);
+                /**
+                 * ★ 判定交给纯函数 findStaleConfiguredField（测试可真实调用）。
+                 *
+                 * 原来只查「字段还在不在」，不查「类型变没变」。字段被从文本改成
+                 * 公式 / 查找引用 / 自动编号 / 群聊等不可写类型后，字段 id 仍然存在，
+                 * 提交按钮依旧可点，写入被宿主整条拒绝且只报一句 `not support`。
+                 * 这类改动常常是临时的（改回原类型、或权限态变化导致返回 Denied），
+                 * 恢复后就自动正常 —— 正好对应「别人正常、同一个人隔一会儿又正常」。
+                 */
+                const hit = findStaleConfiguredField(configuredFields, metas, tid);
+                if (hit) {
+                  console.warn(
+                    `[App] 检测到表结构变化（${describeStaleHit(hit)}），暂停提交: ` +
+                      `${tid}/${hit.fieldId} 当前类型=${hit.liveType}`
+                  );
                   setMetaStale(true);
                   return;
                 }

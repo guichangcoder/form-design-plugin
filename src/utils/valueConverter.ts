@@ -3,6 +3,7 @@ import { FieldConfig, FormValues } from '../types';
 import { isEmptyValue } from './validator';
 import { getBase } from '../services/appContext';
 import { getLinkTargetTableId } from '../services/baseService';
+import { isWritableFieldType } from './fieldMapper';
 
 /**
  * 将表单态的单个字段值，转换为多维表格 SDK 写入所需的 cell 值格式。
@@ -94,6 +95,26 @@ export async function convertToSdkFormat(
     }
     const fieldInstance = await table.getField(field.fieldId);
     const meta = await fieldInstance.getMeta();
+    /**
+     * ★ 提交前最后一道把关（线上「主表写入失败：not support」根因修复）。
+     *
+     * 这里拿到的是**表里当前的真实类型**，可能已经与配置时的声明类型不同
+     * （配置时是文本，之后被改成公式 / 自动编号 / 查找引用 / 关联等）。
+     * 这类字段宿主一律拒绝写入，且报错是没有上下文的 `not support`，
+     * 导致整条 addRecord 失败——同一张表里只有「碰到这些字段」的提交者报错，
+     * 别人正常，过一会儿表结构/权限又变回来就又好了。
+     *
+     * 处理策略：**跳过该字段并保留其余字段的写入**，而不是让整条记录失败。
+     * 站点数据比一个派生字段更重要，且该字段本来也写不进去。
+     */
+    if (!isWritableFieldType(meta.type)) {
+      console.warn(
+        `[valueConverter] 跳过不可写字段「${field.label || field.fieldName || field.fieldId}」` +
+          `（fieldId=${field.fieldId}，当前实际类型=${FieldType[meta.type] ?? meta.type}）。` +
+          '该类型不支持通过 API 写入，已从本次提交中排除以免整条记录写入失败。'
+      );
+      continue;
+    }
     result[field.fieldId] = convertCellValue(meta.type, raw, field);
   }
   return result;

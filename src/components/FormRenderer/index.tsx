@@ -120,6 +120,11 @@ export function FormRenderer({ config, onBackToConfig, preview, metaStale, onRel
     initSubValues(config)
   );
   const [submitting, setSubmitting] = useState(false);
+  /**
+   * ★ 提交闸门（同步 ref）：state 是异步的，挡不住同一帧内的第二次点击。
+   * 与 submitting 配套：state 负责 UI，ref 负责并发控制。
+   */
+  const submittingRef = useRef(false);
   // 提交校验后的字段级错误（字段下方红字 + 高亮待填写字段）
   const [submitErrors, setSubmitErrors] = useState<FieldError[]>([]);
   const cond = useConditional(config, mainValues, subValues);
@@ -553,6 +558,20 @@ export function FormRenderer({ config, onBackToConfig, preview, metaStale, onRel
       toast('表结构已变化，请先点击上方「重新载入」再继续', 'warning');
       return;
     }
+    /**
+     * ★ 防重入（并发写保护）。
+     *
+     * Semi 的 Button 只在 `disabled` 时阻止点击，`loading` **不会**吞掉 onClick，
+     * 所以「点一下没反应再点一下」或快速双击会并发跑两次 submitForm →
+     * 同一张数据表被并发 addRecord → 命中官方限制
+     * 「1254291 Write conflict：同一个数据表不支持并发调用写接口」。
+     *
+     * 这里用同步 ref 做闸门（state 更新是异步的，挡不住同一帧内的第二次点击）。
+     */
+    if (submittingRef.current) {
+      toast('正在提交，请稍候…', 'info');
+      return;
+    }
     const res = validateForm(config, mainValues, subValues, cond);
     // 诊断日志：校验放行的排查依据（必填字段的 required/值/隐藏判定一目了然）
     console.log('[submit] 校验结果:', {
@@ -581,85 +600,88 @@ export function FormRenderer({ config, onBackToConfig, preview, metaStale, onRel
     }
     setSubmitErrors([]);
     setSubmitting(true);
+    submittingRef.current = true;
 
-    // ★ 唯一性校验（提交时查重）：与数据表已有数据 + 本次提交多行之间比对。
-    //   必填/格式校验先做，避免无谓读表。
-    let dup: Awaited<ReturnType<typeof checkDuplicates>> = { errors: [], failures: [] };
     try {
-      dup = await checkDuplicates(config, mainValues, subValues, cond);
-    } catch (e) {
-      setSubmitting(false);
-      toast(`唯一性校验出错：${(e as Error)?.message ?? String(e)}`, 'error');
-      return;
-    }
-    // 读不到已有数据（通常是权限不足）→ 阻断，不能静默放行，否则唯一性形同虚设
-    if (dup.failures.length > 0) {
-      setSubmitting(false);
-      toast(
-        `无法完成唯一性校验：${dup.failures.map((f) => `「${f.label}」`).join('、')} 读取已有数据失败（${dup.failures[0].reason}）。请确认你有该数据表的查看权限，或联系配置者关闭这些字段的唯一性校验。`,
-        'error'
-      );
-      return;
-    }
-    if (dup.errors.length > 0) {
-      setSubmitting(false);
-      setSubmitErrors(dup.errors);
-      const names = dup.errors.map(labelOfError).join('、');
-      toast(
-        dup.errors.length <= 3
-          ? `以下字段与已有数据重复：${names}`
-          : `${names.slice(0, 60)}… 等 ${dup.errors.length} 项与已有数据重复`,
-        'error'
-      );
-      return;
-    }
+      // ★ 唯一性校验（提交时查重）：与数据表已有数据 + 本次提交多行之间比对。
+      //   必填/格式校验先做，避免无谓读表。
+      let dup: Awaited<ReturnType<typeof checkDuplicates>> = { errors: [], failures: [] };
+      try {
+        dup = await checkDuplicates(config, mainValues, subValues, cond);
+      } catch (e) {
+        toast(`唯一性校验出错：${(e as Error)?.message ?? String(e)}`, 'error');
+        return;
+      }
+      // 读不到已有数据（通常是权限不足）→ 阻断，不能静默放行，否则唯一性形同虚设
+      if (dup.failures.length > 0) {
+        toast(
+          `无法完成唯一性校验：${dup.failures.map((f) => `「${f.label}」`).join('、')} 读取已有数据失败（${dup.failures[0].reason}）。请确认你有该数据表的查看权限，或联系配置者关闭这些字段的唯一性校验。`,
+          'error'
+        );
+        return;
+      }
+      if (dup.errors.length > 0) {
+        setSubmitErrors(dup.errors);
+        const names = dup.errors.map(labelOfError).join('、');
+        toast(
+          dup.errors.length <= 3
+            ? `以下字段与已有数据重复：${names}`
+            : `${names.slice(0, 60)}… 等 ${dup.errors.length} 项与已有数据重复`,
+          'error'
+        );
+        return;
+      }
 
-    // ★ 传入最新条件状态：隐藏字段的值在提交前被过滤（P1-3），不入库
-    const r = await submitForm(config, mainValues, subValues, cond);
-    setSubmitting(false);
-    if (r.success) {
-      toast('提交成功', 'success');
-      // ★ 正式写入成功 → 草稿使命完成，立即清除（否则下次打开还会「恢复」出已提交的内容）
-      clearDraft(draftBase, configRef.current.id, draftUserId || 'anonymous');
-      setDraftSavedAt(null);
-      setDraftDirty(false);
-      draftRestored.current = true; // 已提交，本次会话不再尝试恢复草稿
-      // ★ 把本次写入的值并入查重缓存：同一会话内再填相同值也能判重
-      config.mainTable.fields
-        .filter((f) => f.unique?.enabled && UNIQUE_CHECKABLE_TYPES.includes(f.fieldType))
-        .forEach((f) => {
-          const v = mainValues[f.fieldId];
-          if (!isEmptyValue(v)) noteSubmittedValues(config.mainTable.tableId, f.fieldId, [v]);
-        });
-      config.subTables.forEach((sub) => {
-        const rows = subValues[sub.tableId] ?? [];
-        sub.fields
+      // ★ 传入最新条件状态：隐藏字段的值在提交前被过滤（P1-3），不入库
+      const r = await submitForm(config, mainValues, subValues, cond);
+      if (r.success) {
+        toast('提交成功', 'success');
+        // ★ 正式写入成功 → 草稿使命完成，立即清除（否则下次打开还会「恢复」出已提交的内容）
+        clearDraft(draftBase, configRef.current.id, draftUserId || 'anonymous');
+        setDraftSavedAt(null);
+        setDraftDirty(false);
+        draftRestored.current = true; // 已提交，本次会话不再尝试恢复草稿
+        // ★ 把本次写入的值并入查重缓存：同一会话内再填相同值也能判重
+        config.mainTable.fields
           .filter((f) => f.unique?.enabled && UNIQUE_CHECKABLE_TYPES.includes(f.fieldType))
           .forEach((f) => {
-            const vals = rows.map((row) => row[f.fieldId]).filter((v) => !isEmptyValue(v));
-            if (vals.length) noteSubmittedValues(sub.tableId, f.fieldId, vals);
+            const v = mainValues[f.fieldId];
+            if (!isEmptyValue(v)) noteSubmittedValues(config.mainTable.tableId, f.fieldId, [v]);
           });
-      });
-      setMainValues(initMainValues(config));
-      setSubValues(initSubValues(config));
-      // 重置日期联动的「手动改过 / 自动填过」标记，下一轮填写重新自动预填
-      manualEdited.current = new Set();
-      autoFilled.current = new Set();
-      // 重置「默认当前用户」的处理标记，并触发 effect 重跑 → 新一条记录重新默认当前用户
-      resetUserDefaultDone(userDefaultDone.current);
-      setSubmitSeq((s) => s + 1);
-      // 清空唯一性校验提示
-      setUniqueState({});
-    } else if (r.rollback === 'partial') {
-      // P0-2：失败且部分已写入记录未能自动清理，必须明确告知用户人工核查
-      toast(
-        `提交失败：${r.error ?? '未知错误'}。部分已写入记录未能自动清理（${r.rollbackDetail ?? ''}），请到数据表中人工核查`,
-        'error'
-      );
-    } else if (r.rollback === 'clean') {
-      toast(`提交失败：${r.error ?? '未知错误'}（已写入的记录已全部自动回滚）`, 'error');
-    } else {
-      toast(`提交失败：${r.error ?? '未知错误'}`, 'error');
+        config.subTables.forEach((sub) => {
+          const rows = subValues[sub.tableId] ?? [];
+          sub.fields
+            .filter((f) => f.unique?.enabled && UNIQUE_CHECKABLE_TYPES.includes(f.fieldType))
+            .forEach((f) => {
+              const vals = rows.map((row) => row[f.fieldId]).filter((v) => !isEmptyValue(v));
+              if (vals.length) noteSubmittedValues(sub.tableId, f.fieldId, vals);
+            });
+        });
+        setMainValues(initMainValues(config));
+        setSubValues(initSubValues(config));
+        // 重置日期联动的「手动改过 / 自动填过」标记，下一轮填写重新自动预填
+        manualEdited.current = new Set();
+        autoFilled.current = new Set();
+        // 重置「默认当前用户」的处理标记，并触发 effect 重跑 → 新一条记录重新默认当前用户
+        resetUserDefaultDone(userDefaultDone.current);
+        setSubmitSeq((s) => s + 1);
+        // 清空唯一性校验提示
+        setUniqueState({});
+      } else if (r.rollback === 'partial') {
+        // P0-2：失败且部分已写入记录未能自动清理，必须明确告知用户人工核查
+        toast(
+          `提交失败：${r.error ?? '未知错误'}。部分已写入记录未能自动清理（${r.rollbackDetail ?? ''}），请到数据表中人工核查`,
+          'error'
+        );
+      } else if (r.rollback === 'clean') {
+        toast(`提交失败：${r.error ?? '未知错误'}（已写入的记录已全部自动回滚）`, 'error');
+      } else {
+        toast(`提交失败：${r.error ?? '未知错误'}`, 'error');
+      }
+    } finally {
+      // ★ 无论走哪条出口都必须释放闸门，否则一次异常会让「提交」永久失效
+      submittingRef.current = false;
+      setSubmitting(false);
     }
   };
 
