@@ -12,6 +12,7 @@ import { BasePicker } from './BasePicker';
 import { toast } from '../../utils/toast';
 import { DEFAULT_THEME, PRESET_COLORS, applyThemeColor } from '../../utils/theme';
 import { isWorkspaceAvailable } from '../../services/appContext';
+import { MAIN_COLUMNS_OPTIONS, resolveMainColumns } from '../../utils/mainLayout';
 
 interface Props {
   initialConfig: FormPluginConfig | null;
@@ -303,6 +304,43 @@ export function ConfigPanel({ initialConfig, onSave, onCancel, appMode, baseToke
             filter
             searchPlaceholder="搜索数据表"
           />
+
+          {/* 排布列数：默认单列（纵向），可选双列 / 三列让短控件并排 */}
+          <div className="subcfg-row" style={{ marginTop: 12 }}>
+            <Typography.Text type="tertiary" style={{ fontSize: 12, minWidth: 64 }}>
+              排布列数
+            </Typography.Text>
+            <div className="layout-choice">
+              {MAIN_COLUMNS_OPTIONS.map((n) => (
+                <button
+                  key={n}
+                  type="button"
+                  className={`layout-choice-btn ${
+                    resolveMainColumns(draft.mainTable.columns) === n ? 'active' : ''
+                  }`}
+                  onClick={() =>
+                    setDraft((d) => ({ ...d, mainTable: { ...d.mainTable, columns: n } }))
+                  }
+                >
+                  <span className={`lcb-icon lcb-icon--cols lcb-icon--cols${n}`} />
+                  <span className="lcb-text">
+                    <b>{n === 1 ? '单列' : n === 2 ? '双列' : '三列'}</b>
+                    <i>
+                      {n === 1 ? '每行一个字段（默认）' : '短控件并排，减少滚动'}
+                    </i>
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+          <Typography.Text
+            type="tertiary"
+            style={{ display: 'block', marginTop: 6, fontSize: 12, lineHeight: 1.7 }}
+          >
+            多列时，多行文本、附件、关联记录会自动跨满整行（这些控件压在半栏里会难以使用）；
+            窄屏会自动降回单列。
+          </Typography.Text>
+
           <div style={{ marginTop: 12 }}>
             <FieldConfigList
               fields={draft.mainTable.fields}

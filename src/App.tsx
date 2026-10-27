@@ -811,6 +811,7 @@ export default function App() {
             onBackToConfig={handleBack}
             metaStale={metaStale}
             onReloadMeta={handleReloadMeta}
+            baseToken={baseToken}
           />
         )}
 
@@ -820,6 +821,7 @@ export default function App() {
             onBackToConfig={handleBack}
             metaStale={metaStale}
             onReloadMeta={handleReloadMeta}
+            baseToken={baseToken}
           />
         )}
 

@@ -217,6 +217,33 @@ button {
   font-weight: 700;
 }
 
+/* ---------- 主表多列布局（2 / 3 列） ----------
+   仅当主表配置为多列时，MainForm 才套这层 grid（单列不套，DOM 与旧版一致）。
+   每项 `grid-column: span N` 由 JS 按「字段是否天然需要整行」决定：
+   多行文本 / 附件 / 关联记录跨满整行，其余单行控件并排。
+   `minmax(0, 1fr)` 而非 `1fr`：否则宽控件（人员选择器）会把列撑破。 */
+.main-grid {
+  display: grid;
+  gap: 0 16px;
+  align-items: start;
+}
+
+/* 多列时同一行的字段底部对齐间距，避免 grid gap 与 .field-row margin 叠加过密 */
+.main-grid > .field-row {
+  min-width: 0;
+}
+
+/* 窄屏（宿主侧边栏 / 手机）自动降为单列：并排会被压得无法输入。
+   ⚠️ 用容器宽度查询不到，退化为视口宽度判断（插件通常在 iframe 内全宽渲染）。 */
+@media (max-width: 560px) {
+  .main-grid {
+    grid-template-columns: 1fr !important;
+  }
+  .main-grid > .field-row {
+    grid-column: span 1 !important;
+  }
+}
+
 /* ---------- 子表多行卡片 ---------- */
 .sub-row {
   background: #fafbfd;
@@ -388,6 +415,57 @@ button {
     transparent 2px,
     transparent 7px
   );
+}
+
+/* ---------- 排布列数图标（单列 / 双列 / 三列）----------
+   用竖向条纹数表示列数：1 条 = 单列，2 条 = 双列，3 条 = 三列。 */
+.layout-choice-btn .lcb-icon--cols::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border: 1px solid #cbd5e1;
+  border-radius: 3px;
+}
+
+.layout-choice-btn .lcb-icon--cols1::before {
+  background: repeating-linear-gradient(
+    90deg,
+    #e2e8f0 0,
+    #e2e8f0 2px,
+    transparent 2px,
+    transparent 7px
+  );
+}
+
+.layout-choice-btn .lcb-icon--cols2::before {
+  background: repeating-linear-gradient(
+    90deg,
+    #e2e8f0 0,
+    #e2e8f0 2px,
+    transparent 2px,
+    transparent 11px
+  );
+}
+
+.layout-choice-btn .lcb-icon--cols3::before {
+  background: repeating-linear-gradient(
+    90deg,
+    #e2e8f0 0,
+    #e2e8f0 2px,
+    transparent 2px,
+    transparent 13px
+  );
+}
+
+.layout-choice-btn.active .lcb-icon--cols::before {
+  border-color: var(--brand);
+}
+
+.layout-choice-btn.active .lcb-icon--cols1,
+.layout-choice-btn.active .lcb-icon--cols2,
+.layout-choice-btn.active .lcb-icon--cols3 {
+  background: none;
+  border-left: 2px solid var(--brand-line);
 }
 
 /* ============================================================
@@ -611,6 +689,93 @@ button {
 
 .submit-btn:hover {
   background: linear-gradient(120deg, var(--brand-hover), var(--brand-deep)) !important;
+}
+
+/* ---------- 提交区（提交 + 保存草稿并排） ----------
+   草稿存储不可用时（老浏览器 / 隐私模式）只渲染提交按钮，
+   .submit-row 里只剩一个 flex 子项，视觉与旧的 100% 宽按钮一致 → 零破坏。 */
+.submit-row {
+  display: flex;
+  gap: 10px;
+  align-items: stretch;
+}
+
+.submit-row .submit-btn {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+}
+
+/* ---------- 保存草稿按钮 ---------- */
+.draft-btn {
+  flex: 0 0 auto;
+  height: 46px !important;
+  padding: 0 18px !important;
+  font-size: 14px !important;
+  font-weight: 600;
+  border-radius: 10px !important;
+  letter-spacing: 1px;
+  color: var(--brand) !important;
+  background: #ffffff !important;
+  border: 1px solid var(--brand-line) !important;
+}
+
+.draft-btn:hover:not(:disabled) {
+  color: var(--brand-hover) !important;
+  background: var(--brand-soft) !important;
+  border-color: var(--brand) !important;
+}
+
+/* ---------- 草稿状态条 ----------
+   只在「已有草稿」时出现，明确告知：内容尚未提交、不会进数据表。 */
+.draft-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 4px 0 12px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: var(--brand-soft);
+  border: 1px solid var(--brand-line);
+  font-size: 13px;
+  color: #1e3a8a;
+}
+
+.draft-bar-text {
+  line-height: 1.6;
+}
+
+.draft-bar-text b {
+  color: var(--danger);
+}
+
+.draft-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+/* 窄屏（应用模式侧边栏）→ 状态条纵向排列，按钮不挤压文字 */
+@media (max-width: 560px) {
+  .draft-bar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .draft-bar-actions {
+    justify-content: flex-end;
+  }
+
+  .submit-row {
+    flex-direction: column;
+  }
+
+  .draft-btn {
+    width: 100%;
+  }
 }
 
 /* ---------- 保存配置按钮 ---------- */

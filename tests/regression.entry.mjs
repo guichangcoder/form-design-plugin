@@ -3663,6 +3663,312 @@ async function run() {
     }
   }
 
+  /* ============================================================
+   * F31 主表多列排布 + 表单草稿（2026-10-25 新增）
+   *
+   * 需求：
+   *   1) 主表默认纵向单列，可选择单列 / 双列 / 三列；
+   *   2) 用户可保存草稿，切换页面回来还能接着填；**只有点提交才写入数据表**。
+   *
+   * ★ 断言策略（本项目铁律）：UI 类缺陷必须**真实调用纯函数**验证 ——
+   *   源码正则只能证明字样存在，证明不了运行时产出（曾注入 `return id;` 仍全绿）。
+   *   因此这里对 mainLayout / formDraft 全部走真实 import 调用，
+   *   只有「接线是否存在」这类结构性事实才用源码正则兜底。
+   * ============================================================ */
+  {
+    const {
+      resolveMainColumns,
+      isMultiColumn,
+      shouldSpanFullRow,
+      fieldGridSpan,
+      MAIN_COLUMNS_OPTIONS,
+      MAX_MAIN_COLUMNS,
+    } = await import('../src/utils/mainLayout.ts');
+
+    const {
+      serializeDraftValue,
+      deserializeDraftValue,
+      serializeDraftRow,
+      deserializeDraftRow,
+      rowHasContent,
+      draftHasContent,
+      formSchemaSignature,
+      mergeDraftRow,
+      draftStorageKey,
+      DRAFT_DATE_MARK,
+    } = await import('../src/utils/formDraft.ts');
+
+    // ---------- 1) 列数解析：缺省 / 非法一律回退单列（零破坏） ----------
+    check('F31 列数缺省（undefined）→ 1 列', resolveMainColumns(undefined) === 1, null);
+    check('F31 列数缺省（null）→ 1 列', resolveMainColumns(null) === 1, null);
+    check('F31 列数缺省（旧配置无该字段 → 空串）→ 1 列', resolveMainColumns('') === 1, null);
+    check('F31 非法列数 0 → 1 列', resolveMainColumns(0) === 1, null);
+    check('F31 非法列数 -1 → 1 列', resolveMainColumns(-1) === 1, null);
+    check('F31 非法列数 4 超上限 → 夹到 3', resolveMainColumns(4) === MAX_MAIN_COLUMNS, null);
+    check('F31 非法列数 99 → 夹到 3', resolveMainColumns(99) === 3, null);
+    check('F31 非法列数 NaN → 1 列', resolveMainColumns(NaN) === 1, null);
+    check("F31 非法列数 'x'（非数字字符串）→ 1 列", resolveMainColumns('x') === 1, null);
+    check('F31 合法列数 2 原样', resolveMainColumns(2) === 2, null);
+    check('F31 合法列数 3 原样', resolveMainColumns(3) === 3, null);
+    check("F31 字符串数字 '2' 也能解析（配置可能来自 JSON 字符串）", resolveMainColumns('2') === 2, null);
+    check('F31 小数 2.7 向下取整为 2', resolveMainColumns(2.7) === 2, null);
+    check('F31 可选列数恰为 [1,2,3]（配置面板不出现其他档位）',
+      JSON.stringify(MAIN_COLUMNS_OPTIONS) === '[1,2,3]', null);
+
+    // ---------- 2) 单列 = 零破坏（不套 grid 的判断入口） ----------
+    check('F31 单列 → isMultiColumn=false（渲染层据此不套 grid 容器）',
+      isMultiColumn(1) === false && isMultiColumn(undefined) === false && isMultiColumn(0) === false, null);
+    check('F31 双列 / 三列 → isMultiColumn=true',
+      isMultiColumn(2) === true && isMultiColumn(3) === true, null);
+
+    // ---------- 3) 跨整行判定：按「控件形态」而非业务含义 ----------
+    check('F31 多行文本 → 跨整行（半栏太窄）', shouldSpanFullRow(FieldType.Text) === true, null);
+    check('F31 附件 → 跨整行（缩略图必然换行）', shouldSpanFullRow(FieldType.Attachment) === true, null);
+    check('F31 单向关联 → 跨整行（记录标签横向堆叠）', shouldSpanFullRow(FieldType.SingleLink) === true, null);
+    check('F31 双向关联 → 跨整行', shouldSpanFullRow(FieldType.DuplexLink) === true, null);
+    check('F31 数字 → 不跨整行（单行控件并排无压力）', shouldSpanFullRow(FieldType.Number) === false, null);
+    check('F31 日期 → 不跨整行', shouldSpanFullRow(FieldType.DateTime) === false, null);
+    check('F31 单选 / 多选 → 不跨整行',
+      shouldSpanFullRow(FieldType.SingleSelect) === false && shouldSpanFullRow(FieldType.MultiSelect) === false, null);
+    check('F31 人员 → 不跨整行', shouldSpanFullRow(FieldType.User) === false, null);
+    check('F31 电话 → 不跨整行', shouldSpanFullRow(FieldType.Phone) === false, null);
+    check('F31 复选 / 评分 → 不跨整行',
+      shouldSpanFullRow(FieldType.Checkbox) === false && shouldSpanFullRow(FieldType.Rating) === false, null);
+
+    // ---------- 4) grid span：单列恒 1；多列时整行字段 = 全部列 ----------
+    check('F31 单列布局下任何字段 span 恒为 1（视觉与旧版一致）',
+      [FieldType.Text, FieldType.Number, FieldType.Attachment].every((t) => fieldGridSpan(t, 1) === 1), null);
+    check('F31 三列 + 多行文本 → span=3（占满整行）', fieldGridSpan(FieldType.Text, 3) === 3, null);
+    check('F31 三列 + 数字 → span=1（只占一列）', fieldGridSpan(FieldType.Number, 3) === 1, null);
+    check('F31 双列 + 附件 → span=2', fieldGridSpan(FieldType.Attachment, 2) === 2, null);
+    check('F31 双列 + 关联 → span=2', fieldGridSpan(FieldType.SingleLink, 2) === 2, null);
+    check('F31 span 永不超出列数（超上限配置夹到 3 后 span 也是 3）',
+      fieldGridSpan(FieldType.Text, 99) === 3 && fieldGridSpan(FieldType.Number, 99) === 1, null);
+    check('F31 非法列数下 span 仍安全（不返回 0 / NaN）',
+      [fieldGridSpan(FieldType.Text, 'x'), fieldGridSpan(FieldType.Number, NaN), fieldGridSpan(FieldType.Text, 0)]
+        .every((s) => s === 1), null);
+
+    // ---------- 5) 草稿序列化：Date 必须可往返（DateTime 控件要 Date 实例） ----------
+    const d0 = new Date('2026-10-25T13:45:00.000Z');
+    const sd = serializeDraftValue(d0);
+    check('F31 Date → 带标记的毫秒对象（JSON 可承载）',
+      sd && typeof sd === 'object' && sd[DRAFT_DATE_MARK] === 'date' && sd.v === d0.getTime(), sd);
+    const back = deserializeDraftValue(sd);
+    check('F31 Date 往返后仍是 Date 实例（不是数字 / 字符串）',
+      back instanceof Date, typeof back);
+    check('F31 Date 往返后时间戳完全一致', back instanceof Date && back.getTime() === d0.getTime(), null);
+    check('F31 序列化结果可 JSON 往返且仍能还原 Date（真实存储路径）',
+      (() => {
+        const r = deserializeDraftValue(JSON.parse(JSON.stringify(serializeDraftValue(d0))));
+        return r instanceof Date && r.getTime() === d0.getTime();
+      })(), null);
+    check('F31 非法 Date（Invalid Date）→ 丢弃而非写入 NaN',
+      serializeDraftValue(new Date('nope')) === undefined, null);
+
+    // ---------- 6) 草稿序列化：File 必须丢弃（无法 JSON 化 / 无法还原） ----------
+    const fileVal = new File(['abc'], 'a.pdf', { type: 'application/pdf' });
+    check('F31 附件 File → 丢弃（返回 undefined，不写空壳）',
+      serializeDraftValue(fileVal) === undefined, null);
+    check('F31 含 File 的数组 → 整个字段丢弃（不做半截保留）',
+      serializeDraftValue([fileVal]) === undefined, null);
+    check('F31 混合数组（File + 文本）也整体丢弃（避免误导用户「已保留」）',
+      serializeDraftValue([fileVal, 'x']) === undefined, null);
+    check('F31 普通对象里的 File 字段被剔除，其余字段保留',
+      (() => {
+        const s = serializeDraftValue({ a: 1, b: fileVal, c: 'k' });
+        return s && s.a === 1 && s.c === 'k' && !('b' in s);
+      })(), null);
+
+    // ---------- 7) 草稿序列化：基础类型与嵌套 ----------
+    check('F31 字符串 / 数字 / 布尔 / null 语义',
+      serializeDraftValue('x') === 'x' && serializeDraftValue(0) === 0 &&
+      serializeDraftValue(false) === false && serializeDraftValue(null) === undefined, null);
+    check('F31 undefined / 函数 / Symbol 一律丢弃',
+      serializeDraftValue(undefined) === undefined &&
+      serializeDraftValue(() => {}) === undefined &&
+      serializeDraftValue(Symbol('s')) === undefined, null);
+    check('F31 人员字段数组（[{id,name}]）完整保留',
+      (() => {
+        const s = serializeDraftValue([{ id: 'ou_1', name: '甲' }]);
+        return JSON.stringify(s) === JSON.stringify([{ id: 'ou_1', name: '甲' }]);
+      })(), null);
+    check('F31 嵌套对象里的 Date 也能往返',
+      (() => {
+        const s = deserializeDraftValue(serializeDraftValue({ d: d0, n: 3 }));
+        return s.d instanceof Date && s.d.getTime() === d0.getTime() && s.n === 3;
+      })(), null);
+    check('F31 嵌套数组里的 Date 也能往返',
+      (() => {
+        const s = deserializeDraftValue(serializeDraftValue([d0, d0]));
+        return Array.isArray(s) && s.every((x) => x instanceof Date && x.getTime() === d0.getTime());
+      })(), null);
+
+    // ---------- 8) 整行序列化：跳过不可持久化字段 ----------
+    const rowSrc = { name: '合同A', amount: 100, when: d0, file: fileVal, empty: undefined };
+    const rowSer = serializeDraftRow(rowSrc);
+    check('F31 整行序列化：保留文本 / 数字', rowSer.name === '合同A' && rowSer.amount === 100, rowSer);
+    check('F31 整行序列化：Attachment 与 undefined 不落盘（无空壳 key）',
+      !('file' in rowSer) && !('empty' in rowSer), Object.keys(rowSer));
+    check('F31 整行往返：Date 还原为实例',
+      (() => { const r = deserializeDraftRow(rowSer); return r.when instanceof Date && r.when.getTime() === d0.getTime(); })(), null);
+
+    // ---------- 9) 空内容判定：全空草稿不值得落盘 ----------
+    check('F31 空对象 → 无内容', rowHasContent({}) === false, null);
+    check('F31 全空串 / 空数组 → 无内容',
+      rowHasContent({ a: '', b: '   ', c: [], d: undefined, e: null }) === false, null);
+    check('F31 有非空文本 → 有内容', rowHasContent({ a: 'x' }) === true, null);
+    check('F31 0 与 false 是有内容（用户真实选择，不能当空）',
+      rowHasContent({ a: 0 }) === true && rowHasContent({ a: false }) === true, null);
+    check('F31 仅主表有值 → 草稿有内容', draftHasContent({ a: 'x' }, {}) === true, null);
+    check('F31 仅子表某行有值 → 草稿有内容',
+      draftHasContent({}, { t1: [{}, { b: 'y' }] }) === true, null);
+    check('F31 主子表全空 → 无内容（不打扰用户）',
+      draftHasContent({ a: '' }, { t1: [{}, { b: '  ' }] }) === false, null);
+
+    // ---------- 10) 结构指纹：字段增删可识别，改名不影响 ----------
+    const sigA = formSchemaSignature(['f1', 'f2'], { t1: ['s1'] });
+    check('F31 指纹稳定（同样的字段集合 → 同样结果，与顺序无关）',
+      sigA === formSchemaSignature(['f2', 'f1'], { t1: ['s1'] }), null);
+    check('F31 主表字段增删 → 指纹变化', sigA !== formSchemaSignature(['f1'], { t1: ['s1'] }), null);
+    check('F31 子表字段增删 → 指纹变化', sigA !== formSchemaSignature(['f1', 'f2'], { t1: [] }), null);
+    check('F31 子表增删 → 指纹变化',
+      sigA !== formSchemaSignature(['f1', 'f2'], { t1: ['s1'], t2: [] }), null);
+    check('F31 指纹只取 fieldId（改名 / 改标签不触发「草稿可能不完整」提示）',
+      sigA === formSchemaSignature(['f1', 'f2'], { t1: ['s1'] }), null);
+
+    // ---------- 11) 合并策略：草稿覆盖初值，但不动草稿没有的 key ----------
+    const merged = mergeDraftRow({ a: 'default', b: 'defB', c: 'defC' }, { b: 'draftB' });
+    check('F31 草稿值覆盖同名字段', merged.b === 'draftB', merged);
+    check('F31 配置新增字段（草稿里没有）保留其 defaultValue',
+      merged.a === 'default' && merged.c === 'defC', merged);
+    check('F31 草稿为空 / undefined → 原样返回初值（不产生空对象）',
+      mergeDraftRow({ a: 1 }, undefined).a === 1 && mergeDraftRow({ a: 1 }, {}).a === 1, null);
+    check('F31 合并不修改原初值对象（纯函数，无副作用）',
+      (() => { const init = { a: 'x' }; mergeDraftRow(init, { a: 'y' }); return init.a === 'x'; })(), null);
+
+    // ---------- 12) 存储 key：三重隔离（否则跨 base / 跨用户串号） ----------
+    const k1 = draftStorageKey('b1', 'f1', 'u1');
+    check('F31 不同 base → 不同 key（同一表单被复制到别的表格不串号）',
+      k1 !== draftStorageKey('b2', 'f1', 'u1'), null);
+    check('F31 不同表单 → 不同 key', k1 !== draftStorageKey('b1', 'f2', 'u1'), null);
+    check('F31 不同用户 → 不同 key（A 同事的草稿不会被 B 同事读到）',
+      k1 !== draftStorageKey('b1', 'f1', 'u2'), null);
+    check('F31 baseToken 缺失 → nobase 占位（侧边栏 / dev 仍可用）',
+      draftStorageKey('', 'f1', 'u1').includes(':nobase:'), draftStorageKey('', 'f1', 'u1'));
+    check('F31 userId 缺失 → anonymous 占位（取不到身份也不崩）',
+      draftStorageKey('b1', 'f1', '').endsWith(':anonymous'), null);
+    check('F31 key 含 formDesignDraft 前缀且可稳定复现',
+      k1.startsWith('formDesignDraft:') && k1 === draftStorageKey('b1', 'f1', 'u1'), k1);
+
+    // ---------- 13) 持久化往返：columns 瘦身后不丢（本项目高频坑） ----------
+    const thin31 = serializeConfig({
+      forms: [
+        {
+          id: 'f31', version: '1.0.0', formTitle: 't',
+          mainTable: { tableId: 'tblM31', columns: 3, fields: [
+            { fieldId: 'a', fieldName: 'A', fieldType: FieldType.Text, visible: true, required: false },
+          ] },
+          subTables: [],
+          conditionalRules: [],
+        },
+      ],
+    });
+    check('F31 serializeConfig 保留 mainTable.columns（不登记就会静默退回单列）',
+      thin31.forms[0].mainTable.columns === 3, thin31.forms[0].mainTable);
+    // 未配置列数的表单不应产生该 key（体积不变）
+    const thin31b = serializeConfig({
+      forms: [
+        {
+          id: 'f31b', version: '1.0.0', formTitle: 't',
+          mainTable: { tableId: 'tblM31', fields: [
+            { fieldId: 'a', fieldName: 'A', fieldType: FieldType.Text, visible: true, required: false },
+          ] },
+          subTables: [], conditionalRules: [],
+        },
+      ],
+    });
+    check('F31 未配置列数 → columns 为 undefined（旧表单体积不变）',
+      thin31b.forms[0].mainTable.columns === undefined, thin31b.forms[0].mainTable);
+
+    const metaBase31 = {
+      getTableById: async () => ({
+        getFieldMetaList: async () => [{ id: 'a', name: 'A 字段', type: FieldType.Text }],
+      }),
+      getTableMetaList: async () => [{ id: 'tblM31', name: '主表31' }],
+    };
+    selectBaseForTest({ base: metaBase31 });
+    const hydrated31 = await hydrateConfig(JSON.parse(JSON.stringify(thin31)));
+    check('F31 hydrateConfig 还原 mainTable.columns（发布后他人打开仍是三列）',
+      hydrated31.forms[0].mainTable.columns === 3, hydrated31.forms[0].mainTable);
+
+    // ---------- 14) 静态保障：接线存在（结构性事实） ----------
+    // ⚠️ 必须先**剥离注释**再断言！否则把真语句删掉、只留一句
+    //    `// clearDraft(...) removed` 的注释，正则照样匹配 → 假绿。
+    //    （实测：不剥注释时「提交后清草稿」这条被注释骗过，461/461 仍全绿。）
+    const fs31 = await import('node:fs');
+    /**
+     * 剥离源码注释后返回：
+     * - 整行 `// …` 注释 → 删除该行内容
+     * - 行尾 ` // …` 注释 → 删除注释部分（`//` 前必须是行首或空白，
+     *   因此 `'https://x'` 里的 `//` 不会被误伤）
+     * - `/* … *\/` 块注释（跨行）→ 删除
+     */
+    const stripComments31 = (src) =>
+      src
+        .replace(/\/\*[\s\S]*?\*\//g, ' ')
+        .replace(/(^|\s)\/\/[^\n]*/g, '$1');
+    const read31 = (rel) => stripComments31(fs31.readFileSync(new URL(rel, import.meta.url), 'utf8'));
+    const cfgSize31 = read31('../src/services/configSize.ts');
+    check('F31 configSize serializeConfig 登记 columns（防瘦身剥离）',
+      /columns:\s*form\.mainTable\?\.columns/.test(cfgSize31), null);
+    check('F31 configSize hydrateForm 还原 columns',
+      /columns:\s*\(form\.mainTable as any\)\?\.columns/.test(cfgSize31), null);
+
+    const mainForm31 = read31('../src/components/FormRenderer/MainForm.tsx');
+    check('F31 MainForm 单列不套 grid（零破坏渲染路径）',
+      /if \(!multi\) return <div>\{rows\}<\/div>/.test(mainForm31), null);
+    check('F31 MainForm 多列套 main-grid 且用 minmax(0,1fr)（否则宽控件撑破列）',
+      /className="main-grid"/.test(mainForm31) &&
+        /gridTemplateColumns:\s*`repeat\(\$\{columns\}, minmax\(0, 1fr\)\)`/.test(mainForm31), null);
+    check('F31 MainForm 跨列由纯函数决定（不在组件里重新判字段类型）',
+      /fieldGridSpan\(f\.fieldType, columns\)/.test(mainForm31) &&
+        !/shouldSpanFullRow\(f\.fieldType\)/.test(mainForm31), null);
+
+    const appCss31 = read31('../src/App.css');
+    check('F31 App.css 有 .main-grid 且窄屏降单列（!important 覆盖内联 grid-template-columns）',
+      /\.main-grid\s*\{[\s\S]{0,120}?display:\s*grid/.test(appCss31) &&
+        /\.main-grid\s*\{[\s\S]{0,80}?grid-template-columns:\s*1fr\s*!important/.test(appCss31), null);
+    check('F31 App.css 有草稿状态条 / 保存草稿按钮 / 提交并排样式',
+      /\.draft-bar\s*\{/.test(appCss31) && /\.draft-btn\s*\{/.test(appCss31) && /\.submit-row\s*\{/.test(appCss31), null);
+
+    const cfgPanel31 = read31('../src/components/ConfigPanel/index.tsx');
+    check('F31 ConfigPanel 提供单列 / 双列 / 三列选择（写入 mainTable.columns）',
+      /MAIN_COLUMNS_OPTIONS\.map/.test(cfgPanel31) && /columns:\s*n/.test(cfgPanel31), null);
+
+    const fr31 = read31('../src/components/FormRenderer/index.tsx');
+    check('F31 FormRenderer 提交成功后清除草稿（否则下次打开又「恢复」已提交内容）',
+      /if \(r\.success\)[\s\S]{0,400}?clearDraft\(/.test(fr31), null);
+    check('F31 FormRenderer 只恢复一次草稿（draftRestored 守门，不覆盖用户后续输入）',
+      /draftRestored\.current/.test(fr31) && /if \(preview \|\| !draftAvailable \|\| draftRestored\.current\) return/.test(fr31), null);
+    check('F31 FormRenderer 身份未就绪不落盘（否则存到 anonymous 的错误 key，存了读不回）',
+      /if \(!draftIdReady\)[\s\S]{0,120}?toast\(/.test(fr31), null);
+    check('F31 FormRenderer 草稿值登记进 manualEdited / userDefaultDone（不被自动填充覆盖）',
+      /manualEdited\.current\.add\(mainKey\(k\)\)/.test(fr31) &&
+        /userDefaultDone\.current\.add\(mainKey\(k\)\)/.test(fr31), null);
+    check('F31 FormRenderer 防抖自动暂存（不是每敲一个字写一次 localStorage）',
+      /setTimeout\([\s\S]{0,900}?\}, 800\);/.test(fr31), null);
+    check('F31 内容被清空时删除草稿（否则删掉的内容下次打开又被「恢复」出来）',
+      /if \(!draftHasContent\(payload\.main, payload\.subs\)\) \{[\s\S]{0,400}?clearDraft\(/.test(fr31), null);
+    check('F31 FormRenderer 预览态完全不参与草稿（preview 直接 return）',
+      /if \(preview \|\| !draftAvailable\) return;/.test(fr31), null);
+    check('F31 草稿存取走独立 service（容错隔离，localStorage 异常不影响表单）',
+      /export function isDraftStorageAvailable/.test(read31('../src/services/draftService.ts')), null);
+
+    const app31 = read31('../src/App.tsx');
+    check('F31 App.tsx 两处 FormRenderer 都下传 baseToken（草稿按 base 隔离）',
+      (app31.match(/<FormRenderer[\s\S]{0,300}?baseToken=\{baseToken\}/g) || []).length === 2, null);
+  }
+
   const failed = results.filter((r) => !r.pass);
   log(`\n=== ${results.length - failed.length}/${results.length} 通过 ===`);
   if (failed.length) process.exit(1);

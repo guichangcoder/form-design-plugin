@@ -151738,6 +151738,157 @@ var init_userDefault = __esm({
   }
 });
 
+// src/utils/mainLayout.ts
+var mainLayout_exports = {};
+__export(mainLayout_exports, {
+  MAIN_COLUMNS_OPTIONS: () => MAIN_COLUMNS_OPTIONS,
+  MAX_MAIN_COLUMNS: () => MAX_MAIN_COLUMNS,
+  fieldGridSpan: () => fieldGridSpan,
+  isMultiColumn: () => isMultiColumn,
+  resolveMainColumns: () => resolveMainColumns,
+  shouldSpanFullRow: () => shouldSpanFullRow
+});
+function resolveMainColumns(value) {
+  const n11 = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n11)) return 1;
+  const i3 = Math.floor(n11);
+  if (i3 < 1) return 1;
+  if (i3 > MAX_MAIN_COLUMNS) return MAX_MAIN_COLUMNS;
+  return i3;
+}
+function isMultiColumn(value) {
+  return resolveMainColumns(value) > 1;
+}
+function shouldSpanFullRow(fieldType) {
+  return fieldType === j5.Text || fieldType === j5.Attachment || fieldType === j5.SingleLink || fieldType === j5.DuplexLink;
+}
+function fieldGridSpan(fieldType, columns) {
+  const cols = resolveMainColumns(columns);
+  if (cols === 1) return 1;
+  return shouldSpanFullRow(fieldType) ? cols : 1;
+}
+var MAIN_COLUMNS_OPTIONS, MAX_MAIN_COLUMNS;
+var init_mainLayout = __esm({
+  "src/utils/mainLayout.ts"() {
+    "use strict";
+    init_dist();
+    MAIN_COLUMNS_OPTIONS = [1, 2, 3];
+    MAX_MAIN_COLUMNS = 3;
+  }
+});
+
+// src/utils/formDraft.ts
+var formDraft_exports = {};
+__export(formDraft_exports, {
+  DRAFT_DATE_MARK: () => DRAFT_DATE_MARK,
+  deserializeDraftRow: () => deserializeDraftRow,
+  deserializeDraftValue: () => deserializeDraftValue,
+  draftHasContent: () => draftHasContent,
+  draftStorageKey: () => draftStorageKey,
+  formSchemaSignature: () => formSchemaSignature,
+  isDraftableValue: () => isDraftableValue,
+  mergeDraftRow: () => mergeDraftRow,
+  rowHasContent: () => rowHasContent,
+  serializeDraftRow: () => serializeDraftRow,
+  serializeDraftValue: () => serializeDraftValue
+});
+function isDraftableValue(v11) {
+  if (v11 === void 0 || v11 === null) return false;
+  const t3 = typeof v11;
+  if (t3 === "string" || t3 === "number" || t3 === "boolean") return true;
+  if (t3 === "function" || t3 === "symbol" || t3 === "bigint") return false;
+  if (v11 instanceof Date) return true;
+  if (typeof File !== "undefined" && v11 instanceof File) return false;
+  if (typeof Blob !== "undefined" && v11 instanceof Blob) return false;
+  if (Array.isArray(v11)) return true;
+  if (t3 === "object") return true;
+  return false;
+}
+function serializeDraftValue(v11) {
+  if (v11 instanceof Date) {
+    const ms2 = v11.getTime();
+    return Number.isFinite(ms2) ? { [DRAFT_DATE_MARK]: "date", v: ms2 } : void 0;
+  }
+  if (typeof File !== "undefined" && (v11 instanceof File || Array.isArray(v11) && v11.some((x11) => x11 instanceof File))) {
+    return void 0;
+  }
+  if (Array.isArray(v11)) {
+    const out = [];
+    for (const item of v11) {
+      const s = serializeDraftValue(item);
+      if (s !== void 0) out.push(s);
+    }
+    return out;
+  }
+  if (v11 && typeof v11 === "object") {
+    const out = {};
+    for (const [k12, val] of Object.entries(v11)) {
+      const s = serializeDraftValue(val);
+      if (s !== void 0) out[k12] = s;
+    }
+    return out;
+  }
+  if (!isDraftableValue(v11)) return void 0;
+  return v11;
+}
+function deserializeDraftValue(v11) {
+  if (Array.isArray(v11)) return v11.map(deserializeDraftValue);
+  if (v11 && typeof v11 === "object") {
+    const o11 = v11;
+    if (o11[DRAFT_DATE_MARK] === "date" && typeof o11.v === "number") return new Date(o11.v);
+    const out = {};
+    for (const [k12, val] of Object.entries(o11)) out[k12] = deserializeDraftValue(val);
+    return out;
+  }
+  return v11;
+}
+function serializeDraftRow(row) {
+  const out = {};
+  for (const [k12, v11] of Object.entries(row ?? {})) {
+    const s = serializeDraftValue(v11);
+    if (s !== void 0) out[k12] = s;
+  }
+  return out;
+}
+function deserializeDraftRow(row) {
+  const out = {};
+  for (const [k12, v11] of Object.entries(row ?? {})) out[k12] = deserializeDraftValue(v11);
+  return out;
+}
+function rowHasContent(row) {
+  return Object.values(row ?? {}).some((v11) => {
+    if (v11 === void 0 || v11 === null) return false;
+    if (typeof v11 === "string") return v11.trim() !== "";
+    if (Array.isArray(v11)) return v11.length > 0;
+    return true;
+  });
+}
+function draftHasContent(main, subs) {
+  if (rowHasContent(main)) return true;
+  return Object.values(subs ?? {}).some((rows) => (rows ?? []).some(rowHasContent));
+}
+function formSchemaSignature(mainFieldIds, subFieldIdsByTable) {
+  const main = [...mainFieldIds ?? []].sort().join(",");
+  const subs = Object.keys(subFieldIdsByTable ?? {}).sort().map((t3) => `${t3}:${[...subFieldIdsByTable[t3] ?? []].sort().join(",")}`).join("|");
+  return `${main}||${subs}`;
+}
+function mergeDraftRow(initial, draftRow) {
+  if (!draftRow) return initial;
+  const out = { ...initial };
+  for (const [k12, v11] of Object.entries(draftRow)) out[k12] = v11;
+  return out;
+}
+function draftStorageKey(baseToken, formId, userId) {
+  return `formDesignDraft:${baseToken || "nobase"}:${formId}:${userId || "anonymous"}`;
+}
+var DRAFT_DATE_MARK;
+var init_formDraft = __esm({
+  "src/utils/formDraft.ts"() {
+    "use strict";
+    DRAFT_DATE_MARK = "__draftType";
+  }
+});
+
 // tests/regression.entry.mjs
 init_dist();
 
@@ -152268,6 +152419,9 @@ function serializeConfig(data) {
         tableId: form.mainTable?.tableId,
         // 区块名称是用户手填的展示文案，无法从 base 重取，必须保留。
         sectionName: form.mainTable?.sectionName,
+        // ★ 主表排布列数（1/2/3）：纯用户决策，无法从 base 重取，必须保留。
+        //   漏登记 → 配置者保存成功、别人打开时静默退回单列（本项目踩过同类坑）。
+        columns: form.mainTable?.columns,
         // 把 tableName 去掉（从 base 拿）
         fields: (form.mainTable?.fields ?? []).map(trimField)
       },
@@ -152406,6 +152560,8 @@ async function hydrateForm(form, tableNames, loadFieldMeta) {
       tableId: form.mainTable?.tableId ?? "",
       tableName: tableNames.get(form.mainTable?.tableId ?? "") ?? "",
       sectionName: form.mainTable?.sectionName,
+      // ★ 主表排布列数：从瘦身配置原样带回（组件侧据此渲染 1/2/3 列）
+      columns: form.mainTable?.columns,
       fields: (form.mainTable?.fields ?? []).map((s) => hydrateField(s, mainIdx))
     },
     subTables: subs.map((s, i3) => ({
@@ -156277,6 +156433,429 @@ async function run() {
       const bytes = new (await import("node:buffer")).Buffer.from(JSON.stringify(thin30)).length;
       check("F30 \u4F53\u79EF\u8FDC\u5C0F\u4E8E 10240 \u4E0A\u9650\uFF08\u5E03\u5C14\u503C\u4F53\u79EF\u6781\u5C0F\uFF09", bytes < 4096, { bytes });
     }
+  }
+  {
+    const {
+      resolveMainColumns: resolveMainColumns2,
+      isMultiColumn: isMultiColumn2,
+      shouldSpanFullRow: shouldSpanFullRow2,
+      fieldGridSpan: fieldGridSpan2,
+      MAIN_COLUMNS_OPTIONS: MAIN_COLUMNS_OPTIONS2,
+      MAX_MAIN_COLUMNS: MAX_MAIN_COLUMNS2
+    } = await Promise.resolve().then(() => (init_mainLayout(), mainLayout_exports));
+    const {
+      serializeDraftValue: serializeDraftValue2,
+      deserializeDraftValue: deserializeDraftValue2,
+      serializeDraftRow: serializeDraftRow2,
+      deserializeDraftRow: deserializeDraftRow2,
+      rowHasContent: rowHasContent2,
+      draftHasContent: draftHasContent2,
+      formSchemaSignature: formSchemaSignature2,
+      mergeDraftRow: mergeDraftRow2,
+      draftStorageKey: draftStorageKey2,
+      DRAFT_DATE_MARK: DRAFT_DATE_MARK2
+    } = await Promise.resolve().then(() => (init_formDraft(), formDraft_exports));
+    check("F31 \u5217\u6570\u7F3A\u7701\uFF08undefined\uFF09\u2192 1 \u5217", resolveMainColumns2(void 0) === 1, null);
+    check("F31 \u5217\u6570\u7F3A\u7701\uFF08null\uFF09\u2192 1 \u5217", resolveMainColumns2(null) === 1, null);
+    check("F31 \u5217\u6570\u7F3A\u7701\uFF08\u65E7\u914D\u7F6E\u65E0\u8BE5\u5B57\u6BB5 \u2192 \u7A7A\u4E32\uFF09\u2192 1 \u5217", resolveMainColumns2("") === 1, null);
+    check("F31 \u975E\u6CD5\u5217\u6570 0 \u2192 1 \u5217", resolveMainColumns2(0) === 1, null);
+    check("F31 \u975E\u6CD5\u5217\u6570 -1 \u2192 1 \u5217", resolveMainColumns2(-1) === 1, null);
+    check("F31 \u975E\u6CD5\u5217\u6570 4 \u8D85\u4E0A\u9650 \u2192 \u5939\u5230 3", resolveMainColumns2(4) === MAX_MAIN_COLUMNS2, null);
+    check("F31 \u975E\u6CD5\u5217\u6570 99 \u2192 \u5939\u5230 3", resolveMainColumns2(99) === 3, null);
+    check("F31 \u975E\u6CD5\u5217\u6570 NaN \u2192 1 \u5217", resolveMainColumns2(NaN) === 1, null);
+    check("F31 \u975E\u6CD5\u5217\u6570 'x'\uFF08\u975E\u6570\u5B57\u5B57\u7B26\u4E32\uFF09\u2192 1 \u5217", resolveMainColumns2("x") === 1, null);
+    check("F31 \u5408\u6CD5\u5217\u6570 2 \u539F\u6837", resolveMainColumns2(2) === 2, null);
+    check("F31 \u5408\u6CD5\u5217\u6570 3 \u539F\u6837", resolveMainColumns2(3) === 3, null);
+    check("F31 \u5B57\u7B26\u4E32\u6570\u5B57 '2' \u4E5F\u80FD\u89E3\u6790\uFF08\u914D\u7F6E\u53EF\u80FD\u6765\u81EA JSON \u5B57\u7B26\u4E32\uFF09", resolveMainColumns2("2") === 2, null);
+    check("F31 \u5C0F\u6570 2.7 \u5411\u4E0B\u53D6\u6574\u4E3A 2", resolveMainColumns2(2.7) === 2, null);
+    check(
+      "F31 \u53EF\u9009\u5217\u6570\u6070\u4E3A [1,2,3]\uFF08\u914D\u7F6E\u9762\u677F\u4E0D\u51FA\u73B0\u5176\u4ED6\u6863\u4F4D\uFF09",
+      JSON.stringify(MAIN_COLUMNS_OPTIONS2) === "[1,2,3]",
+      null
+    );
+    check(
+      "F31 \u5355\u5217 \u2192 isMultiColumn=false\uFF08\u6E32\u67D3\u5C42\u636E\u6B64\u4E0D\u5957 grid \u5BB9\u5668\uFF09",
+      isMultiColumn2(1) === false && isMultiColumn2(void 0) === false && isMultiColumn2(0) === false,
+      null
+    );
+    check(
+      "F31 \u53CC\u5217 / \u4E09\u5217 \u2192 isMultiColumn=true",
+      isMultiColumn2(2) === true && isMultiColumn2(3) === true,
+      null
+    );
+    check("F31 \u591A\u884C\u6587\u672C \u2192 \u8DE8\u6574\u884C\uFF08\u534A\u680F\u592A\u7A84\uFF09", shouldSpanFullRow2(j5.Text) === true, null);
+    check("F31 \u9644\u4EF6 \u2192 \u8DE8\u6574\u884C\uFF08\u7F29\u7565\u56FE\u5FC5\u7136\u6362\u884C\uFF09", shouldSpanFullRow2(j5.Attachment) === true, null);
+    check("F31 \u5355\u5411\u5173\u8054 \u2192 \u8DE8\u6574\u884C\uFF08\u8BB0\u5F55\u6807\u7B7E\u6A2A\u5411\u5806\u53E0\uFF09", shouldSpanFullRow2(j5.SingleLink) === true, null);
+    check("F31 \u53CC\u5411\u5173\u8054 \u2192 \u8DE8\u6574\u884C", shouldSpanFullRow2(j5.DuplexLink) === true, null);
+    check("F31 \u6570\u5B57 \u2192 \u4E0D\u8DE8\u6574\u884C\uFF08\u5355\u884C\u63A7\u4EF6\u5E76\u6392\u65E0\u538B\u529B\uFF09", shouldSpanFullRow2(j5.Number) === false, null);
+    check("F31 \u65E5\u671F \u2192 \u4E0D\u8DE8\u6574\u884C", shouldSpanFullRow2(j5.DateTime) === false, null);
+    check(
+      "F31 \u5355\u9009 / \u591A\u9009 \u2192 \u4E0D\u8DE8\u6574\u884C",
+      shouldSpanFullRow2(j5.SingleSelect) === false && shouldSpanFullRow2(j5.MultiSelect) === false,
+      null
+    );
+    check("F31 \u4EBA\u5458 \u2192 \u4E0D\u8DE8\u6574\u884C", shouldSpanFullRow2(j5.User) === false, null);
+    check("F31 \u7535\u8BDD \u2192 \u4E0D\u8DE8\u6574\u884C", shouldSpanFullRow2(j5.Phone) === false, null);
+    check(
+      "F31 \u590D\u9009 / \u8BC4\u5206 \u2192 \u4E0D\u8DE8\u6574\u884C",
+      shouldSpanFullRow2(j5.Checkbox) === false && shouldSpanFullRow2(j5.Rating) === false,
+      null
+    );
+    check(
+      "F31 \u5355\u5217\u5E03\u5C40\u4E0B\u4EFB\u4F55\u5B57\u6BB5 span \u6052\u4E3A 1\uFF08\u89C6\u89C9\u4E0E\u65E7\u7248\u4E00\u81F4\uFF09",
+      [j5.Text, j5.Number, j5.Attachment].every((t3) => fieldGridSpan2(t3, 1) === 1),
+      null
+    );
+    check("F31 \u4E09\u5217 + \u591A\u884C\u6587\u672C \u2192 span=3\uFF08\u5360\u6EE1\u6574\u884C\uFF09", fieldGridSpan2(j5.Text, 3) === 3, null);
+    check("F31 \u4E09\u5217 + \u6570\u5B57 \u2192 span=1\uFF08\u53EA\u5360\u4E00\u5217\uFF09", fieldGridSpan2(j5.Number, 3) === 1, null);
+    check("F31 \u53CC\u5217 + \u9644\u4EF6 \u2192 span=2", fieldGridSpan2(j5.Attachment, 2) === 2, null);
+    check("F31 \u53CC\u5217 + \u5173\u8054 \u2192 span=2", fieldGridSpan2(j5.SingleLink, 2) === 2, null);
+    check(
+      "F31 span \u6C38\u4E0D\u8D85\u51FA\u5217\u6570\uFF08\u8D85\u4E0A\u9650\u914D\u7F6E\u5939\u5230 3 \u540E span \u4E5F\u662F 3\uFF09",
+      fieldGridSpan2(j5.Text, 99) === 3 && fieldGridSpan2(j5.Number, 99) === 1,
+      null
+    );
+    check(
+      "F31 \u975E\u6CD5\u5217\u6570\u4E0B span \u4ECD\u5B89\u5168\uFF08\u4E0D\u8FD4\u56DE 0 / NaN\uFF09",
+      [fieldGridSpan2(j5.Text, "x"), fieldGridSpan2(j5.Number, NaN), fieldGridSpan2(j5.Text, 0)].every((s) => s === 1),
+      null
+    );
+    const d02 = /* @__PURE__ */ new Date("2026-10-25T13:45:00.000Z");
+    const sd = serializeDraftValue2(d02);
+    check(
+      "F31 Date \u2192 \u5E26\u6807\u8BB0\u7684\u6BEB\u79D2\u5BF9\u8C61\uFF08JSON \u53EF\u627F\u8F7D\uFF09",
+      sd && typeof sd === "object" && sd[DRAFT_DATE_MARK2] === "date" && sd.v === d02.getTime(),
+      sd
+    );
+    const back = deserializeDraftValue2(sd);
+    check(
+      "F31 Date \u5F80\u8FD4\u540E\u4ECD\u662F Date \u5B9E\u4F8B\uFF08\u4E0D\u662F\u6570\u5B57 / \u5B57\u7B26\u4E32\uFF09",
+      back instanceof Date,
+      typeof back
+    );
+    check("F31 Date \u5F80\u8FD4\u540E\u65F6\u95F4\u6233\u5B8C\u5168\u4E00\u81F4", back instanceof Date && back.getTime() === d02.getTime(), null);
+    check(
+      "F31 \u5E8F\u5217\u5316\u7ED3\u679C\u53EF JSON \u5F80\u8FD4\u4E14\u4ECD\u80FD\u8FD8\u539F Date\uFF08\u771F\u5B9E\u5B58\u50A8\u8DEF\u5F84\uFF09",
+      (() => {
+        const r10 = deserializeDraftValue2(JSON.parse(JSON.stringify(serializeDraftValue2(d02))));
+        return r10 instanceof Date && r10.getTime() === d02.getTime();
+      })(),
+      null
+    );
+    check(
+      "F31 \u975E\u6CD5 Date\uFF08Invalid Date\uFF09\u2192 \u4E22\u5F03\u800C\u975E\u5199\u5165 NaN",
+      serializeDraftValue2(/* @__PURE__ */ new Date("nope")) === void 0,
+      null
+    );
+    const fileVal = new File(["abc"], "a.pdf", { type: "application/pdf" });
+    check(
+      "F31 \u9644\u4EF6 File \u2192 \u4E22\u5F03\uFF08\u8FD4\u56DE undefined\uFF0C\u4E0D\u5199\u7A7A\u58F3\uFF09",
+      serializeDraftValue2(fileVal) === void 0,
+      null
+    );
+    check(
+      "F31 \u542B File \u7684\u6570\u7EC4 \u2192 \u6574\u4E2A\u5B57\u6BB5\u4E22\u5F03\uFF08\u4E0D\u505A\u534A\u622A\u4FDD\u7559\uFF09",
+      serializeDraftValue2([fileVal]) === void 0,
+      null
+    );
+    check(
+      "F31 \u6DF7\u5408\u6570\u7EC4\uFF08File + \u6587\u672C\uFF09\u4E5F\u6574\u4F53\u4E22\u5F03\uFF08\u907F\u514D\u8BEF\u5BFC\u7528\u6237\u300C\u5DF2\u4FDD\u7559\u300D\uFF09",
+      serializeDraftValue2([fileVal, "x"]) === void 0,
+      null
+    );
+    check(
+      "F31 \u666E\u901A\u5BF9\u8C61\u91CC\u7684 File \u5B57\u6BB5\u88AB\u5254\u9664\uFF0C\u5176\u4F59\u5B57\u6BB5\u4FDD\u7559",
+      (() => {
+        const s = serializeDraftValue2({ a: 1, b: fileVal, c: "k" });
+        return s && s.a === 1 && s.c === "k" && !("b" in s);
+      })(),
+      null
+    );
+    check(
+      "F31 \u5B57\u7B26\u4E32 / \u6570\u5B57 / \u5E03\u5C14 / null \u8BED\u4E49",
+      serializeDraftValue2("x") === "x" && serializeDraftValue2(0) === 0 && serializeDraftValue2(false) === false && serializeDraftValue2(null) === void 0,
+      null
+    );
+    check(
+      "F31 undefined / \u51FD\u6570 / Symbol \u4E00\u5F8B\u4E22\u5F03",
+      serializeDraftValue2(void 0) === void 0 && serializeDraftValue2(() => {
+      }) === void 0 && serializeDraftValue2(Symbol("s")) === void 0,
+      null
+    );
+    check(
+      "F31 \u4EBA\u5458\u5B57\u6BB5\u6570\u7EC4\uFF08[{id,name}]\uFF09\u5B8C\u6574\u4FDD\u7559",
+      (() => {
+        const s = serializeDraftValue2([{ id: "ou_1", name: "\u7532" }]);
+        return JSON.stringify(s) === JSON.stringify([{ id: "ou_1", name: "\u7532" }]);
+      })(),
+      null
+    );
+    check(
+      "F31 \u5D4C\u5957\u5BF9\u8C61\u91CC\u7684 Date \u4E5F\u80FD\u5F80\u8FD4",
+      (() => {
+        const s = deserializeDraftValue2(serializeDraftValue2({ d: d02, n: 3 }));
+        return s.d instanceof Date && s.d.getTime() === d02.getTime() && s.n === 3;
+      })(),
+      null
+    );
+    check(
+      "F31 \u5D4C\u5957\u6570\u7EC4\u91CC\u7684 Date \u4E5F\u80FD\u5F80\u8FD4",
+      (() => {
+        const s = deserializeDraftValue2(serializeDraftValue2([d02, d02]));
+        return Array.isArray(s) && s.every((x11) => x11 instanceof Date && x11.getTime() === d02.getTime());
+      })(),
+      null
+    );
+    const rowSrc = { name: "\u5408\u540CA", amount: 100, when: d02, file: fileVal, empty: void 0 };
+    const rowSer = serializeDraftRow2(rowSrc);
+    check("F31 \u6574\u884C\u5E8F\u5217\u5316\uFF1A\u4FDD\u7559\u6587\u672C / \u6570\u5B57", rowSer.name === "\u5408\u540CA" && rowSer.amount === 100, rowSer);
+    check(
+      "F31 \u6574\u884C\u5E8F\u5217\u5316\uFF1AAttachment \u4E0E undefined \u4E0D\u843D\u76D8\uFF08\u65E0\u7A7A\u58F3 key\uFF09",
+      !("file" in rowSer) && !("empty" in rowSer),
+      Object.keys(rowSer)
+    );
+    check(
+      "F31 \u6574\u884C\u5F80\u8FD4\uFF1ADate \u8FD8\u539F\u4E3A\u5B9E\u4F8B",
+      (() => {
+        const r10 = deserializeDraftRow2(rowSer);
+        return r10.when instanceof Date && r10.when.getTime() === d02.getTime();
+      })(),
+      null
+    );
+    check("F31 \u7A7A\u5BF9\u8C61 \u2192 \u65E0\u5185\u5BB9", rowHasContent2({}) === false, null);
+    check(
+      "F31 \u5168\u7A7A\u4E32 / \u7A7A\u6570\u7EC4 \u2192 \u65E0\u5185\u5BB9",
+      rowHasContent2({ a: "", b: "   ", c: [], d: void 0, e: null }) === false,
+      null
+    );
+    check("F31 \u6709\u975E\u7A7A\u6587\u672C \u2192 \u6709\u5185\u5BB9", rowHasContent2({ a: "x" }) === true, null);
+    check(
+      "F31 0 \u4E0E false \u662F\u6709\u5185\u5BB9\uFF08\u7528\u6237\u771F\u5B9E\u9009\u62E9\uFF0C\u4E0D\u80FD\u5F53\u7A7A\uFF09",
+      rowHasContent2({ a: 0 }) === true && rowHasContent2({ a: false }) === true,
+      null
+    );
+    check("F31 \u4EC5\u4E3B\u8868\u6709\u503C \u2192 \u8349\u7A3F\u6709\u5185\u5BB9", draftHasContent2({ a: "x" }, {}) === true, null);
+    check(
+      "F31 \u4EC5\u5B50\u8868\u67D0\u884C\u6709\u503C \u2192 \u8349\u7A3F\u6709\u5185\u5BB9",
+      draftHasContent2({}, { t1: [{}, { b: "y" }] }) === true,
+      null
+    );
+    check(
+      "F31 \u4E3B\u5B50\u8868\u5168\u7A7A \u2192 \u65E0\u5185\u5BB9\uFF08\u4E0D\u6253\u6270\u7528\u6237\uFF09",
+      draftHasContent2({ a: "" }, { t1: [{}, { b: "  " }] }) === false,
+      null
+    );
+    const sigA = formSchemaSignature2(["f1", "f2"], { t1: ["s1"] });
+    check(
+      "F31 \u6307\u7EB9\u7A33\u5B9A\uFF08\u540C\u6837\u7684\u5B57\u6BB5\u96C6\u5408 \u2192 \u540C\u6837\u7ED3\u679C\uFF0C\u4E0E\u987A\u5E8F\u65E0\u5173\uFF09",
+      sigA === formSchemaSignature2(["f2", "f1"], { t1: ["s1"] }),
+      null
+    );
+    check("F31 \u4E3B\u8868\u5B57\u6BB5\u589E\u5220 \u2192 \u6307\u7EB9\u53D8\u5316", sigA !== formSchemaSignature2(["f1"], { t1: ["s1"] }), null);
+    check("F31 \u5B50\u8868\u5B57\u6BB5\u589E\u5220 \u2192 \u6307\u7EB9\u53D8\u5316", sigA !== formSchemaSignature2(["f1", "f2"], { t1: [] }), null);
+    check(
+      "F31 \u5B50\u8868\u589E\u5220 \u2192 \u6307\u7EB9\u53D8\u5316",
+      sigA !== formSchemaSignature2(["f1", "f2"], { t1: ["s1"], t2: [] }),
+      null
+    );
+    check(
+      "F31 \u6307\u7EB9\u53EA\u53D6 fieldId\uFF08\u6539\u540D / \u6539\u6807\u7B7E\u4E0D\u89E6\u53D1\u300C\u8349\u7A3F\u53EF\u80FD\u4E0D\u5B8C\u6574\u300D\u63D0\u793A\uFF09",
+      sigA === formSchemaSignature2(["f1", "f2"], { t1: ["s1"] }),
+      null
+    );
+    const merged = mergeDraftRow2({ a: "default", b: "defB", c: "defC" }, { b: "draftB" });
+    check("F31 \u8349\u7A3F\u503C\u8986\u76D6\u540C\u540D\u5B57\u6BB5", merged.b === "draftB", merged);
+    check(
+      "F31 \u914D\u7F6E\u65B0\u589E\u5B57\u6BB5\uFF08\u8349\u7A3F\u91CC\u6CA1\u6709\uFF09\u4FDD\u7559\u5176 defaultValue",
+      merged.a === "default" && merged.c === "defC",
+      merged
+    );
+    check(
+      "F31 \u8349\u7A3F\u4E3A\u7A7A / undefined \u2192 \u539F\u6837\u8FD4\u56DE\u521D\u503C\uFF08\u4E0D\u4EA7\u751F\u7A7A\u5BF9\u8C61\uFF09",
+      mergeDraftRow2({ a: 1 }, void 0).a === 1 && mergeDraftRow2({ a: 1 }, {}).a === 1,
+      null
+    );
+    check(
+      "F31 \u5408\u5E76\u4E0D\u4FEE\u6539\u539F\u521D\u503C\u5BF9\u8C61\uFF08\u7EAF\u51FD\u6570\uFF0C\u65E0\u526F\u4F5C\u7528\uFF09",
+      (() => {
+        const init = { a: "x" };
+        mergeDraftRow2(init, { a: "y" });
+        return init.a === "x";
+      })(),
+      null
+    );
+    const k12 = draftStorageKey2("b1", "f1", "u1");
+    check(
+      "F31 \u4E0D\u540C base \u2192 \u4E0D\u540C key\uFF08\u540C\u4E00\u8868\u5355\u88AB\u590D\u5236\u5230\u522B\u7684\u8868\u683C\u4E0D\u4E32\u53F7\uFF09",
+      k12 !== draftStorageKey2("b2", "f1", "u1"),
+      null
+    );
+    check("F31 \u4E0D\u540C\u8868\u5355 \u2192 \u4E0D\u540C key", k12 !== draftStorageKey2("b1", "f2", "u1"), null);
+    check(
+      "F31 \u4E0D\u540C\u7528\u6237 \u2192 \u4E0D\u540C key\uFF08A \u540C\u4E8B\u7684\u8349\u7A3F\u4E0D\u4F1A\u88AB B \u540C\u4E8B\u8BFB\u5230\uFF09",
+      k12 !== draftStorageKey2("b1", "f1", "u2"),
+      null
+    );
+    check(
+      "F31 baseToken \u7F3A\u5931 \u2192 nobase \u5360\u4F4D\uFF08\u4FA7\u8FB9\u680F / dev \u4ECD\u53EF\u7528\uFF09",
+      draftStorageKey2("", "f1", "u1").includes(":nobase:"),
+      draftStorageKey2("", "f1", "u1")
+    );
+    check(
+      "F31 userId \u7F3A\u5931 \u2192 anonymous \u5360\u4F4D\uFF08\u53D6\u4E0D\u5230\u8EAB\u4EFD\u4E5F\u4E0D\u5D29\uFF09",
+      draftStorageKey2("b1", "f1", "").endsWith(":anonymous"),
+      null
+    );
+    check(
+      "F31 key \u542B formDesignDraft \u524D\u7F00\u4E14\u53EF\u7A33\u5B9A\u590D\u73B0",
+      k12.startsWith("formDesignDraft:") && k12 === draftStorageKey2("b1", "f1", "u1"),
+      k12
+    );
+    const thin31 = serializeConfig({
+      forms: [
+        {
+          id: "f31",
+          version: "1.0.0",
+          formTitle: "t",
+          mainTable: { tableId: "tblM31", columns: 3, fields: [
+            { fieldId: "a", fieldName: "A", fieldType: j5.Text, visible: true, required: false }
+          ] },
+          subTables: [],
+          conditionalRules: []
+        }
+      ]
+    });
+    check(
+      "F31 serializeConfig \u4FDD\u7559 mainTable.columns\uFF08\u4E0D\u767B\u8BB0\u5C31\u4F1A\u9759\u9ED8\u9000\u56DE\u5355\u5217\uFF09",
+      thin31.forms[0].mainTable.columns === 3,
+      thin31.forms[0].mainTable
+    );
+    const thin31b = serializeConfig({
+      forms: [
+        {
+          id: "f31b",
+          version: "1.0.0",
+          formTitle: "t",
+          mainTable: { tableId: "tblM31", fields: [
+            { fieldId: "a", fieldName: "A", fieldType: j5.Text, visible: true, required: false }
+          ] },
+          subTables: [],
+          conditionalRules: []
+        }
+      ]
+    });
+    check(
+      "F31 \u672A\u914D\u7F6E\u5217\u6570 \u2192 columns \u4E3A undefined\uFF08\u65E7\u8868\u5355\u4F53\u79EF\u4E0D\u53D8\uFF09",
+      thin31b.forms[0].mainTable.columns === void 0,
+      thin31b.forms[0].mainTable
+    );
+    const metaBase31 = {
+      getTableById: async () => ({
+        getFieldMetaList: async () => [{ id: "a", name: "A \u5B57\u6BB5", type: j5.Text }]
+      }),
+      getTableMetaList: async () => [{ id: "tblM31", name: "\u4E3B\u886831" }]
+    };
+    __setAppForTest({ base: metaBase31 });
+    const hydrated31 = await hydrateConfig(JSON.parse(JSON.stringify(thin31)));
+    check(
+      "F31 hydrateConfig \u8FD8\u539F mainTable.columns\uFF08\u53D1\u5E03\u540E\u4ED6\u4EBA\u6253\u5F00\u4ECD\u662F\u4E09\u5217\uFF09",
+      hydrated31.forms[0].mainTable.columns === 3,
+      hydrated31.forms[0].mainTable
+    );
+    const fs31 = await import("node:fs");
+    const stripComments31 = (src) => src.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|\s)\/\/[^\n]*/g, "$1");
+    const read31 = (rel) => stripComments31(fs31.readFileSync(new URL(rel, import.meta.url), "utf8"));
+    const cfgSize31 = read31("../src/services/configSize.ts");
+    check(
+      "F31 configSize serializeConfig \u767B\u8BB0 columns\uFF08\u9632\u7626\u8EAB\u5265\u79BB\uFF09",
+      /columns:\s*form\.mainTable\?\.columns/.test(cfgSize31),
+      null
+    );
+    check(
+      "F31 configSize hydrateForm \u8FD8\u539F columns",
+      /columns:\s*\(form\.mainTable as any\)\?\.columns/.test(cfgSize31),
+      null
+    );
+    const mainForm31 = read31("../src/components/FormRenderer/MainForm.tsx");
+    check(
+      "F31 MainForm \u5355\u5217\u4E0D\u5957 grid\uFF08\u96F6\u7834\u574F\u6E32\u67D3\u8DEF\u5F84\uFF09",
+      /if \(!multi\) return <div>\{rows\}<\/div>/.test(mainForm31),
+      null
+    );
+    check(
+      "F31 MainForm \u591A\u5217\u5957 main-grid \u4E14\u7528 minmax(0,1fr)\uFF08\u5426\u5219\u5BBD\u63A7\u4EF6\u6491\u7834\u5217\uFF09",
+      /className="main-grid"/.test(mainForm31) && /gridTemplateColumns:\s*`repeat\(\$\{columns\}, minmax\(0, 1fr\)\)`/.test(mainForm31),
+      null
+    );
+    check(
+      "F31 MainForm \u8DE8\u5217\u7531\u7EAF\u51FD\u6570\u51B3\u5B9A\uFF08\u4E0D\u5728\u7EC4\u4EF6\u91CC\u91CD\u65B0\u5224\u5B57\u6BB5\u7C7B\u578B\uFF09",
+      /fieldGridSpan\(f\.fieldType, columns\)/.test(mainForm31) && !/shouldSpanFullRow\(f\.fieldType\)/.test(mainForm31),
+      null
+    );
+    const appCss31 = read31("../src/App.css");
+    check(
+      "F31 App.css \u6709 .main-grid \u4E14\u7A84\u5C4F\u964D\u5355\u5217\uFF08!important \u8986\u76D6\u5185\u8054 grid-template-columns\uFF09",
+      /\.main-grid\s*\{[\s\S]{0,120}?display:\s*grid/.test(appCss31) && /\.main-grid\s*\{[\s\S]{0,80}?grid-template-columns:\s*1fr\s*!important/.test(appCss31),
+      null
+    );
+    check(
+      "F31 App.css \u6709\u8349\u7A3F\u72B6\u6001\u6761 / \u4FDD\u5B58\u8349\u7A3F\u6309\u94AE / \u63D0\u4EA4\u5E76\u6392\u6837\u5F0F",
+      /\.draft-bar\s*\{/.test(appCss31) && /\.draft-btn\s*\{/.test(appCss31) && /\.submit-row\s*\{/.test(appCss31),
+      null
+    );
+    const cfgPanel31 = read31("../src/components/ConfigPanel/index.tsx");
+    check(
+      "F31 ConfigPanel \u63D0\u4F9B\u5355\u5217 / \u53CC\u5217 / \u4E09\u5217\u9009\u62E9\uFF08\u5199\u5165 mainTable.columns\uFF09",
+      /MAIN_COLUMNS_OPTIONS\.map/.test(cfgPanel31) && /columns:\s*n/.test(cfgPanel31),
+      null
+    );
+    const fr31 = read31("../src/components/FormRenderer/index.tsx");
+    check(
+      "F31 FormRenderer \u63D0\u4EA4\u6210\u529F\u540E\u6E05\u9664\u8349\u7A3F\uFF08\u5426\u5219\u4E0B\u6B21\u6253\u5F00\u53C8\u300C\u6062\u590D\u300D\u5DF2\u63D0\u4EA4\u5185\u5BB9\uFF09",
+      /if \(r\.success\)[\s\S]{0,400}?clearDraft\(/.test(fr31),
+      null
+    );
+    check(
+      "F31 FormRenderer \u53EA\u6062\u590D\u4E00\u6B21\u8349\u7A3F\uFF08draftRestored \u5B88\u95E8\uFF0C\u4E0D\u8986\u76D6\u7528\u6237\u540E\u7EED\u8F93\u5165\uFF09",
+      /draftRestored\.current/.test(fr31) && /if \(preview \|\| !draftAvailable \|\| draftRestored\.current\) return/.test(fr31),
+      null
+    );
+    check(
+      "F31 FormRenderer \u8EAB\u4EFD\u672A\u5C31\u7EEA\u4E0D\u843D\u76D8\uFF08\u5426\u5219\u5B58\u5230 anonymous \u7684\u9519\u8BEF key\uFF0C\u5B58\u4E86\u8BFB\u4E0D\u56DE\uFF09",
+      /if \(!draftIdReady\)[\s\S]{0,120}?toast\(/.test(fr31),
+      null
+    );
+    check(
+      "F31 FormRenderer \u8349\u7A3F\u503C\u767B\u8BB0\u8FDB manualEdited / userDefaultDone\uFF08\u4E0D\u88AB\u81EA\u52A8\u586B\u5145\u8986\u76D6\uFF09",
+      /manualEdited\.current\.add\(mainKey\(k\)\)/.test(fr31) && /userDefaultDone\.current\.add\(mainKey\(k\)\)/.test(fr31),
+      null
+    );
+    check(
+      "F31 FormRenderer \u9632\u6296\u81EA\u52A8\u6682\u5B58\uFF08\u4E0D\u662F\u6BCF\u6572\u4E00\u4E2A\u5B57\u5199\u4E00\u6B21 localStorage\uFF09",
+      /setTimeout\([\s\S]{0,900}?\}, 800\);/.test(fr31),
+      null
+    );
+    check(
+      "F31 \u5185\u5BB9\u88AB\u6E05\u7A7A\u65F6\u5220\u9664\u8349\u7A3F\uFF08\u5426\u5219\u5220\u6389\u7684\u5185\u5BB9\u4E0B\u6B21\u6253\u5F00\u53C8\u88AB\u300C\u6062\u590D\u300D\u51FA\u6765\uFF09",
+      /if \(!draftHasContent\(payload\.main, payload\.subs\)\) \{[\s\S]{0,400}?clearDraft\(/.test(fr31),
+      null
+    );
+    check(
+      "F31 FormRenderer \u9884\u89C8\u6001\u5B8C\u5168\u4E0D\u53C2\u4E0E\u8349\u7A3F\uFF08preview \u76F4\u63A5 return\uFF09",
+      /if \(preview \|\| !draftAvailable\) return;/.test(fr31),
+      null
+    );
+    check(
+      "F31 \u8349\u7A3F\u5B58\u53D6\u8D70\u72EC\u7ACB service\uFF08\u5BB9\u9519\u9694\u79BB\uFF0ClocalStorage \u5F02\u5E38\u4E0D\u5F71\u54CD\u8868\u5355\uFF09",
+      /export function isDraftStorageAvailable/.test(read31("../src/services/draftService.ts")),
+      null
+    );
+    const app31 = read31("../src/App.tsx");
+    check(
+      "F31 App.tsx \u4E24\u5904 FormRenderer \u90FD\u4E0B\u4F20 baseToken\uFF08\u8349\u7A3F\u6309 base \u9694\u79BB\uFF09",
+      (app31.match(/<FormRenderer[\s\S]{0,300}?baseToken=\{baseToken\}/g) || []).length === 2,
+      null
+    );
   }
   const failed = results.filter((r10) => !r10.pass);
   log2(`

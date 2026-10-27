@@ -108,6 +108,9 @@ export function serializeConfig(data: PluginData): any {
         tableId: form.mainTable?.tableId,
         // 区块名称是用户手填的展示文案，无法从 base 重取，必须保留。
         sectionName: form.mainTable?.sectionName,
+        // ★ 主表排布列数（1/2/3）：纯用户决策，无法从 base 重取，必须保留。
+        //   漏登记 → 配置者保存成功、别人打开时静默退回单列（本项目踩过同类坑）。
+        columns: form.mainTable?.columns,
         // 把 tableName 去掉（从 base 拿）
         fields: (form.mainTable?.fields ?? []).map(trimField),
       },
@@ -293,6 +296,8 @@ async function hydrateForm(
       tableId: form.mainTable?.tableId ?? '',
       tableName: tableNames.get(form.mainTable?.tableId ?? '') ?? '',
       sectionName: form.mainTable?.sectionName,
+      // ★ 主表排布列数：从瘦身配置原样带回（组件侧据此渲染 1/2/3 列）
+      columns: (form.mainTable as any)?.columns,
       fields: (form.mainTable?.fields ?? []).map((s: any) => hydrateField(s, mainIdx)),
     },
     subTables: subs.map((s: SubTableConfig, i: number) => ({

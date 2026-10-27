@@ -4,6 +4,7 @@ import { FormPluginConfig, FormValues, ConditionalState, FieldError, UniqueField
 import { isFieldRequired, isHiddenField } from '../../utils/validator';
 import { getOptionRefDependencies } from '../../utils/optionRef';
 import { FormScope } from '../../utils/formFieldRef';
+import { isMultiColumn, fieldGridSpan, resolveMainColumns } from '../../utils/mainLayout';
 import { FieldRenderer } from './FieldRenderer';
 
 interface Props {
@@ -28,6 +29,12 @@ interface Props {
  * ★ 用 React.memo 包裹：日期联动预填写回 mainValues 时，只要 values / cond 等引用未变，
  *   就跳过整块重渲染，避免「一次写回 → 全树重渲染 → 受控日期面板被重置」的放大效应。
  *   各 prop 均为引用稳定（values/cond/errors/uniqueState 由父级 state 直接传入）。
+ *
+ * ★ 多列排布（1/2/3 列）：
+ *   - 单列（缺省 / 旧配置）→ **不套 grid 容器**，DOM 与既有实现完全一致（零破坏）；
+ *   - 多列 → 外层 `display:grid` + 每项 `grid-column: span N`；
+ *     多行文本 / 附件 / 关联记录等「天然需要整行」的字段跨满整行。
+ *   列数本身是纯显示决策，解析逻辑见 utils/mainLayout.ts（可被测试真实调用）。
  */
 export const MainForm = React.memo(function MainForm({
   config,
@@ -56,39 +63,53 @@ export const MainForm = React.memo(function MainForm({
   const errOf = (fieldId: string) =>
     errors?.find((e) => e.tableId === tableId && e.fieldId === fieldId && e.rowIndex === undefined);
 
+  const visibleFields = config.mainTable.fields.filter(
+    (f) => f.visible && !isHiddenField(cond, tableId, f.fieldId)
+  );
+  const columns = resolveMainColumns(config.mainTable.columns);
+  const multi = isMultiColumn(config.mainTable.columns);
+
+  const rows = visibleFields.map((f) => {
+    const err = errOf(f.fieldId);
+    const span = fieldGridSpan(f.fieldType, columns);
+    return (
+      <div
+        key={f.fieldId}
+        className={`field-row ${err ? 'field-row--error' : ''}`}
+        style={multi ? { gridColumn: `span ${span}` } : undefined}
+      >
+        <label className="field-label">
+          {isFieldRequired(f, tableId, cond) && (
+            <span className="required-star">*</span>
+          )}
+          {f.label || f.fieldName}
+        </label>
+        <FieldRenderer
+          field={f}
+          tableId={tableId}
+          value={values[f.fieldId]}
+          onChange={(v) => setField(f.fieldId, v)}
+          disabled={f.readonly}
+          formValues={values}
+          formScope={formScope}
+          onBlur={onFieldBlur ? () => onFieldBlur(f.fieldId) : undefined}
+          uniqueStatus={
+            f.unique?.enabled ? (uniqueState?.[f.fieldId]?.status ?? 'idle') : undefined
+          }
+          uniqueHint={uniqueState?.[f.fieldId]?.detail}
+          preview={preview}
+        />
+        {err && <div className="field-err">{err.message}</div>}
+      </div>
+    );
+  });
+
+  // 单列：保持原有纵向堆叠（不引入 grid，渲染路径零变化）
+  if (!multi) return <div>{rows}</div>;
+
   return (
-    <div>
-      {config.mainTable.fields
-        .filter((f) => f.visible && !isHiddenField(cond, tableId, f.fieldId))
-        .map((f) => {
-          const err = errOf(f.fieldId);
-          return (
-            <div key={f.fieldId} className={`field-row ${err ? 'field-row--error' : ''}`}>
-              <label className="field-label">
-                {isFieldRequired(f, tableId, cond) && (
-                  <span className="required-star">*</span>
-                )}
-                {f.label || f.fieldName}
-              </label>
-              <FieldRenderer
-                field={f}
-                tableId={tableId}
-                value={values[f.fieldId]}
-                onChange={(v) => setField(f.fieldId, v)}
-                disabled={f.readonly}
-                formValues={values}
-                formScope={formScope}
-                onBlur={onFieldBlur ? () => onFieldBlur(f.fieldId) : undefined}
-                uniqueStatus={
-                  f.unique?.enabled ? (uniqueState?.[f.fieldId]?.status ?? 'idle') : undefined
-                }
-                uniqueHint={uniqueState?.[f.fieldId]?.detail}
-                preview={preview}
-              />
-              {err && <div className="field-err">{err.message}</div>}
-            </div>
-          );
-        })}
+    <div className="main-grid" style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }}>
+      {rows}
     </div>
   );
 });

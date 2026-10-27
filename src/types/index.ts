@@ -238,6 +238,16 @@ export interface ConditionalRule {
   }[];
 }
 
+/**
+ * 主表排布列数：
+ * - 1（默认）：纵向单列，每个字段占一整行。
+ * - 2 / 3：双列 / 三列。短控件并排，减少纵向滚动；
+ *   多行文本 / 附件 / 关联记录等「天然需要整行」的字段仍跨满整行（见 utils/mainLayout.ts）。
+ *
+ * 缺省（含旧配置）＝ 1 列 → 渲染路径与既有单列实现完全一致（零破坏）。
+ */
+export type MainColumns = 1 | 2 | 3;
+
 /** 插件完整配置（持久化到 bridge / dashboard） */
 export interface FormPluginConfig {
   /** 表单唯一 ID（多表单场景下用于区分与关联） */
@@ -252,6 +262,12 @@ export interface FormPluginConfig {
     tableName: string;
     /** 主表区块在表单中的展示名称（默认「主表信息」） */
     sectionName?: string;
+    /**
+     * ★ 主表字段排布列数（1/2/3，缺省 1）。
+     * ⚠️ 新增/修改此项必须同步 configSize.ts 的 serializeConfig 白名单，
+     *    否则保存时被瘦身剥离 → 配置者保存成功、别人打开时退回单列。
+     */
+    columns?: MainColumns;
     fields: FieldConfig[];
   };
   subTables: SubTableConfig[];

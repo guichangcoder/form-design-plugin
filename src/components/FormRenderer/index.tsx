@@ -35,10 +35,25 @@ import {
 import { toast } from '../../utils/toast';
 import { applyThemeColor } from '../../utils/theme';
 import { hasTableLayoutSub } from '../../utils/subTableLayout';
+import {
+  DraftPayload,
+  draftHasContent,
+  formSchemaSignature,
+  mergeDraftRow,
+  serializeDraftRow,
+} from '../../utils/formDraft';
+import {
+  clearDraft,
+  draftMainValues,
+  draftSubValues,
+  isDraftStorageAvailable,
+  loadDraft,
+  saveDraft,
+} from '../../services/draftService';
 import { Button, Typography } from '@douyinfe/semi-ui';
 import { MainForm } from './MainForm';
 import { SubForm } from './SubForm';
-import { IconSend } from '@douyinfe/semi-icons';
+import { IconSend, IconSave } from '@douyinfe/semi-icons';
 
 interface Props {
   config: FormPluginConfig;
@@ -55,6 +70,11 @@ interface Props {
   metaStale?: boolean;
   /** 元数据重新载入回调（重新 hydrate 配置） */
   onReloadMeta?: () => void;
+  /**
+   * ★ 草稿归属的 baseToken（草稿按 base + 表单 + 用户三重隔离）。
+   * 缺省（侧边栏 / dev）用 'nobase' 占位，仍能正常存取，只是不跨 base 区分。
+   */
+  baseToken?: string;
 }
 
 function initialValues(fields: FormPluginConfig['mainTable']['fields']): FormValues {
@@ -94,7 +114,7 @@ function SectionHead({ num, title, desc }: { num?: string; title: string; desc?:
   );
 }
 
-export function FormRenderer({ config, onBackToConfig, preview, metaStale, onReloadMeta }: Props) {
+export function FormRenderer({ config, onBackToConfig, preview, metaStale, onReloadMeta, baseToken }: Props) {
   const [mainValues, setMainValues] = useState<FormValues>(() => initMainValues(config));
   const [subValues, setSubValues] = useState<Record<string, FormValues[]>>(() =>
     initSubValues(config)
@@ -404,6 +424,8 @@ export function FormRenderer({ config, onBackToConfig, preview, metaStale, onRel
       mainKey
     );
     setMainValues(next);
+    userTouched.current = true; // 用户已动过表单 → 放弃后续的草稿自动恢复
+    setDraftDirty(true); // 用户改过值 → 触发防抖自动暂存
   }, []);
 
   /** 子表值变化（用户交互入口） */
@@ -423,6 +445,8 @@ export function FormRenderer({ config, onBackToConfig, preview, metaStale, onRel
       });
     }
     setSubValues((o) => ({ ...o, [tableId]: rows }));
+    userTouched.current = true; // 用户已动过表单 → 放弃后续的草稿自动恢复
+    setDraftDirty(true); // 用户改过值 → 触发防抖自动暂存
   }, []);
 
   /**
@@ -595,6 +619,11 @@ export function FormRenderer({ config, onBackToConfig, preview, metaStale, onRel
     setSubmitting(false);
     if (r.success) {
       toast('提交成功', 'success');
+      // ★ 正式写入成功 → 草稿使命完成，立即清除（否则下次打开还会「恢复」出已提交的内容）
+      clearDraft(draftBase, configRef.current.id, draftUserId || 'anonymous');
+      setDraftSavedAt(null);
+      setDraftDirty(false);
+      draftRestored.current = true; // 已提交，本次会话不再尝试恢复草稿
       // ★ 把本次写入的值并入查重缓存：同一会话内再填相同值也能判重
       config.mainTable.fields
         .filter((f) => f.unique?.enabled && UNIQUE_CHECKABLE_TYPES.includes(f.fieldType))
@@ -642,6 +671,228 @@ export function FormRenderer({ config, onBackToConfig, preview, metaStale, onRel
     () => hasTableLayoutSub(config.subTables ?? []),
     [config.subTables]
   );
+
+  // ============ 草稿：暂存 / 恢复 / 提交后清空 ============
+  /**
+   * 草稿是**纯本地**的未提交内容（localStorage），绝不写服务端、绝不进数据表。
+   *
+   * 三重隔离（base + 表单 + 用户）见 utils/formDraft.ts::draftStorageKey ——
+   * localStorage 在插件域名下是所有 base / 所有填写者共用的，不隔离会串号。
+   */
+  const draftBase = baseToken || 'nobase';
+  /** 当前用户 ID（草稿隔离用；取不到时用 'anonymous'，与 currentUser 共享缓存） */
+  const [draftUserId, setDraftUserId] = useState('');
+  /**
+   * ★ 身份「已询问过」标记（与「取到了 ID」是两件事）。
+   *   `getUserId` 在无身份环境（纯浏览器预览 / 权限缺失）会返回空串，
+   *   若只靠 `draftUserId !== ''` 判断，状态不变 → 恢复 effect 永不重跑 → 草稿静默不恢复。
+   *   这里用独立布尔量驱动「可以读草稿了」。
+   */
+  const [draftIdReady, setDraftIdReady] = useState(false);
+  /** 草稿的保存时间（有草稿时展示「草稿保存于 …」） */
+  const [draftSavedAt, setDraftSavedAt] = useState<number | null>(null);
+  /** 草稿是否处于「脏」状态（用户改过值但尚未落盘） */
+  const [draftDirty, setDraftDirty] = useState(false);
+  /** 首次挂载时是否已尝试恢复草稿（保证只恢复一次，不覆盖用户后续输入） */
+  const draftRestored = useRef(false);
+  /**
+   * ★ 用户是否已经动过表单（改过任意字段）。
+   *   身份是异步拿的，极端情况下（bridge 慢）用户可能在身份到位前就开始输入；
+   *   此时再「恢复草稿」会把他刚敲的内容覆盖掉 → 一旦动过就彻底放弃自动恢复。
+   */
+  const userTouched = useRef(false);
+  /** 草稿存储是否可用（不可用时整个草稿 UI 隐藏，不留死按钮） */
+  const draftAvailable = useMemo(() => isDraftStorageAvailable(), []);
+
+  /** 字段结构指纹：配置改动（字段增删）后旧草稿可能对不上号 */
+  const schemaSig = useMemo(
+    () =>
+      formSchemaSignature(
+        config.mainTable.fields.map((f) => f.fieldId),
+        Object.fromEntries(
+          config.subTables.map((s) => [s.tableId, s.fields.map((f) => f.fieldId)])
+        )
+      ),
+    [config.mainTable.fields, config.subTables]
+  );
+
+  // 取当前用户 ID（草稿隔离键需要它；复用 utils/currentUser.ts 的共享缓存，不发第二次请求）
+  useEffect(() => {
+    if (preview || !draftAvailable) return;
+    let alive = true;
+    loadCurrentUserId()
+      .then((id) => {
+        if (!alive) return;
+        setDraftUserId(id || '');
+        setDraftIdReady(true); // ★ 无论有没有身份，都标记「已询问」→ 让恢复流程继续
+      })
+      .catch(() => {
+        /* 取不到身份 → 用 anonymous 兜底，草稿仍可用（只是不与他人区分） */
+        if (alive) setDraftIdReady(true);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [preview, draftAvailable]);
+
+  /**
+   * 挂载后恢复草稿（**只做一次**）。
+   *
+   * ⚠️ 时机很重要：必须等身份询问完成（draftIdReady）后再读，否则会读到 'anonymous' 那份空草稿。
+   * ⚠️ 用「合并」而非「整体替换」：配置里新增的字段要保留其 defaultValue，
+   *    草稿只覆盖它真实存过的 key（见 mergeDraftRow）。
+   * ⚠️ 恢复完必须把 userDefaultDone 全部登记为「已处理」，否则「默认当前用户」effect
+   *    会在恢复之后把草稿值覆盖成当前用户 —— 用户的草稿就白存了。
+   */
+  useEffect(() => {
+    if (preview || !draftAvailable || draftRestored.current) return;
+    if (!draftIdReady) return;
+    draftRestored.current = true;
+    // 身份就绪前用户已开始输入 → 尊重用户的当前输入，不恢复旧草稿（否则等于把他刚敲的抹掉）
+    if (userTouched.current) return;
+    const d = loadDraft(draftBase, config.id, draftUserId || 'anonymous');
+    if (!d || !draftHasContent(d.main ?? {}, d.subs ?? {})) return;
+    // 结构指纹不一致 → 字段增删过，草稿仍尽量恢复（按 fieldId 对得上的生效），
+    // 但给出提示让用户知道可能不完整。
+    const sigMismatch = !!d.schemaSig && d.schemaSig !== schemaSig;
+    const dMain = draftMainValues(d);
+    const dSubs = draftSubValues(d);
+    // ★ 草稿有值 → 把该字段登记进 manualEdited / userDefaultDone，
+    //   让日期联动与「默认当前用户」都不再插手（草稿内容优先于任何自动填充）
+    for (const [k, v] of Object.entries(dMain)) {
+      if (v === undefined || v === null || v === '') continue;
+      manualEdited.current.add(mainKey(k));
+      userDefaultDone.current.add(mainKey(k));
+    }
+    for (const [tid, rows] of Object.entries(dSubs)) {
+      rows.forEach((row, i) => {
+        for (const [k, v] of Object.entries(row)) {
+          if (v === undefined || v === null || v === '') continue;
+          manualEdited.current.add(`sub:${tid}:${i}:${k}`);
+          userDefaultDone.current.add(`sub:${tid}:${i}:${k}`);
+        }
+      });
+    }
+    setMainValues((cur) => mergeDraftRow(cur, dMain) as FormValues);
+    setSubValues((cur) => {
+      const next: Record<string, FormValues[]> = { ...cur };
+      for (const sub of config.subTables) {
+        const rows = dSubs[sub.tableId];
+        if (!rows || rows.length === 0) continue;
+        const base0 = cur[sub.tableId] ?? [];
+        // 草稿行数可能多于配置初始行（用户之前加了行）→ 以草稿为准，逐行合并初值
+        next[sub.tableId] = rows.map((r, i) =>
+          mergeDraftRow(base0[i] ?? {}, r) as FormValues
+        );
+      }
+      return next;
+    });
+    setDraftSavedAt(d.savedAt ?? null);
+    toast(
+      sigMismatch
+        ? '已恢复上次草稿（表单字段有调整，可能部分内容未恢复）'
+        : '已恢复上次未提交的草稿',
+      sigMismatch ? 'warning' : 'info'
+    );
+    // 只在身份就绪那一刻执行一次
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [preview, draftAvailable, draftIdReady, draftUserId, draftBase, config.id]);
+
+  /** 收集当前值 → 草稿载荷（序列化：Date 转标记对象，附件等不可存值丢弃） */
+  const buildDraftPayload = useCallback((): DraftPayload => {
+    const subs: Record<string, Array<Record<string, unknown>>> = {};
+    for (const sub of configRef.current.subTables) {
+      const rows = subValuesRef.current[sub.tableId] ?? [];
+      subs[sub.tableId] = rows.map(serializeDraftRow);
+    }
+    return {
+      formId: configRef.current.id,
+      savedAt: Date.now(),
+      main: serializeDraftRow(mainValuesRef.current),
+      subs,
+      schemaSig,
+    };
+  }, [schemaSig]);
+
+  /** 手动保存草稿（用户点「保存草稿」） */
+  const handleSaveDraft = useCallback(() => {
+    if (preview) return;
+    /**
+     * ⚠️ 必须等身份就绪再存：身份未就绪时落盘会用 'anonymous' 兜底，
+     *    而下次打开恢复时用的是真实 userId → 草稿 key 不同，存了也读不回来。
+     *    同时这也避免「抢先置位 draftRestored」把恢复流程顶掉。
+     */
+    if (!draftIdReady) {
+      toast('正在确认当前用户身份，请稍候一两秒再保存草稿', 'warning');
+      return;
+    }
+    draftRestored.current = true; // 用户已明确保存 → 本次会话不再自动恢复旧草稿覆盖它
+    const payload = buildDraftPayload();
+    if (!draftHasContent(payload.main, payload.subs)) {
+      toast('当前还没有填写任何内容，无需保存草稿', 'warning');
+      return;
+    }
+    const ok = saveDraft(draftBase, configRef.current.id, draftUserId || 'anonymous', payload);
+    if (ok) {
+      setDraftSavedAt(payload.savedAt);
+      setDraftDirty(false);
+      toast('草稿已保存，本页面内容不会写入数据表', 'success');
+    } else {
+      toast('草稿保存失败（浏览器存储不可用或已满）', 'error');
+    }
+  }, [preview, draftIdReady, buildDraftPayload, draftBase, draftUserId]);
+
+  /** 丢弃草稿：清空本地草稿并重置表单 */
+  const handleDiscardDraft = useCallback(() => {
+    if (draftIdReady) {
+      clearDraft(draftBase, configRef.current.id, draftUserId || 'anonymous');
+    }
+    setMainValues(initMainValues(configRef.current));
+    setSubValues(initSubValues(configRef.current));
+    manualEdited.current = new Set();
+    autoFilled.current = new Set();
+    resetUserDefaultDone(userDefaultDone.current);
+    setSubmitSeq((s) => s + 1);
+    setUniqueState({});
+    setSubmitErrors([]);
+    draftRestored.current = true;
+    setDraftSavedAt(null);
+    setDraftDirty(false);
+    toast('已丢弃草稿', 'info');
+  }, [draftBase, draftUserId, draftIdReady]);
+
+  /**
+   * ★ 自动暂存（防意外关闭页面丢失内容）。
+   *
+   * 只在**用户改过值之后**触发（draftDirty），且**防抖 800ms** ——
+   * 每敲一个字都写 localStorage 会拖慢输入，也让存储写入过于频繁。
+   * 全空内容不落盘（否则每次打开都提示「有草稿」，反而打扰）。
+   */
+  useEffect(() => {
+    if (preview || !draftAvailable || !draftRestored.current) return;
+    if (!draftIdReady) return; // 同上：身份未就绪时落盘会写到 'anonymous' 的错误 key 上
+    if (!draftDirty) return;
+    const t = setTimeout(() => {
+      const payload = buildDraftPayload();
+      if (!draftHasContent(payload.main, payload.subs)) {
+        /**
+         * ★ 内容被清空 → **必须删除**已有草稿，而不是「跳过写入」。
+         *   否则用户恢复草稿后把内容全删掉，本地那份旧草稿还在，
+         *   下次打开又会「恢复」出他明明已经删掉的内容（真实踩过的坑）。
+         */
+        clearDraft(draftBase, configRef.current.id, draftUserId || 'anonymous');
+        setDraftSavedAt(null);
+        setDraftDirty(false);
+        return;
+      }
+      const ok = saveDraft(draftBase, configRef.current.id, draftUserId || 'anonymous', payload);
+      if (ok) {
+        setDraftSavedAt(payload.savedAt);
+        setDraftDirty(false);
+      }
+    }, 800);
+    return () => clearTimeout(t);
+  }, [preview, draftAvailable, draftIdReady, draftDirty, buildDraftPayload, draftBase, draftUserId, mainValues, subValues]);
 
   return (
     <div className={`fill-form${hasWideSub ? ' fill-form--wide' : ''}`}>
@@ -725,21 +976,52 @@ export function FormRenderer({ config, onBackToConfig, preview, metaStale, onRel
         </div>
       ))}
 
+      {/* 草稿状态条：用户填过内容后出现，说明「当前内容不会进数据表」并提供手动保存 */}
+      {!preview && draftAvailable && draftSavedAt && (
+        <div className="draft-bar">
+          <span className="draft-bar-text">
+            📝 已暂存草稿（{new Date(draftSavedAt).toLocaleString()}）
+            ｜ 内容<b>尚未提交</b>，不会写入数据表
+          </span>
+          <span className="draft-bar-actions">
+            <Button size="small" theme="borderless" icon={<IconSave />} onClick={handleSaveDraft}>
+              保存草稿
+            </Button>
+            <Button size="small" theme="borderless" type="danger" onClick={handleDiscardDraft}>
+              丢弃草稿
+            </Button>
+          </span>
+        </div>
+      )}
+
       {/* 提交（预览模式禁用，仅展示外观） */}
-      <Button
-        theme="solid"
-        type="primary"
-        className="submit-btn"
-        loading={submitting}
-        disabled={preview || metaStale}
-        icon={!submitting ? <IconSend /> : undefined}
-        onClick={handleSubmit}
-      >
-        {preview ? '预览模式（提交已禁用）' : submitting ? '正在提交…' : metaStale ? '请先重新载入' : '提交'}
-      </Button>
+      <div className="submit-row">
+        <Button
+          theme="solid"
+          type="primary"
+          className="submit-btn"
+          loading={submitting}
+          disabled={preview || metaStale}
+          icon={!submitting ? <IconSend /> : undefined}
+          onClick={handleSubmit}
+        >
+          {preview ? '预览模式（提交已禁用）' : submitting ? '正在提交…' : metaStale ? '请先重新载入' : '提交'}
+        </Button>
+        {/* 保存草稿：正式提交前的「留一手」，切页/刷新后可继续填 */}
+        {!preview && draftAvailable && (
+          <Button
+            className="draft-btn"
+            icon={<IconSave />}
+            disabled={metaStale}
+            onClick={handleSaveDraft}
+          >
+            保存草稿
+          </Button>
+        )}
+      </div>
       {!preview && (
         <Typography.Text type="tertiary" style={{ display: 'block', textAlign: 'center', marginTop: 10, fontSize: 12 }}>
-          提交后主表与各子表将自动关联写入
+          提交后主表与各子表将自动关联写入{draftAvailable ? '；草稿仅存本地，随时可回来继续填' : ''}
         </Typography.Text>
       )}
     </div>
