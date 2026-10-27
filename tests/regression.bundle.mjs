@@ -29526,6 +29526,15 @@ var init_cellText = __esm({
 });
 
 // src/utils/optionRef.ts
+var optionRef_exports = {};
+__export(optionRef_exports, {
+  conditionSpecOf: () => conditionSpecOf,
+  getOptionRefDependencies: () => getOptionRefDependencies,
+  hasOptionRef: () => hasOptionRef,
+  refRecordMatches: () => refRecordMatches,
+  resolveRefOptions: () => resolveRefOptions,
+  resolveRefSelectVariant: () => resolveRefSelectVariant
+});
 function refRecordMatches(ref, fields, formValues) {
   return (ref?.conditions ?? []).every((c11) => {
     const rawCell = fields?.[c11.sourceFieldId];
@@ -29558,6 +29567,10 @@ function resolveRefOptions(ref, records, formValues) {
 }
 function hasOptionRef(field) {
   return !!field.optionRef?.tableId && !!field.optionRef?.fieldId;
+}
+function resolveRefSelectVariant(field) {
+  if (!hasOptionRef(field)) return null;
+  return field.fieldType === j5.MultiSelect ? "multiple" : "single";
 }
 function conditionSpecOf(c11, formValues) {
   if (c11.valueSource === "field") {
@@ -30690,6 +30703,7 @@ __export(formFieldRef_exports, {
   formHasAnyFormRef: () => formHasAnyFormRef,
   formRefValuesSignature: () => formRefValuesSignature,
   hasFormRef: () => hasFormRef,
+  resolveFormRefSelectVariant: () => resolveFormRefSelectVariant,
   resolveOptionMode: () => resolveOptionMode
 });
 function buildFormScope(mainTableId, mainValues, subValues, subTables, extras) {
@@ -30753,6 +30767,10 @@ function formRefValuesSignature(mainTableId, mainFields, mainValues, subTables, 
 }
 function hasFormRef(field) {
   return !!field.formRef?.sourceTableId && !!field.formRef?.sourceFieldId;
+}
+function resolveFormRefSelectVariant(field) {
+  if (!hasFormRef(field)) return null;
+  return field.fieldType === j5.MultiSelect ? "multiple" : "single";
 }
 function resolveOptionMode(field) {
   if (hasFormRef(field)) return "formRef";
@@ -151429,6 +151447,35 @@ function FieldRenderer({
     return /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(input_default, { style: fullWidth, disabled: true, placeholder: "\u9884\u89C8\u6A21\u5F0F\u4E0D\u52A0\u8F7D\u6570\u636E" });
   }
   const control = (() => {
+    const refVariant = resolveRefSelectVariant(field);
+    if (optionMode === "optionRef" && refVariant) {
+      return /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(
+        RefOptionSelect,
+        {
+          field,
+          value,
+          onChange,
+          disabled,
+          multiple: refVariant === "multiple",
+          formValues: formValues ?? {},
+          preview
+        }
+      );
+    }
+    const formVariant = resolveFormRefSelectVariant(field);
+    if (optionMode === "formRef" && formVariant) {
+      return /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(
+        FormRefSelect,
+        {
+          field,
+          value,
+          onChange,
+          disabled,
+          multiple: formVariant === "multiple",
+          scope: formScope ?? null
+        }
+      );
+    }
     switch (field.fieldType) {
       case j5.Text:
         if (compact) {
@@ -151484,31 +151531,6 @@ function FieldRenderer({
           }
         );
       case j5.SingleSelect:
-        if (optionMode === "formRef") {
-          return /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(
-            FormRefSelect,
-            {
-              field,
-              value,
-              onChange,
-              disabled,
-              scope: formScope ?? null
-            }
-          );
-        }
-        if (optionMode === "optionRef") {
-          return /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(
-            RefOptionSelect,
-            {
-              field,
-              value,
-              onChange,
-              disabled,
-              formValues: formValues ?? {},
-              preview
-            }
-          );
-        }
         return /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(
           select_default,
           {
@@ -151523,33 +151545,6 @@ function FieldRenderer({
           }
         );
       case j5.MultiSelect:
-        if (optionMode === "formRef") {
-          return /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(
-            FormRefSelect,
-            {
-              field,
-              value,
-              onChange,
-              disabled,
-              multiple: true,
-              scope: formScope ?? null
-            }
-          );
-        }
-        if (optionMode === "optionRef") {
-          return /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(
-            RefOptionSelect,
-            {
-              field,
-              value,
-              onChange,
-              disabled,
-              multiple: true,
-              formValues: formValues ?? {},
-              preview
-            }
-          );
-        }
         return /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(
           select_default,
           {
@@ -151886,6 +151881,35 @@ var init_formDraft = __esm({
   "src/utils/formDraft.ts"() {
     "use strict";
     DRAFT_DATE_MARK = "__draftType";
+  }
+});
+
+// src/utils/configEntry.ts
+var configEntry_exports = {};
+__export(configEntry_exports, {
+  canConfigFormRef: () => canConfigFormRef,
+  canConfigOptionRef: () => canConfigOptionRef,
+  hasAnyAdvancedEntry: () => hasAnyAdvancedEntry,
+  isSelectFieldType: () => isSelectFieldType
+});
+function isSelectFieldType(t3) {
+  return t3 === j5.SingleSelect || t3 === j5.MultiSelect;
+}
+function canConfigOptionRef(f12) {
+  return isSelectFieldType(f12?.fieldType) || hasOptionRef(f12);
+}
+function canConfigFormRef(f12) {
+  return isSelectFieldType(f12?.fieldType) || hasFormRef(f12);
+}
+function hasAnyAdvancedEntry(f12, opts) {
+  return opts.uniqueCheckable || opts.dateField || canConfigOptionRef(f12) || canConfigFormRef(f12) || opts.userField;
+}
+var init_configEntry = __esm({
+  "src/utils/configEntry.ts"() {
+    "use strict";
+    init_dist();
+    init_optionRef();
+    init_formFieldRef();
   }
 });
 
@@ -156856,6 +156880,375 @@ async function run() {
       (app31.match(/<FormRenderer[\s\S]{0,300}?baseToken=\{baseToken\}/g) || []).length === 2,
       null
     );
+  }
+  {
+    const { resolveRefSelectVariant: resolveRefSelectVariant2, hasOptionRef: hasRef32 } = await Promise.resolve().then(() => (init_optionRef(), optionRef_exports));
+    const { canConfigOptionRef: canConfigOptionRef2, canConfigFormRef: canConfigFormRef2, isSelectFieldType: isSelectFieldType2, hasAnyAdvancedEntry: hasAnyAdvancedEntry2 } = await Promise.resolve().then(() => (init_configEntry(), configEntry_exports));
+    const refConds32 = [
+      { sourceFieldId: "prov", sourceFieldType: j5.SingleSelect, valueSource: "static", staticValue: "\u6D59\u6C5F" },
+      { sourceFieldId: "status", sourceFieldType: j5.SingleSelect, valueSource: "static", staticValue: "\u542F\u7528" }
+    ];
+    const ref32 = { tableId: "tblSrc32", fieldId: "cityName", fieldType: j5.SingleSelect, conditions: refConds32 };
+    check("F32 \u6709 optionRef + \u7C7B\u578B=\u5355\u9009 \u2192 \u5355\u9009\u5F15\u7528\u63A7\u4EF6", resolveRefSelectVariant2({ fieldId: "a", fieldType: j5.SingleSelect, optionRef: ref32 }) === "single", null);
+    check("F32 \u6709 optionRef + \u7C7B\u578B=\u591A\u9009 \u2192 \u591A\u9009\u5F15\u7528\u63A7\u4EF6", resolveRefSelectVariant2({ fieldId: "a", fieldType: j5.MultiSelect, optionRef: ref32 }) === "multiple", null);
+    check(
+      "F32 \u2605 \u6709 optionRef + \u7C7B\u578B\u7F3A\u5931\uFF08\u5237\u65B0\u540E hydrate \u672A\u8865\u56DE\uFF09\u2192 \u4ECD\u4E3A\u5355\u9009\u5F15\u7528\u63A7\u4EF6\uFF08\u4E0D\u5F97\u56DE\u843D null\uFF09",
+      resolveRefSelectVariant2({ fieldId: "a", fieldType: void 0, optionRef: ref32 }) === "single",
+      null
+    );
+    check(
+      "F32 \u65E0 optionRef + \u7C7B\u578B\u7F3A\u5931 \u2192 null\uFF08\u666E\u901A\u5B57\u6BB5\u4E0D\u8BEF\u5224\u6210\u5F15\u7528\u9009\u9879\uFF09",
+      resolveRefSelectVariant2({ fieldId: "a", fieldType: void 0 }) === null,
+      null
+    );
+    check(
+      "F32 optionRef \u4E0D\u5B8C\u6574\uFF08\u7F3A fieldId\uFF09+ \u7C7B\u578B\u7F3A\u5931 \u2192 null\uFF08\u4E0D\u5F53\u4F5C\u5DF2\u914D\u7F6E\uFF09",
+      resolveRefSelectVariant2({ fieldId: "a", fieldType: void 0, optionRef: { tableId: "t", fieldId: "", conditions: [] } }) === null,
+      null
+    );
+    check(
+      "F32 optionRef \u4E0D\u5B8C\u6574\uFF08\u7F3A tableId\uFF09+ \u7C7B\u578B\u7F3A\u5931 \u2192 null",
+      resolveRefSelectVariant2({ fieldId: "a", fieldType: void 0, optionRef: { tableId: "", fieldId: "f", conditions: [] } }) === null,
+      null
+    );
+    check(
+      "F32 \u4E09\u4E2A\u6761\u4EF6\u65F6\u5F62\u6001\u5224\u5B9A\u4E0D\u53D7\u6761\u4EF6\u6570\u5F71\u54CD",
+      resolveRefSelectVariant2({ fieldId: "a", fieldType: void 0, optionRef: { ...ref32, conditions: [...refConds32, { sourceFieldId: "x", sourceFieldType: j5.Text, valueSource: "static", staticValue: "y" }] } }) === "single",
+      null
+    );
+    check(
+      "F32 \u6761\u4EF6\u4E3A\u7A7A\u6570\u7EC4\u65F6\u4E5F\u4E0D\u53D7\u5F71\u54CD\uFF08\u65E0\u6761\u4EF6\u4E0B\u52A0\u8F7D\u5168\u90E8\uFF09",
+      resolveRefSelectVariant2({ fieldId: "a", fieldType: void 0, optionRef: { ...ref32, conditions: [] } }) === "single",
+      null
+    );
+    check(
+      "F32 \u5224\u5B9A\u4E0E hasOptionRef \u4E00\u81F4\uFF08\u540C\u6E90\uFF0C\u4E0D\u5404\u5224\u4E00\u5957\uFF09",
+      hasRef32({ fieldId: "a", fieldType: void 0, optionRef: ref32 }) === (resolveRefSelectVariant2({ fieldId: "a", fieldType: void 0, optionRef: ref32 }) !== null),
+      null
+    );
+    const fCfg32 = (fieldType) => ({ fieldId: "mod", fieldName: "\u6A21\u7EC4\u540D\u79F0", fieldType, visible: true, required: false, label: "\u6A21\u7EC4\u540D\u79F0", optionRef: ref32 });
+    check("F32 \u7C7B\u578B=\u5355\u9009 \u2192 \u51FA\u73B0\u300C\u5F15\u7528\u9009\u9879\u300D\u5165\u53E3", canConfigOptionRef2(fCfg32(j5.SingleSelect)) === true, null);
+    check(
+      "F32 \u2605 \u7C7B\u578B\u7F3A\u5931\u4F46\u5DF2\u914D optionRef \u2192 \u5165\u53E3\u5FC5\u987B\u4FDD\u7559\uFF08\u5426\u5219\u7528\u6237\u4EE5\u4E3A\u914D\u7F6E\u4E22\u4E86\uFF09",
+      canConfigOptionRef2(fCfg32(void 0)) === true,
+      null
+    );
+    check(
+      "F32 \u7C7B\u578B\u7F3A\u5931\u4E14\u672A\u914D optionRef \u2192 \u4E0D\u51FA\u73B0\u5165\u53E3\uFF08\u4E0D\u65E0\u7AEF\u653E\u5F00\uFF09",
+      canConfigOptionRef2({ fieldId: "x", fieldType: void 0 }) === false,
+      null
+    );
+    check(
+      "F32 \u7C7B\u578B=\u6587\u672C\u4E14\u672A\u914D optionRef \u2192 \u4E0D\u51FA\u73B0\u5165\u53E3\uFF08\u6587\u672C\u5B57\u6BB5\u672C\u5C31\u4E0D\u8BE5\u6709\uFF09",
+      canConfigOptionRef2({ fieldId: "x", fieldType: j5.Text }) === false,
+      null
+    );
+    const formRef32 = { sourceTableId: "tblA", sourceFieldId: "fA", sourceFieldType: j5.SingleSelect };
+    check(
+      "F32 \u2605 \u7C7B\u578B\u7F3A\u5931\u4F46\u5DF2\u914D formRef \u2192 \u300C\u8868\u5355\u53D6\u503C\u300D\u5165\u53E3\u5FC5\u987B\u4FDD\u7559",
+      canConfigFormRef2({ fieldId: "x", fieldType: void 0, formRef: formRef32 }) === true,
+      null
+    );
+    check(
+      "F32 \u7C7B\u578B\u7F3A\u5931\u4E14\u672A\u914D formRef \u2192 \u4E0D\u51FA\u73B0\u300C\u8868\u5355\u53D6\u503C\u300D\u5165\u53E3",
+      canConfigFormRef2({ fieldId: "x", fieldType: void 0 }) === false,
+      null
+    );
+    const { resolveFormRefSelectVariant: resolveFormRefSelectVariant2 } = await Promise.resolve().then(() => (init_formFieldRef(), formFieldRef_exports));
+    check("F32 formRef + \u7C7B\u578B=\u5355\u9009 \u2192 \u5355\u9009\u53D6\u503C\u63A7\u4EF6", resolveFormRefSelectVariant2({ fieldId: "a", fieldType: j5.SingleSelect, formRef: formRef32 }) === "single", null);
+    check("F32 formRef + \u7C7B\u578B=\u591A\u9009 \u2192 \u591A\u9009\u53D6\u503C\u63A7\u4EF6", resolveFormRefSelectVariant2({ fieldId: "a", fieldType: j5.MultiSelect, formRef: formRef32 }) === "multiple", null);
+    check(
+      "F32 \u2605 formRef + \u7C7B\u578B\u7F3A\u5931 \u2192 \u4ECD\u4E3A\u5355\u9009\u53D6\u503C\u63A7\u4EF6\uFF08\u4E0D\u5F97\u56DE\u843D null \u2192 \u9000\u5316\u6210\u6587\u672C\u6846\uFF09",
+      resolveFormRefSelectVariant2({ fieldId: "a", fieldType: void 0, formRef: formRef32 }) === "single",
+      null
+    );
+    check(
+      "F32 \u65E0 formRef + \u7C7B\u578B\u7F3A\u5931 \u2192 null\uFF08\u4E0D\u8BEF\u5224\uFF09",
+      resolveFormRefSelectVariant2({ fieldId: "a", fieldType: void 0 }) === null,
+      null
+    );
+    check(
+      "F32 formRef \u4E0D\u5B8C\u6574\uFF08\u7F3A sourceFieldId\uFF09+ \u7C7B\u578B\u7F3A\u5931 \u2192 null",
+      resolveFormRefSelectVariant2({ fieldId: "a", fieldType: void 0, formRef: { sourceTableId: "t", sourceFieldId: "" } }) === null,
+      null
+    );
+    check(
+      "F32 isSelectFieldType \u53EA\u8BA4\u5355\u9009/\u591A\u9009\uFF08\u96F6\u7834\u574F\uFF1A\u5176\u5B83\u7C7B\u578B\u4E0D\u53D7\u5F71\u54CD\uFF09",
+      isSelectFieldType2(j5.SingleSelect) && isSelectFieldType2(j5.MultiSelect) && !isSelectFieldType2(j5.Text) && !isSelectFieldType2(j5.DateTime) && !isSelectFieldType2(j5.User) && !isSelectFieldType2(void 0),
+      null
+    );
+    check(
+      "F32 \u2605 \u9AD8\u7EA7\u914D\u7F6E\u533A\u6574\u5757\u5B88\u95E8\uFF1A\u7C7B\u578B\u7F3A\u5931 + \u5DF2\u914D optionRef \u2192 \u6E32\u67D3\uFF08\u6B64\u524D\u4F1A\u6574\u5757\u6D88\u5931\uFF09",
+      hasAnyAdvancedEntry2(fCfg32(void 0), { uniqueCheckable: false, dateField: false, userField: false }) === true,
+      null
+    );
+    check(
+      "F32 \u9AD8\u7EA7\u914D\u7F6E\u533A\u6574\u5757\u5B88\u95E8\uFF1A\u666E\u901A\u6587\u672C\u7A7A\u5B57\u6BB5 \u2192 \u4E0D\u6E32\u67D3\uFF08\u96F6\u7834\u574F\uFF09",
+      hasAnyAdvancedEntry2({ fieldId: "x", fieldType: j5.Text }, { uniqueCheckable: false, dateField: false, userField: false }) === false,
+      null
+    );
+    check(
+      "F32 \u9AD8\u7EA7\u914D\u7F6E\u533A\u6574\u5757\u5B88\u95E8\uFF1A\u552F\u4E00\u6027/\u65E5\u671F/\u4EBA\u5458\u4EFB\u4E00\u53EF\u7528\u5373\u6E32\u67D3\uFF08\u539F\u6709\u884C\u4E3A\u4E0D\u53D8\uFF09",
+      hasAnyAdvancedEntry2({ fieldId: "x", fieldType: j5.Text }, { uniqueCheckable: true, dateField: false, userField: false }) === true && hasAnyAdvancedEntry2({ fieldId: "y", fieldType: j5.DateTime }, { uniqueCheckable: false, dateField: true, userField: false }) === true && hasAnyAdvancedEntry2({ fieldId: "z", fieldType: j5.User }, { uniqueCheckable: false, dateField: false, userField: true }) === true,
+      null
+    );
+    {
+      const React322 = (await Promise.resolve().then(() => __toESM(require_react(), 1))).default;
+      const { renderToStaticMarkup } = await Promise.resolve().then(() => __toESM(require_server_browser(), 1));
+      const { FieldRenderer: FieldRenderer32 } = await Promise.resolve().then(() => (init_FieldRenderer(), FieldRenderer_exports));
+      const render32 = (field, extra = {}) => renderToStaticMarkup(
+        React322.createElement(FieldRenderer32, {
+          field,
+          tableId: "tblMain32",
+          value: void 0,
+          onChange: () => {
+          },
+          formValues: {},
+          ...extra
+        })
+      );
+      const placeholder32 = (html) => {
+        const m10 = /semi-select-selection-placeholder[^>]*>([^<]*)</.exec(html);
+        return m10 ? m10[1].trim() : "";
+      };
+      const htmlTyped = render32({ fieldId: "mod", fieldName: "\u6A21\u7EC4\u540D\u79F0", fieldType: j5.SingleSelect, visible: true, required: false, optionRef: ref32 });
+      check("F32 \u7AEF\u5230\u7AEF\uFF1A\u7C7B\u578B\u6B63\u5E38 \u2192 \u6E32\u67D3\u9009\u62E9\u63A7\u4EF6", /semi-select/.test(htmlTyped), { len: htmlTyped.length });
+      check(
+        "F32 \u7AEF\u5230\u7AEF\uFF1A\u7C7B\u578B\u6B63\u5E38 + \u6761\u4EF6\u6210\u7ACB \u2192 \u6587\u6848\u4E3A\u300C\u6309\u4E0A\u7EA7\u9009\u62E9\u8054\u52A8\u52A0\u8F7D\u300D",
+        /点击展开（按上级选择联动加载），或输入关键字搜索/.test(placeholder32(htmlTyped)),
+        placeholder32(htmlTyped)
+      );
+      const htmlLost = render32({ fieldId: "mod", fieldName: "\u6A21\u7EC4\u540D\u79F0", fieldType: void 0, visible: true, required: false, optionRef: ref32 });
+      check("F32 \u2605 \u7AEF\u5230\u7AEF\uFF1A\u7C7B\u578B\u7F3A\u5931 \u2192 **\u4ECD\u7136\u6E32\u67D3\u9009\u62E9\u63A7\u4EF6**\uFF08\u6761\u4EF6\u9009\u9879\u4E0D\u518D\u6D88\u5931\uFF09", /semi-select/.test(htmlLost), { len: htmlLost.length });
+      check(
+        "F32 \u2605 \u7AEF\u5230\u7AEF\uFF1A\u7C7B\u578B\u7F3A\u5931\u65F6\u4E0D\u662F\u666E\u901A\u6587\u672C\u6846\uFF08\u6838\u5FC3\u56DE\u5F52\uFF1A\u6B64\u524D\u6E32\u67D3\u6210 Input \u2192 \u300C\u6761\u4EF6\u9009\u9879\u5931\u6548\u300D\uFF09",
+        !/semi-input-textarea/.test(htmlLost),
+        null
+      );
+      check(
+        "F32 \u2605 \u7AEF\u5230\u7AEF\uFF1A\u7C7B\u578B\u7F3A\u5931 \u2192 \u6761\u4EF6\u4ECD\u7136\u751F\u6548\uFF08\u6587\u6848\u4ECD\u662F\u300C\u6309\u4E0A\u7EA7\u9009\u62E9\u8054\u52A8\u52A0\u8F7D\u300D\uFF0C\u800C\u975E\u4E22\u5931\u6001\u7684\u300C\u52A0\u8F7D\u5168\u90E8\u9009\u9879\u300D\uFF09",
+        /点击展开（按上级选择联动加载），或输入关键字搜索/.test(placeholder32(htmlLost)) && !/点击展开（加载全部选项），或输入关键字搜索/.test(placeholder32(htmlLost)),
+        placeholder32(htmlLost)
+      );
+      check(
+        "F32 \u2605 \u7AEF\u5230\u7AEF\uFF1A\u7C7B\u578B\u7F3A\u5931\u4E0E\u7C7B\u578B\u6B63\u5E38\u7684\u53EF\u89C1\u8F93\u51FA\u4E00\u81F4\uFF08\u771F\u6B63\u4FEE\u590D\u8FBE\u6210\u7684\u7B49\u4EF7\u6027\uFF09",
+        htmlTyped === htmlLost,
+        { typed: htmlTyped.length, lost: htmlLost.length }
+      );
+      const htmlNoCond = render32({
+        fieldId: "mod",
+        fieldName: "\u6A21\u7EC4\u540D\u79F0",
+        fieldType: void 0,
+        visible: true,
+        required: false,
+        optionRef: { tableId: "tblSrc32", fieldId: "cityName", fieldType: j5.SingleSelect, conditions: [] }
+      });
+      check(
+        "F32 \u7AEF\u5230\u7AEF\uFF1A\u65E0\u6761\u4EF6\u7684\u5F15\u7528\u9009\u9879 \u2192 \u6587\u6848\u4E3A\u300C\u52A0\u8F7D\u5168\u90E8\u9009\u9879\u300D\uFF08\u533A\u5206\u51FA\u6761\u4EF6\u7684\u53EF\u89C1\u5DEE\u5F02\uFF09",
+        /点击展开（加载全部选项），或输入关键字搜索/.test(placeholder32(htmlNoCond)),
+        placeholder32(htmlNoCond)
+      );
+      const refField32 = {
+        fieldId: "city",
+        fieldName: "\u5E02",
+        fieldType: j5.SingleSelect,
+        visible: true,
+        required: false,
+        optionRef: {
+          tableId: "tblSrc32",
+          fieldId: "cityName",
+          fieldType: j5.SingleSelect,
+          conditions: [{ sourceFieldId: "prov", sourceFieldType: j5.SingleSelect, valueSource: "field", formFieldId: "prov" }]
+        }
+      };
+      const htmlPend = render32(refField32, { formValues: {} });
+      check(
+        "F32 \u7AEF\u5230\u7AEF\uFF1A\u8054\u52A8\u6761\u4EF6\u7236\u7EA7\u672A\u586B \u2192 \u63D0\u793A\u300C\u8BF7\u5148\u586B\u5199\u4E0A\u7EA7\u5B57\u6BB5\u300D",
+        /请先填写上级字段/.test(placeholder32(htmlPend)),
+        null
+      );
+      const htmlPendLost = render32({ ...refField32, fieldType: void 0 }, { formValues: {} });
+      check(
+        "F32 \u2605 \u7AEF\u5230\u7AEF\uFF1A\u7236\u7EA7\u672A\u586B + \u7C7B\u578B\u7F3A\u5931 \u2192 \u4ECD\u63D0\u793A\u300C\u8BF7\u5148\u586B\u5199\u4E0A\u7EA7\u5B57\u6BB5\u300D\uFF08\u4E0D\u518D\u9000\u5316\u6210\u6587\u672C\u6846\uFF09",
+        /semi-select/.test(htmlPendLost) && /请先填写上级字段/.test(placeholder32(htmlPendLost)),
+        null
+      );
+      const htmlMulti = render32({ fieldId: "mod", fieldName: "\u6A21\u7EC4\u540D\u79F0", fieldType: j5.MultiSelect, visible: true, required: false, optionRef: ref32 });
+      check("F32 \u7AEF\u5230\u7AEF\uFF1A\u7C7B\u578B=\u591A\u9009 \u2192 \u6E32\u67D3\u591A\u9009\u5F15\u7528\u63A7\u4EF6", /semi-select/.test(htmlMulti) && /multiple|semi-select-multiple/.test(htmlMulti), null);
+      check(
+        "F32 \u7AEF\u5230\u7AEF\uFF1A\u7C7B\u578B\u7F3A\u5931 \u2192 \u6309\u5355\u9009\u6E32\u67D3\uFF08\u4FDD\u5B88\uFF0C\u4E0D\u8BEF\u5F53\u591A\u9009\uFF09",
+        /semi-select/.test(htmlLost) && !/semi-select-multiple/.test(htmlLost),
+        null
+      );
+      const htmlPlain = render32({ fieldId: "note", fieldName: "\u5907\u6CE8", fieldType: void 0, visible: true, required: false });
+      check(
+        "F32 \u96F6\u7834\u574F\uFF1A\u65E0 optionRef + \u7C7B\u578B\u7F3A\u5931 \u2192 \u4ECD\u662F\u666E\u901A\u8F93\u5165\u63A7\u4EF6\uFF08\u672A\u6CE2\u53CA\u666E\u901A\u5B57\u6BB5\uFF09",
+        !/semi-select/.test(htmlPlain),
+        { len: htmlPlain.length }
+      );
+      const { buildFormScope: buildScope32 } = await Promise.resolve().then(() => (init_formFieldRef(), formFieldRef_exports));
+      const sc32 = buildScope32("tblMain32", {}, { tblA32: [{ fA32: "\u503C1" }] }, [], { mainFields: [], blockLabels: { tblA32: "\u533A\u5757A" } });
+      const htmlBoth32 = render32({
+        fieldId: "x",
+        fieldName: "X",
+        fieldType: j5.SingleSelect,
+        visible: true,
+        required: false,
+        optionRef: ref32,
+        formRef: { sourceTableId: "tblA32", sourceFieldId: "fA32", sourceFieldType: j5.SingleSelect }
+      }, { formScope: sc32 });
+      check(
+        "F32 \u96F6\u7834\u574F\uFF1A\u4E24\u8005\u90FD\u914D \u2192 formRef \u4F18\u5148\uFF08\u5F15\u7528\u9009\u9879\u8DEF\u5F84\u672A\u88AB\u62A2\uFF09",
+        /从上方已录入的值中选择/.test(htmlBoth32),
+        null
+      );
+      const htmlBothLost32 = render32({
+        fieldId: "x",
+        fieldName: "X",
+        fieldType: void 0,
+        visible: true,
+        required: false,
+        optionRef: ref32,
+        formRef: { sourceTableId: "tblA32", sourceFieldId: "fA32", sourceFieldType: j5.SingleSelect }
+      }, { formScope: sc32 });
+      check(
+        "F32 \u2605 \u96F6\u7834\u574F\uFF1A\u4E24\u8005\u90FD\u914D + \u7C7B\u578B\u7F3A\u5931 \u2192 \u4ECD formRef \u4F18\u5148\uFF08\u4F18\u5148\u7EA7\u5224\u5B9A\u540C\u6837\u4E0D\u4F9D\u8D56\u7C7B\u578B\uFF09",
+        /从上方已录入的值中选择/.test(htmlBothLost32),
+        null
+      );
+    }
+    {
+      const data32 = {
+        defaultFormId: "f32",
+        forms: [{
+          id: "f32",
+          version: "1.0.0",
+          formTitle: "T",
+          formDescription: "",
+          themeColor: "#3370ff",
+          mainTable: {
+            tableId: "tblMain32",
+            tableName: "\u4E3B\u8868",
+            sectionName: "\u4E3B\u8868\u4FE1\u606F",
+            fields: [{ fieldId: "mod", fieldName: "\u6A21\u7EC4\u540D\u79F0", fieldType: j5.SingleSelect, visible: true, required: false, label: "\u6A21\u7EC4\u540D\u79F0", options: [], optionRef: ref32 }]
+          },
+          subTables: [],
+          conditionalRules: []
+        }]
+      };
+      const thin32 = JSON.parse(JSON.stringify(serializeConfig(data32)));
+      const thinMod32 = thin32.forms[0].mainTable.fields.find((f12) => f12.fieldId === "mod");
+      check("F32 \u6301\u4E45\u5316\uFF1A\u7626\u8EAB\u5265\u79BB fieldType\uFF08\u4F53\u79EF\u4F18\u5316\uFF0C\u9884\u671F\u884C\u4E3A\uFF09", thinMod32.fieldType === void 0, { fieldType: thinMod32.fieldType });
+      check(
+        "F32 \u6301\u4E45\u5316\uFF1AoptionRef \u5B8C\u6574\u4FDD\u7559\uFF08\u542B\u5168\u90E8\u6761\u4EF6\uFF0C\u4E0D\u56E0\u6761\u4EF6\u591A\u800C\u4E22\uFF09",
+        JSON.stringify(thinMod32.optionRef?.conditions) === JSON.stringify(refConds32),
+        thinMod32.optionRef
+      );
+      check(
+        "F32 \u6301\u4E45\u5316\uFF1AoptionRef \u7684 tableId/fieldId \u4FDD\u7559\uFF08\u6E32\u67D3\u5224\u5B9A\u4F9D\u8D56\u5B83\uFF09",
+        thinMod32.optionRef?.tableId === "tblSrc32" && thinMod32.optionRef?.fieldId === "cityName",
+        null
+      );
+      const metaBase32 = {
+        getTableById: async () => ({
+          getFieldMetaList: async () => [{ id: "mod", name: "\u6A21\u7EC4\u540D\u79F0", type: j5.SingleSelect, property: { options: [] } }]
+        }),
+        getTableMetaList: async () => [{ id: "tblMain32", name: "\u4E3B\u8868" }]
+      };
+      __setAppForTest({ base: metaBase32 });
+      const hydro32 = await hydrateConfig(JSON.parse(JSON.stringify(thin32)));
+      const hMod32 = hydro32.forms[0].mainTable.fields.find((f12) => f12.fieldId === "mod");
+      check("F32 hydrate\uFF1Ameta \u53EF\u8BFB \u2192 \u8865\u56DE fieldType", hMod32?.fieldType === j5.SingleSelect, { fieldType: hMod32?.fieldType });
+      check(
+        "F32 hydrate\uFF1AoptionRef \u6761\u4EF6\u4E0D\u4E22\uFF081/2/3 \u6761\u4EF6\u5747\u5B8C\u6574\uFF09",
+        JSON.stringify(hMod32?.optionRef?.conditions) === JSON.stringify(refConds32),
+        hMod32?.optionRef
+      );
+      check(
+        "F32 hydrate \u540E\u4ECD\u5224\u5B9A\u4E3A\u5F15\u7528\u9009\u9879\u63A7\u4EF6\uFF08\u7AEF\u5230\u7AEF\u94FE\u8DEF\u95ED\u5408\uFF09",
+        resolveRefSelectVariant2(hMod32) === "single",
+        null
+      );
+      const throwBase32 = {
+        getTableById: async () => ({ getFieldMetaList: async () => {
+          throw new Error("permission denied");
+        } }),
+        getTableMetaList: async () => [{ id: "tblMain32", name: "\u4E3B\u8868" }]
+      };
+      __setAppForTest({ base: throwBase32 });
+      const hydroThrow32 = await hydrateConfig(JSON.parse(JSON.stringify(thin32)));
+      const hThrow32 = hydroThrow32.forms[0].mainTable.fields.find((f12) => f12.fieldId === "mod");
+      check("F32 hydrate\uFF08meta \u629B\u9519\uFF09\u2192 fieldType \u672A\u8865\u56DE\uFF08\u590D\u73B0\u8106\u5F31\u70B9\uFF09", hThrow32?.fieldType === void 0, { fieldType: hThrow32?.fieldType });
+      check(
+        "F32 \u2605 hydrate\uFF08meta \u629B\u9519\uFF09\u2192 \u515C\u5E95\u5224\u5B9A\u4ECD\u7ED9\u51FA\u5F15\u7528\u9009\u9879\u63A7\u4EF6\uFF08\u4FEE\u590D\u751F\u6548\uFF09",
+        resolveRefSelectVariant2(hThrow32) === "single",
+        null
+      );
+      check(
+        "F32 \u2605 hydrate\uFF08meta \u629B\u9519\uFF09\u2192 \u914D\u7F6E\u5165\u53E3\u4ECD\u4FDD\u7559\uFF08\u7528\u6237\u4E0D\u4F1A\u4EE5\u4E3A\u914D\u7F6E\u4E22\u4E86\uFF09",
+        canConfigOptionRef2(hThrow32) === true,
+        null
+      );
+    }
+    __setAppForTest(null);
+    {
+      const fs32 = await import("node:fs");
+      const stripComments32 = (src) => src.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|\s)\/\/[^\n]*/g, "$1");
+      const read32 = (rel) => stripComments32(fs32.readFileSync(new URL(rel, import.meta.url), "utf8"));
+      const fr32 = read32("../src/components/FormRenderer/FieldRenderer.tsx");
+      const idxVariant = fr32.indexOf("resolveRefSelectVariant(field)");
+      const idxSwitch = fr32.indexOf("switch (field.fieldType)");
+      const idxFormVariant = fr32.indexOf("resolveFormRefSelectVariant(field)");
+      check(
+        "F32 \u7ED3\u6784\uFF1A\u5F15\u7528\u9009\u9879\u5206\u6D41\u8C03\u7528 resolveRefSelectVariant\uFF08\u4E0D\u662F\u5185\u8054\u5224 fieldType\uFF09",
+        idxVariant > -1,
+        { idxVariant }
+      );
+      check(
+        "F32 \u2605 \u7ED3\u6784\uFF1A\u5206\u6D41\u70B9\u5728 `switch (field.fieldType)` **\u4E4B\u524D**\uFF08\u5199\u5230\u4E4B\u540E = \u6C38\u8FDC\u8D70\u4E0D\u5230 default \u515C\u5E95\uFF09",
+        idxVariant > -1 && idxSwitch > -1 && idxVariant < idxSwitch,
+        { idxVariant, idxSwitch }
+      );
+      check(
+        "F32 \u2605 \u7ED3\u6784\uFF1A\u8868\u5355\u53D6\u503C\u5206\u6D41\u540C\u6837\u524D\u79FB\u5230 switch \u4E4B\u524D\uFF08\u540C\u6839\u56E0\u540C\u4FEE\u6CD5\uFF09",
+        idxFormVariant > -1 && idxFormVariant < idxSwitch,
+        { idxFormVariant, idxSwitch }
+      );
+      const switchBody32 = fr32.slice(idxSwitch);
+      check(
+        "F32 \u7ED3\u6784\uFF1Aswitch \u5185\u4E0D\u518D\u91CD\u590D\u5B9E\u73B0 optionRef / formRef \u5206\u6D41\uFF08\u5355\u4E00\u5B9E\u73B0\uFF0C\u9632\u4E24\u5904\u6F02\u79FB\uFF09",
+        !/optionMode === 'optionRef'/.test(switchBody32) && !/optionMode === 'formRef'/.test(switchBody32),
+        null
+      );
+      const fcl32 = read32("../src/components/ConfigPanel/FieldConfigList.tsx");
+      check(
+        "F32 \u7ED3\u6784\uFF1A\u914D\u7F6E\u5165\u53E3\u7EDF\u4E00\u8D70 configEntry \u7EAF\u51FD\u6570\uFF08\u4E0D\u518D\u7528 isSelectField(f.fieldType) \u5F53\u552F\u4E00\u5224\u636E\uFF09",
+        /canConfigOptionRef\(f\)/.test(fcl32) && !/isSelectField\(f\.fieldType\)/.test(fcl32),
+        null
+      );
+      check(
+        "F32 \u7ED3\u6784\uFF1A\u9AD8\u7EA7\u914D\u7F6E\u533A\u6574\u5757\u5B88\u95E8\u4E5F\u8D70\u7EAF\u51FD\u6570\uFF08\u5426\u5219\u7C7B\u578B\u7F3A\u5931\u65F6\u6574\u5757\u6D88\u5931\uFF09",
+        /canConfigOptionRef\(f\)[\s\S]{0,200}?canConfigFormRef\(f\)/.test(fcl32),
+        null
+      );
+      const ce32 = read32("../src/utils/configEntry.ts");
+      check(
+        "F32 \u7ED3\u6784\uFF1AconfigEntry \u7684\u5165\u53E3\u5224\u5B9A\u5305\u542B hasOptionRef \u515C\u5E95\uFF08\u7C7B\u578B\u7F3A\u5931\u4E5F\u80FD\u4FDD\u7559\u5165\u53E3\uFF09",
+        /isSelectFieldType\(f\?\.fieldType\)\s*\|\|\s*hasOptionRef\(f\)/.test(ce32),
+        null
+      );
+      check(
+        "F32 \u7ED3\u6784\uFF1AconfigEntry \u7684\u300C\u8868\u5355\u53D6\u503C\u300D\u5165\u53E3\u5305\u542B hasFormRef \u515C\u5E95",
+        /isSelectFieldType\(f\?\.fieldType\)\s*\|\|\s*hasFormRef\(f\)/.test(ce32),
+        null
+      );
+      const or32 = read32("../src/utils/optionRef.ts");
+      check(
+        "F32 \u7ED3\u6784\uFF1AresolveRefSelectVariant \u4EE5 hasOptionRef \u4E3A\u524D\u7F6E\u5B88\u95E8",
+        /if \(!hasOptionRef\(field\)\) return null;/.test(or32),
+        null
+      );
+    }
   }
   const failed = results.filter((r10) => !r10.pass);
   log2(`

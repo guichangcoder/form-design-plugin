@@ -130,6 +130,27 @@ export function hasFormRef(field: FieldConfig): boolean {
   return !!field.formRef?.sourceTableId && !!field.formRef?.sourceFieldId;
 }
 
+/** 引用选项控件的形态：单选 / 多选 / 不适用 */
+export type FormRefSelectVariant = 'single' | 'multiple' | null;
+
+/**
+ * ★ 判断某字段应以哪种「表单取值」控件渲染（单选 / 多选 / 不适用）。
+ *
+ * 与 `optionRef.resolveRefSelectVariant` 同一根因、同一修法：
+ * `fieldType` 属体积优化的剥离字段（configSize.STRIP_FIELDS），刷新后靠 hydrate 从
+ * base 元信息补回；补不回来即为 undefined。旧行为下 `case FieldType.SingleSelect:`
+ * 之类的分支根本进不去 → 落进 `switch` 的 `default:` → 渲染**普通文本框**，
+ * 于是「已配置的表单取值」在界面上静默消失。
+ *
+ * 正确行为：**只要 formRef 配置完整，就一定渲染取值控件** —— 配置端只允许选择类
+ * 字段启用它，「配置仍在」本身即足以断定它是选择类字段。
+ * 多选仅在**明确是 MultiSelect** 时成立；类型未知时按单选渲染（更保守，不会错拆多值）。
+ */
+export function resolveFormRefSelectVariant(field: FieldConfig): FormRefSelectVariant {
+  if (!hasFormRef(field)) return null;
+  return field.fieldType === FieldType.MultiSelect ? 'multiple' : 'single';
+}
+
 /**
  * 解析字段的选项来源模式。
  * ★ formRef 优先（更即时、更贴合「本次录入」语义）；未配置则回落 optionRef；再回落固定选项。

@@ -3969,6 +3969,280 @@ async function run() {
       (app31.match(/<FormRenderer[\s\S]{0,300}?baseToken=\{baseToken\}/g) || []).length === 2, null);
   }
 
+  /* ============================================================
+   * F32 条件选项「保存后生效、刷新后失效」根因修复（2026-10-27 新增）
+   *
+   * 用户报障：某字段启用了「引用选项（带条件）」，首次保存后生效，
+   *          但**页面刷新后条件选项失效**；配多个条件时同样失效。
+   *
+   * ★ 根因（唯一可复现的静默降级路径）：
+   *   `fieldType` 属于体积优化的剥离字段（configSize.STRIP_FIELDS），
+   *   持久化里没有它 → 刷新后**完全依赖** `hydrateConfig` 从 base 元信息补回。
+   *   一旦补不回来（base 未绑定 / 字段读不到 / 权限或接口异常）→ `fieldType === undefined`：
+   *     ① 渲染层 `switch (field.fieldType)` 落进 `default:` → 渲染**普通文本框**
+   *        → 已配置的下拉（含条件）**根本不存在**；
+   *     ② 配置面板 `isSelectField(f.fieldType)` 为 false → 整个高级配置区
+   *        **整块消失** → 用户以为自己配的条件丢了。
+   *
+   * ★ 修复：只要 optionRef / formRef 配置仍完整，就必须走引用选项渲染 /
+   *   保留配置入口 —— 不依赖可能缺失的类型元信息。
+   *
+   * ★ 断言策略（本项目铁律）：UI 类缺陷必须**真实调用纯函数 + 真实渲染**验证。
+   *   源码正则只能证明字样存在，证明不了运行时产出
+   *   （曾把 `resolveRefSelectVariant` 注入 `return null;` 后正则断言照样全绿）。
+   * ============================================================ */
+  {
+    const { resolveRefSelectVariant, hasOptionRef: hasRef32 } = await import('../src/utils/optionRef.ts');
+    const { canConfigOptionRef, canConfigFormRef, isSelectFieldType, hasAnyAdvancedEntry } =
+      await import('../src/utils/configEntry.ts');
+
+    const refConds32 = [
+      { sourceFieldId: 'prov', sourceFieldType: FieldType.SingleSelect, valueSource: 'static', staticValue: '浙江' },
+      { sourceFieldId: 'status', sourceFieldType: FieldType.SingleSelect, valueSource: 'static', staticValue: '启用' },
+    ];
+    const ref32 = { tableId: 'tblSrc32', fieldId: 'cityName', fieldType: FieldType.SingleSelect, conditions: refConds32 };
+
+    // ---------- 1) 纯函数真实调用：resolveRefSelectVariant ----------
+    // 这是渲染分流的核心判定，必须在「类型已知 / 类型缺失」两种情形下都给出引用选项
+    check('F32 有 optionRef + 类型=单选 → 单选引用控件', resolveRefSelectVariant({ fieldId: 'a', fieldType: FieldType.SingleSelect, optionRef: ref32 }) === 'single', null);
+    check('F32 有 optionRef + 类型=多选 → 多选引用控件', resolveRefSelectVariant({ fieldId: 'a', fieldType: FieldType.MultiSelect, optionRef: ref32 }) === 'multiple', null);
+    check('F32 ★ 有 optionRef + 类型缺失（刷新后 hydrate 未补回）→ 仍为单选引用控件（不得回落 null）',
+      resolveRefSelectVariant({ fieldId: 'a', fieldType: undefined, optionRef: ref32 }) === 'single', null);
+    check('F32 无 optionRef + 类型缺失 → null（普通字段不误判成引用选项）',
+      resolveRefSelectVariant({ fieldId: 'a', fieldType: undefined }) === null, null);
+    check('F32 optionRef 不完整（缺 fieldId）+ 类型缺失 → null（不当作已配置）',
+      resolveRefSelectVariant({ fieldId: 'a', fieldType: undefined, optionRef: { tableId: 't', fieldId: '', conditions: [] } }) === null, null);
+    check('F32 optionRef 不完整（缺 tableId）+ 类型缺失 → null',
+      resolveRefSelectVariant({ fieldId: 'a', fieldType: undefined, optionRef: { tableId: '', fieldId: 'f', conditions: [] } }) === null, null);
+    // 多条件不改变形态判定（防「条件越多越容易失效」）
+    check('F32 三个条件时形态判定不受条件数影响',
+      resolveRefSelectVariant({ fieldId: 'a', fieldType: undefined, optionRef: { ...ref32, conditions: [...refConds32, { sourceFieldId: 'x', sourceFieldType: FieldType.Text, valueSource: 'static', staticValue: 'y' }] } }) === 'single', null);
+    check('F32 条件为空数组时也不受影响（无条件下加载全部）',
+      resolveRefSelectVariant({ fieldId: 'a', fieldType: undefined, optionRef: { ...ref32, conditions: [] } }) === 'single', null);
+    check('F32 判定与 hasOptionRef 一致（同源，不各判一套）',
+      hasRef32({ fieldId: 'a', fieldType: undefined, optionRef: ref32 }) === (resolveRefSelectVariant({ fieldId: 'a', fieldType: undefined, optionRef: ref32 }) !== null), null);
+
+    // ---------- 2) 纯函数真实调用：配置入口守门 ----------
+    const fCfg32 = (fieldType) => ({ fieldId: 'mod', fieldName: '模组名称', fieldType, visible: true, required: false, label: '模组名称', optionRef: ref32 });
+    check('F32 类型=单选 → 出现「引用选项」入口', canConfigOptionRef(fCfg32(FieldType.SingleSelect)) === true, null);
+    check('F32 ★ 类型缺失但已配 optionRef → 入口必须保留（否则用户以为配置丢了）',
+      canConfigOptionRef(fCfg32(undefined)) === true, null);
+    check('F32 类型缺失且未配 optionRef → 不出现入口（不无端放开）',
+      canConfigOptionRef({ fieldId: 'x', fieldType: undefined }) === false, null);
+    check('F32 类型=文本且未配 optionRef → 不出现入口（文本字段本就不该有）',
+      canConfigOptionRef({ fieldId: 'x', fieldType: FieldType.Text }) === false, null);
+
+    const formRef32 = { sourceTableId: 'tblA', sourceFieldId: 'fA', sourceFieldType: FieldType.SingleSelect };
+    check('F32 ★ 类型缺失但已配 formRef → 「表单取值」入口必须保留',
+      canConfigFormRef({ fieldId: 'x', fieldType: undefined, formRef: formRef32 }) === true, null);
+    check('F32 类型缺失且未配 formRef → 不出现「表单取值」入口',
+      canConfigFormRef({ fieldId: 'x', fieldType: undefined }) === false, null);
+
+    // ---------- 2b) formRef 的渲染形态判定（与 optionRef 同一根因，必须同一修法） ----------
+    const { resolveFormRefSelectVariant } = await import('../src/utils/formFieldRef.ts');
+    check('F32 formRef + 类型=单选 → 单选取值控件', resolveFormRefSelectVariant({ fieldId: 'a', fieldType: FieldType.SingleSelect, formRef: formRef32 }) === 'single', null);
+    check('F32 formRef + 类型=多选 → 多选取值控件', resolveFormRefSelectVariant({ fieldId: 'a', fieldType: FieldType.MultiSelect, formRef: formRef32 }) === 'multiple', null);
+    check('F32 ★ formRef + 类型缺失 → 仍为单选取值控件（不得回落 null → 退化成文本框）',
+      resolveFormRefSelectVariant({ fieldId: 'a', fieldType: undefined, formRef: formRef32 }) === 'single', null);
+    check('F32 无 formRef + 类型缺失 → null（不误判）',
+      resolveFormRefSelectVariant({ fieldId: 'a', fieldType: undefined }) === null, null);
+    check('F32 formRef 不完整（缺 sourceFieldId）+ 类型缺失 → null',
+      resolveFormRefSelectVariant({ fieldId: 'a', fieldType: undefined, formRef: { sourceTableId: 't', sourceFieldId: '' } }) === null, null);
+    check('F32 isSelectFieldType 只认单选/多选（零破坏：其它类型不受影响）',
+      isSelectFieldType(FieldType.SingleSelect) && isSelectFieldType(FieldType.MultiSelect) &&
+        !isSelectFieldType(FieldType.Text) && !isSelectFieldType(FieldType.DateTime) &&
+        !isSelectFieldType(FieldType.User) && !isSelectFieldType(undefined), null);
+
+    // 高级配置区整块守门：类型缺失 + 已配 optionRef 时必须为真（否则整块消失）
+    check('F32 ★ 高级配置区整块守门：类型缺失 + 已配 optionRef → 渲染（此前会整块消失）',
+      hasAnyAdvancedEntry(fCfg32(undefined), { uniqueCheckable: false, dateField: false, userField: false }) === true, null);
+    check('F32 高级配置区整块守门：普通文本空字段 → 不渲染（零破坏）',
+      hasAnyAdvancedEntry({ fieldId: 'x', fieldType: FieldType.Text }, { uniqueCheckable: false, dateField: false, userField: false }) === false, null);
+    check('F32 高级配置区整块守门：唯一性/日期/人员任一可用即渲染（原有行为不变）',
+      hasAnyAdvancedEntry({ fieldId: 'x', fieldType: FieldType.Text }, { uniqueCheckable: true, dateField: false, userField: false }) === true &&
+        hasAnyAdvancedEntry({ fieldId: 'y', fieldType: FieldType.DateTime }, { uniqueCheckable: false, dateField: true, userField: false }) === true &&
+        hasAnyAdvancedEntry({ fieldId: 'z', fieldType: FieldType.User }, { uniqueCheckable: false, dateField: false, userField: true }) === true, null);
+
+    // ---------- 3) 端到端真实渲染：类型缺失时必须渲染出引用选项下拉 ----------
+    // 纯函数对了不等于渲染对了（分流点写到 switch 之后就会失效），必须真渲染一次。
+    {
+      const React32 = (await import('react')).default;
+      const { renderToStaticMarkup } = await import('react-dom/server.browser');
+      const { FieldRenderer: FieldRenderer32 } = await import('../src/components/FormRenderer/FieldRenderer.tsx');
+
+      const render32 = (field, extra = {}) =>
+        renderToStaticMarkup(
+          React32.createElement(FieldRenderer32, {
+            field, tableId: 'tblMain32', value: undefined, onChange: () => {}, formValues: {}, ...extra,
+          })
+        );
+      const placeholder32 = (html) => {
+        const m = /semi-select-selection-placeholder[^>]*>([^<]*)</.exec(html);
+        return m ? m[1].trim() : '';
+      };
+
+      // ① 类型正常（对照）
+      const htmlTyped = render32({ fieldId: 'mod', fieldName: '模组名称', fieldType: FieldType.SingleSelect, visible: true, required: false, optionRef: ref32 });
+      check('F32 端到端：类型正常 → 渲染选择控件', /semi-select/.test(htmlTyped), { len: htmlTyped.length });
+      // 静态条件已成立（两个 static 条件都非空）→ 文案为「按上级选择联动加载」
+      check('F32 端到端：类型正常 + 条件成立 → 文案为「按上级选择联动加载」',
+        /点击展开（按上级选择联动加载），或输入关键字搜索/.test(placeholder32(htmlTyped)), placeholder32(htmlTyped));
+
+      // ② ★ 类型缺失（刷新后 hydrate 未补回）—— 修复前这里渲染的是普通文本框
+      const htmlLost = render32({ fieldId: 'mod', fieldName: '模组名称', fieldType: undefined, visible: true, required: false, optionRef: ref32 });
+      check('F32 ★ 端到端：类型缺失 → **仍然渲染选择控件**（条件选项不再消失）', /semi-select/.test(htmlLost), { len: htmlLost.length });
+      check('F32 ★ 端到端：类型缺失时不是普通文本框（核心回归：此前渲染成 Input → 「条件选项失效」）',
+        !/semi-input-textarea/.test(htmlLost), null);
+      check('F32 ★ 端到端：类型缺失 → 条件仍然生效（文案仍是「按上级选择联动加载」，而非丢失态的「加载全部选项」）',
+        /点击展开（按上级选择联动加载），或输入关键字搜索/.test(placeholder32(htmlLost)) &&
+          !/点击展开（加载全部选项），或输入关键字搜索/.test(placeholder32(htmlLost)), placeholder32(htmlLost));
+      // 与对照同源比较：两条输出必须一致（类型缺失不应改变任何可见行为）
+      check('F32 ★ 端到端：类型缺失与类型正常的可见输出一致（真正修复达成的等价性）',
+        htmlTyped === htmlLost, { typed: htmlTyped.length, lost: htmlLost.length });
+
+      // ②b 无条件的引用选项 → 文案为「加载全部选项」（证明上面那条的差异来自条件，不是文案写死）
+      const htmlNoCond = render32({
+        fieldId: 'mod', fieldName: '模组名称', fieldType: undefined, visible: true, required: false,
+        optionRef: { tableId: 'tblSrc32', fieldId: 'cityName', fieldType: FieldType.SingleSelect, conditions: [] },
+      });
+      check('F32 端到端：无条件的引用选项 → 文案为「加载全部选项」（区分出条件的可见差异）',
+        /点击展开（加载全部选项），或输入关键字搜索/.test(placeholder32(htmlNoCond)), placeholder32(htmlNoCond));
+
+      // ③ 条件中的父字段未填 → 明确提示「请先填写上级字段」（不是空白、不是加载全部）
+      const refField32 = {
+        fieldId: 'city', fieldName: '市', fieldType: FieldType.SingleSelect, visible: true, required: false,
+        optionRef: {
+          tableId: 'tblSrc32', fieldId: 'cityName', fieldType: FieldType.SingleSelect,
+          conditions: [{ sourceFieldId: 'prov', sourceFieldType: FieldType.SingleSelect, valueSource: 'field', formFieldId: 'prov' }],
+        },
+      };
+      const htmlPend = render32(refField32, { formValues: {} });
+      check('F32 端到端：联动条件父级未填 → 提示「请先填写上级字段」',
+        /请先填写上级字段/.test(placeholder32(htmlPend)), null);
+      const htmlPendLost = render32({ ...refField32, fieldType: undefined }, { formValues: {} });
+      check('F32 ★ 端到端：父级未填 + 类型缺失 → 仍提示「请先填写上级字段」（不再退化成文本框）',
+        /semi-select/.test(htmlPendLost) && /请先填写上级字段/.test(placeholder32(htmlPendLost)), null);
+
+      // ④ 多选引用：类型缺失时按单选渲染（保守，不错拆多值），类型已知时才是多选
+      const htmlMulti = render32({ fieldId: 'mod', fieldName: '模组名称', fieldType: FieldType.MultiSelect, visible: true, required: false, optionRef: ref32 });
+      check('F32 端到端：类型=多选 → 渲染多选引用控件', /semi-select/.test(htmlMulti) && /multiple|semi-select-multiple/.test(htmlMulti), null);
+      check('F32 端到端：类型缺失 → 按单选渲染（保守，不误当多选）',
+        /semi-select/.test(htmlLost) && !/semi-select-multiple/.test(htmlLost), null);
+
+      // ⑤ 零破坏：无 optionRef 的普通字段在类型缺失时行为不变（仍是文本框）
+      const htmlPlain = render32({ fieldId: 'note', fieldName: '备注', fieldType: undefined, visible: true, required: false });
+      check('F32 零破坏：无 optionRef + 类型缺失 → 仍是普通输入控件（未波及普通字段）',
+        !/semi-select/.test(htmlPlain), { len: htmlPlain.length });
+
+      // ⑥ 零破坏：formRef 优先级不被抢（两者都配 → 走 formRef）
+      const { buildFormScope: buildScope32 } = await import('../src/utils/formFieldRef.ts');
+      const sc32 = buildScope32('tblMain32', {}, { tblA32: [{ fA32: '值1' }] }, [], { mainFields: [], blockLabels: { tblA32: '区块A' } });
+      const htmlBoth32 = render32({
+        fieldId: 'x', fieldName: 'X', fieldType: FieldType.SingleSelect, visible: true, required: false,
+        optionRef: ref32, formRef: { sourceTableId: 'tblA32', sourceFieldId: 'fA32', sourceFieldType: FieldType.SingleSelect },
+      }, { formScope: sc32 });
+      check('F32 零破坏：两者都配 → formRef 优先（引用选项路径未被抢）',
+        /从上方已录入的值中选择/.test(htmlBoth32), null);
+      const htmlBothLost32 = render32({
+        fieldId: 'x', fieldName: 'X', fieldType: undefined, visible: true, required: false,
+        optionRef: ref32, formRef: { sourceTableId: 'tblA32', sourceFieldId: 'fA32', sourceFieldType: FieldType.SingleSelect },
+      }, { formScope: sc32 });
+      check('F32 ★ 零破坏：两者都配 + 类型缺失 → 仍 formRef 优先（优先级判定同样不依赖类型）',
+        /从上方已录入的值中选择/.test(htmlBothLost32), null);
+    }
+
+    // ---------- 4) 持久化往返：瘦身剥离 fieldType、optionRef 完整保留，hydrate 补回 ----------
+    {
+      const data32 = {
+        defaultFormId: 'f32',
+        forms: [{
+          id: 'f32', version: '1.0.0', formTitle: 'T', formDescription: '', themeColor: '#3370ff',
+          mainTable: {
+            tableId: 'tblMain32', tableName: '主表', sectionName: '主表信息',
+            fields: [{ fieldId: 'mod', fieldName: '模组名称', fieldType: FieldType.SingleSelect, visible: true, required: false, label: '模组名称', options: [], optionRef: ref32 }],
+          },
+          subTables: [], conditionalRules: [],
+        }],
+      };
+      const thin32 = JSON.parse(JSON.stringify(serializeConfig(data32)));
+      const thinMod32 = thin32.forms[0].mainTable.fields.find((f) => f.fieldId === 'mod');
+      check('F32 持久化：瘦身剥离 fieldType（体积优化，预期行为）', thinMod32.fieldType === undefined, { fieldType: thinMod32.fieldType });
+      check('F32 持久化：optionRef 完整保留（含全部条件，不因条件多而丢）',
+        JSON.stringify(thinMod32.optionRef?.conditions) === JSON.stringify(refConds32), thinMod32.optionRef);
+      check('F32 持久化：optionRef 的 tableId/fieldId 保留（渲染判定依赖它）',
+        thinMod32.optionRef?.tableId === 'tblSrc32' && thinMod32.optionRef?.fieldId === 'cityName', null);
+
+      // hydrate：meta 读得到 → 补回 fieldType；读不到 → 仍是 undefined（此时靠上面的兜底判定）
+      const metaBase32 = {
+        getTableById: async () => ({
+          getFieldMetaList: async () => [{ id: 'mod', name: '模组名称', type: FieldType.SingleSelect, property: { options: [] } }],
+        }),
+        getTableMetaList: async () => [{ id: 'tblMain32', name: '主表' }],
+      };
+      selectBaseForTest({ base: metaBase32 });
+      const hydro32 = await hydrateConfig(JSON.parse(JSON.stringify(thin32)));
+      const hMod32 = hydro32.forms[0].mainTable.fields.find((f) => f.fieldId === 'mod');
+      check('F32 hydrate：meta 可读 → 补回 fieldType', hMod32?.fieldType === FieldType.SingleSelect, { fieldType: hMod32?.fieldType });
+      check('F32 hydrate：optionRef 条件不丢（1/2/3 条件均完整）',
+        JSON.stringify(hMod32?.optionRef?.conditions) === JSON.stringify(refConds32), hMod32?.optionRef);
+      check('F32 hydrate 后仍判定为引用选项控件（端到端链路闭合）',
+        resolveRefSelectVariant(hMod32) === 'single', null);
+
+      // meta 读不到（抛错）→ fieldType 不补回，但兜底判定仍必须成立
+      const throwBase32 = {
+        getTableById: async () => ({ getFieldMetaList: async () => { throw new Error('permission denied'); } }),
+        getTableMetaList: async () => [{ id: 'tblMain32', name: '主表' }],
+      };
+      selectBaseForTest({ base: throwBase32 });
+      const hydroThrow32 = await hydrateConfig(JSON.parse(JSON.stringify(thin32)));
+      const hThrow32 = hydroThrow32.forms[0].mainTable.fields.find((f) => f.fieldId === 'mod');
+      check('F32 hydrate（meta 抛错）→ fieldType 未补回（复现脆弱点）', hThrow32?.fieldType === undefined, { fieldType: hThrow32?.fieldType });
+      check('F32 ★ hydrate（meta 抛错）→ 兜底判定仍给出引用选项控件（修复生效）',
+        resolveRefSelectVariant(hThrow32) === 'single', null);
+      check('F32 ★ hydrate（meta 抛错）→ 配置入口仍保留（用户不会以为配置丢了）',
+        canConfigOptionRef(hThrow32) === true, null);
+    }
+    selectBaseForTest(null);
+
+    // ---------- 5) 结构性保障：分流点必须在 switch 之前（正则只用于结构事实） ----------
+    // ★ 必须先剥离注释再断言：把真语句删掉、只留一句「已前移」的注释，正则照样匹配 → 假绿。
+    {
+      const fs32 = await import('node:fs');
+      const stripComments32 = (src) =>
+        src.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|\s)\/\/[^\n]*/g, '$1');
+      const read32 = (rel) => stripComments32(fs32.readFileSync(new URL(rel, import.meta.url), 'utf8'));
+
+      const fr32 = read32('../src/components/FormRenderer/FieldRenderer.tsx');
+      const idxVariant = fr32.indexOf('resolveRefSelectVariant(field)');
+      const idxSwitch = fr32.indexOf('switch (field.fieldType)');
+      const idxFormVariant = fr32.indexOf('resolveFormRefSelectVariant(field)');
+      check('F32 结构：引用选项分流调用 resolveRefSelectVariant（不是内联判 fieldType）',
+        idxVariant > -1, { idxVariant });
+      check('F32 ★ 结构：分流点在 `switch (field.fieldType)` **之前**（写到之后 = 永远走不到 default 兜底）',
+        idxVariant > -1 && idxSwitch > -1 && idxVariant < idxSwitch, { idxVariant, idxSwitch });
+      check('F32 ★ 结构：表单取值分流同样前移到 switch 之前（同根因同修法）',
+        idxFormVariant > -1 && idxFormVariant < idxSwitch, { idxFormVariant, idxSwitch });
+      // switch 内不再残留 formRef/optionRef 分支（否则前移分支成为死代码的重复实现，易漂移）
+      const switchBody32 = fr32.slice(idxSwitch);
+      check('F32 结构：switch 内不再重复实现 optionRef / formRef 分流（单一实现，防两处漂移）',
+        !/optionMode === 'optionRef'/.test(switchBody32) && !/optionMode === 'formRef'/.test(switchBody32), null);
+
+      const fcl32 = read32('../src/components/ConfigPanel/FieldConfigList.tsx');
+      check('F32 结构：配置入口统一走 configEntry 纯函数（不再用 isSelectField(f.fieldType) 当唯一判据）',
+        /canConfigOptionRef\(f\)/.test(fcl32) && !/isSelectField\(f\.fieldType\)/.test(fcl32), null);
+      check('F32 结构：高级配置区整块守门也走纯函数（否则类型缺失时整块消失）',
+        /canConfigOptionRef\(f\)[\s\S]{0,200}?canConfigFormRef\(f\)/.test(fcl32), null);
+      const ce32 = read32('../src/utils/configEntry.ts');
+      check('F32 结构：configEntry 的入口判定包含 hasOptionRef 兜底（类型缺失也能保留入口）',
+        /isSelectFieldType\(f\?\.fieldType\)\s*\|\|\s*hasOptionRef\(f\)/.test(ce32), null);
+      check('F32 结构：configEntry 的「表单取值」入口包含 hasFormRef 兜底',
+        /isSelectFieldType\(f\?\.fieldType\)\s*\|\|\s*hasFormRef\(f\)/.test(ce32), null);
+      const or32 = read32('../src/utils/optionRef.ts');
+      check('F32 结构：resolveRefSelectVariant 以 hasOptionRef 为前置守门',
+        /if \(!hasOptionRef\(field\)\) return null;/.test(or32), null);
+    }
+  }
+
   const failed = results.filter((r) => !r.pass);
   log(`\n=== ${results.length - failed.length}/${results.length} 通过 ===`);
   if (failed.length) process.exit(1);

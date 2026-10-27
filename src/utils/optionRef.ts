@@ -80,6 +80,34 @@ export function hasOptionRef(field: FieldConfig): boolean {
   return !!field.optionRef?.tableId && !!field.optionRef?.fieldId;
 }
 
+/** 引用选项控件的形态：单选 / 多选 / 不适用 */
+export type RefSelectVariant = 'single' | 'multiple' | null;
+
+/**
+ * ★ 判断某字段应以哪种「引用选项」控件渲染（单选 / 多选 / 不适用）。
+ *
+ * 为什么必须是独立纯函数：这是**一个 UI 类判定**，其正确性只能用「真实调用」来证明
+ * （源码正则断言证明不了运行时产出）。渲染层与配置面板共用它，测试可直接喂 FieldConfig 验证。
+ *
+ * ★ 关键（本项目真实缺陷的修复）：`fieldType` 是**运行时可重取的元数据**，持久化层会把它
+ *   剥离以控制体积（见 configSize.STRIP_FIELDS）。刷新后它依赖 `hydrateConfig` 从 base
+ *   元信息补回；一旦这一步拿不到（base 未绑定 / 字段读不到 / 权限或接口异常），
+ *   `fieldType` 即为 undefined。
+ *
+ *   旧行为：渲染层用 `switch (field.fieldType)` 分流 → 落进 `default:` → 渲染**普通文本框**。
+ *   于是「配置好的引用选项（含条件）」在界面上**静默消失**，用户看到的就是
+ *   「保存后生效、刷新后条件选项失效」。
+ *
+ *   正确行为：**只要 optionRef 配置完整（tableId + fieldId 都在），就一定渲染引用选项控件**
+ *   —— 因为配置端只允许单选/多选字段启用引用选项，所以「有 optionRef」本身
+ *   就足以断定它是选择类字段，不必依赖可能缺失的类型元信息。
+ *   多选仅在**明确是 MultiSelect** 时成立；类型未知时按单选渲染（更保守，不会错拆多值）。
+ */
+export function resolveRefSelectVariant(field: FieldConfig): RefSelectVariant {
+  if (!hasOptionRef(field)) return null;
+  return field.fieldType === FieldType.MultiSelect ? 'multiple' : 'single';
+}
+
 /**
  * 把一条引用条件解析为「服务端过滤条件」（供 fetch 条件取数使用）。
  * - valueSource=static：用固定值；

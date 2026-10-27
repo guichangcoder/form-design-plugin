@@ -6,6 +6,7 @@ import { FieldTypeIcon } from '../../utils/fieldTypeIcons';
 import { describeOffset } from '../../utils/dateCalc';
 import { Button, Input, Switch, Typography } from '@douyinfe/semi-ui';
 import { IconSearch, IconLink, IconCalendar, IconLayers } from '@douyinfe/semi-icons';
+import { canConfigFormRef, canConfigOptionRef } from '../../utils/configEntry';
 import { OptionRefEditor } from './OptionRefEditor';
 import { DateAutoFillEditor } from './DateAutoFillEditor';
 import { FormRefEditor, RefBlockOption } from './FormRefEditor';
@@ -25,11 +26,11 @@ interface Props {
   otherBlocks?: RefBlockOption[];
 }
 
-/** 可配置「引用选项」的字段类型（单选/多选） */
-function isSelectField(t: FieldType): boolean {
-  return t === FieldType.SingleSelect || t === FieldType.MultiSelect;
-}
-
+/**
+ * 高级配置区入口判定（isSelectField / canConfigOptionRef / canConfigFormRef）
+ * 已抽到 `src/utils/configEntry.ts` —— 纯函数，回归测试可真实调用，
+ * 避免「只靠源码正则证明字样存在、证明不了运行时产出」的假绿。
+ */
 /** 可配置「唯一性校验」的字段类型（可转文本比较的单值字段） */
 function canUniqueCheck(t: FieldType): boolean {
   return UNIQUE_CHECKABLE_TYPES.includes(t);
@@ -190,7 +191,7 @@ export function FieldConfigList({ fields, onChange, currentTableId, otherBlocks 
               </label>
             </div>
             {/* 第三行：字段级高级配置 —— 唯一性校验 / 日期联动 / 引用选项 */}
-            {(canUniqueCheck(f.fieldType) || isDateField(f.fieldType) || isSelectField(f.fieldType) || isUserField(f.fieldType)) && (
+            {(canUniqueCheck(f.fieldType) || isDateField(f.fieldType) || canConfigOptionRef(f) || canConfigFormRef(f) || isUserField(f.fieldType)) && (
               <div className="cfg-field-optionref">
                 {canUniqueCheck(f.fieldType) && (
                   <label
@@ -221,7 +222,7 @@ export function FieldConfigList({ fields, onChange, currentTableId, otherBlocks 
                       : '联动预填…'}
                   </Button>
                 )}
-                {isSelectField(f.fieldType) && (
+                {canConfigOptionRef(f) && (
                   <Button
                     size="small"
                     theme="borderless"
@@ -231,11 +232,11 @@ export function FieldConfigList({ fields, onChange, currentTableId, otherBlocks 
                     title="选项来自源数据表的历史记录（读服务端，需源表查看权限）"
                   >
                     {f.optionRef
-                      ? `已启用引用选项${f.optionRef.conditions.length ? `（${f.optionRef.conditions.length} 个条件）` : ''}`
+                      ? `已启用引用选项${(f.optionRef.conditions ?? []).length ? `（${(f.optionRef.conditions ?? []).length} 个条件）` : ''}`
                       : '引用选项…'}
                   </Button>
                 )}
-                {isSelectField(f.fieldType) && formRefAvailable && (
+                {canConfigFormRef(f) && formRefAvailable && (
                   <Button
                     size="small"
                     theme="borderless"

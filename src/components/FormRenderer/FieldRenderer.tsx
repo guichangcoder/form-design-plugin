@@ -20,8 +20,8 @@ import { LinkSelector } from './LinkSelector';
 import { RefOptionSelect } from './RefOptionSelect';
 import { FormRefSelect } from './FormRefSelect';
 import { fuzzyOptionFilter } from './fuzzyOptionFilter';
-import { hasOptionRef } from '../../utils/optionRef';
-import { FormScope, resolveOptionMode } from '../../utils/formFieldRef';
+import { hasOptionRef, resolveRefSelectVariant } from '../../utils/optionRef';
+import { FormScope, resolveFormRefSelectVariant, resolveOptionMode } from '../../utils/formFieldRef';
 import { FormValues } from '../../types';
 
 interface Props {
@@ -199,6 +199,52 @@ export function FieldRenderer({
   }
 
   const control = ((): React.ReactNode => {
+    /**
+     * ★ 引用选项必须在 `switch (field.fieldType)` **之前**分流。
+     *
+     * `fieldType` 是运行时可重取的元数据，持久化层会剥离它（configSize.STRIP_FIELDS），
+     * 刷新后依赖 hydrate 从 base 元信息补回；一旦补不回来（base 未绑定 / 字段读不到 /
+     * 接口异常），它会是 undefined → 旧代码落进 switch 的 `default:` 分支 →
+     * 渲染成**普通文本框**，于是「已配置的引用选项（含条件）」在界面上静默消失，
+     * 表现为用户报的「保存后生效、刷新后条件选项失效」。
+     *
+     * 判定交给纯函数 resolveRefSelectVariant：有完整 optionRef 即为选择类字段，
+     * 不依赖可能缺失的 fieldType（多选仅在明确是 MultiSelect 时成立）。
+     */
+    const refVariant = resolveRefSelectVariant(field);
+    if (optionMode === 'optionRef' && refVariant) {
+      return (
+        <RefOptionSelect
+          field={field}
+          value={value}
+          onChange={onChange}
+          disabled={disabled}
+          multiple={refVariant === 'multiple'}
+          formValues={formValues ?? {}}
+          preview={preview}
+        />
+      );
+    }
+
+    /**
+     * ★ 表单取值同 optionRef：也必须分流在 `switch (field.fieldType)` **之前**。
+     * 同一根因（fieldType 被瘦身剥离、hydrate 补不回 → undefined），
+     * 旧行为下两个 `case` 都进不去 → default → 普通文本框，静默丢失已配置的取值控件。
+     */
+    const formVariant = resolveFormRefSelectVariant(field);
+    if (optionMode === 'formRef' && formVariant) {
+      return (
+        <FormRefSelect
+          field={field}
+          value={value}
+          onChange={onChange}
+          disabled={disabled}
+          multiple={formVariant === 'multiple'}
+          scope={formScope ?? null}
+        />
+      );
+    }
+
     switch (field.fieldType) {
       case FieldType.Text:
         // 横向表格模式：压成单行输入（TextArea 两行会把表格行撑高、行高不齐）
@@ -254,31 +300,8 @@ export function FieldRenderer({
       );
 
     case FieldType.SingleSelect:
-      // ① 配置了「表单内跨区块取值」：选项来自本表单其他区块已录入的值（纯本地、零请求）
-      if (optionMode === 'formRef') {
-        return (
-          <FormRefSelect
-            field={field}
-            value={value}
-            onChange={onChange}
-            disabled={disabled}
-            scope={formScope ?? null}
-          />
-        );
-      }
-      // ② 配置了引用选项：选项从源表动态取（支持条件过滤与省-市级联）
-      if (optionMode === 'optionRef') {
-        return (
-          <RefOptionSelect
-            field={field}
-            value={value}
-            onChange={onChange}
-            disabled={disabled}
-            formValues={formValues ?? {}}
-            preview={preview}
-          />
-        );
-      }
+      // formRef / optionRef 已在上方（switch 之前）统一分流，不依赖可能缺失的 fieldType。
+      // 走到这里说明既未配 formRef 也未配 optionRef → 固定选项。
       return (
         <Select
           style={fullWidth}
@@ -293,31 +316,7 @@ export function FieldRenderer({
       );
 
     case FieldType.MultiSelect:
-      if (optionMode === 'formRef') {
-        return (
-          <FormRefSelect
-            field={field}
-            value={value}
-            onChange={onChange}
-            disabled={disabled}
-            multiple
-            scope={formScope ?? null}
-          />
-        );
-      }
-      if (optionMode === 'optionRef') {
-        return (
-          <RefOptionSelect
-            field={field}
-            value={value}
-            onChange={onChange}
-            disabled={disabled}
-            multiple
-            formValues={formValues ?? {}}
-            preview={preview}
-          />
-        );
-      }
+      // formRef / optionRef 已在 switch 之前统一分流（见上）；此处只剩固定选项。
       return (
         <Select
           style={fullWidth}
