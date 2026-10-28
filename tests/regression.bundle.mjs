@@ -153062,22 +153062,33 @@ init_appContext();
 var PAGE_SIZE = 200;
 var MAX_RECORDS = 2e5;
 var cache = /* @__PURE__ */ new Map();
+var cacheAt = /* @__PURE__ */ new Map();
+var FULL_CACHE_TTL_MS = 6e4;
+function __setFullCacheTtlForTest(ms2) {
+  FULL_CACHE_TTL_MS = ms2;
+}
 var filterCache = /* @__PURE__ */ new Map();
 var FILTER_CACHE_MAX = 500;
+var FILTER_HIT_TTL_MS = 3e4;
 var cacheKey = (tableId, fieldId) => `${tableId}::${fieldId}`;
 var filterCacheKey = (tableId, fieldId, n11) => `${tableId}::${fieldId}::${n11}`;
 function invalidateExistingCache(tableId, fieldId) {
   filterCache.clear();
   if (!tableId) {
     cache.clear();
+    cacheAt.clear();
     return;
   }
   if (fieldId) {
     cache.delete(cacheKey(tableId, fieldId));
+    cacheAt.delete(cacheKey(tableId, fieldId));
     return;
   }
   for (const k12 of [...cache.keys()]) {
-    if (k12.startsWith(`${tableId}::`)) cache.delete(k12);
+    if (k12.startsWith(`${tableId}::`)) {
+      cache.delete(k12);
+      cacheAt.delete(k12);
+    }
   }
 }
 function noteSubmittedValues(tableId, fieldId, raws) {
@@ -153200,7 +153211,12 @@ function loadAllExistingValues(tableId, fieldId, label, opts) {
   const key2 = cacheKey(tableId, fieldId);
   if (!opts?.force) {
     const hit = cache.get(key2);
-    if (hit) return hit;
+    if (hit) {
+      const at2 = cacheAt.get(key2) ?? 0;
+      if (Date.now() - at2 < FULL_CACHE_TTL_MS) return hit;
+      cache.delete(key2);
+      cacheAt.delete(key2);
+    }
   }
   const p11 = (async () => {
     const values = /* @__PURE__ */ new Set();
@@ -153285,6 +153301,7 @@ function loadAllExistingValues(tableId, fieldId, label, opts) {
     }
   })();
   cache.set(key2, p11);
+  cacheAt.set(key2, Date.now());
   return p11;
 }
 async function isDuplicate(tableId, fieldId, raw, fieldType) {
@@ -153292,14 +153309,17 @@ async function isDuplicate(tableId, fieldId, raw, fieldType) {
   if (!n11) return { dup: false };
   if (supportsFilter(fieldType)) {
     const fk2 = filterCacheKey(tableId, fieldId, n11);
-    let fp2 = filterCache.get(fk2);
-    if (!fp2) {
-      fp2 = filterFindDup(tableId, fieldId, n11, raw, fieldType);
-      if (filterCache.size >= FILTER_CACHE_MAX) filterCache.clear();
-      filterCache.set(fk2, fp2);
+    const cachedHit = filterCache.get(fk2);
+    if (cachedHit && Date.now() - cachedHit.at < FILTER_HIT_TTL_MS) {
+      return { dup: true };
     }
-    const r10 = await fp2.catch(() => void 0);
-    if (r10 === true) return { dup: true };
+    if (cachedHit) filterCache.delete(fk2);
+    const r10 = await filterFindDup(tableId, fieldId, n11, raw, fieldType).catch(() => void 0);
+    if (r10 === true) {
+      if (filterCache.size >= FILTER_CACHE_MAX) filterCache.clear();
+      filterCache.set(fk2, { hit: true, at: Date.now() });
+      return { dup: true };
+    }
     if (r10 === false) return { dup: false };
   }
   let set3 = await loadAllExistingValues(tableId, fieldId);
@@ -154153,8 +154173,96 @@ async function run() {
     const c32 = await checkOneValue(MAIN, "fldM1", "BRAND-NEW", void 0, j5.Text);
     check("F16 \u65B0\u503C\u63D0\u793A\u53EF\u7528", c32.status === "ok" && c32.message === "\u53EF\u7528", c32);
     const before = filterCalls;
-    await checkOneValue(MAIN, "fldM1", "BRAND-NEW", void 0, j5.Text);
-    check("F16 \u540C\u4E00\u503C\u590D\u7528\u8FC7\u6EE4\u7ED3\u679C\u7F13\u5B58\uFF0C\u4E0D\u91CD\u590D\u8BF7\u6C42", filterCalls === before, filterCalls);
+    const cFresh = await checkOneValue(MAIN, "fldM1", "BRAND-NEW", void 0, j5.Text);
+    check(
+      "F16 \u2605 \u5E76\u53D1\u5B89\u5168\uFF1A\u300C\u4E0D\u91CD\u590D\u300D\u7ED3\u8BBA\u4E0D\u7F13\u5B58\uFF0C\u6BCF\u6B21\u90FD\u5B9E\u65F6\u95EE\u670D\u52A1\u7AEF",
+      filterCalls === before + 1 && cFresh.status === "ok",
+      { before, after: filterCalls }
+    );
+    const beforeHit = filterCalls;
+    const cDup2 = await checkOneValue(MAIN, "fldM1", "\u5DF2\u5B58\u5728B", void 0, j5.Text);
+    check(
+      "F16 \u300C\u91CD\u590D\u300D\u7ED3\u8BBA\u590D\u7528\u7F13\u5B58\uFF08\u7A33\u5B9A\u4E8B\u5B9E\uFF0C\u53EF\u7701\u4E00\u6B21\u8BF7\u6C42\uFF09",
+      cDup2.status === "dup" && filterCalls === beforeHit,
+      { beforeHit, after: filterCalls }
+    );
+    {
+      invalidateExistingCache();
+      const serverVals = /* @__PURE__ */ new Set(["\u5DF2\u6709\u503CA"]);
+      const dynCalls = { filter: 0, read: 0 };
+      const dynBase = {
+        getTableById: async () => ({
+          getField: async () => ({
+            getFieldValueListByPage: async () => {
+              dynCalls.read += 1;
+              return { fieldValues: [...serverVals].map((v11, i3) => ({ recordId: `r${i3}`, value: v11 })), hasMore: false };
+            }
+          }),
+          getRecords: async (params = {}) => {
+            dynCalls.filter += 1;
+            const c11 = (params.filter?.conditions ?? [])[0];
+            const target = String(c11?.value ?? "").trim().toLowerCase();
+            const hit = [...serverVals].filter((v11) => v11.toLowerCase() === target);
+            return { records: hit.map((v11, i3) => ({ recordId: `r${i3}`, fields: { [c11.fieldId]: v11 } })), hasMore: false };
+          }
+        }),
+        getTableMetaList: async () => [{ id: MAIN, name: "\u4E3B\u8868" }]
+      };
+      __setAppForTest({ base: dynBase });
+      const pre = await checkOneValue(MAIN, "fldM1", "\u5E76\u53D1\u65B0\u503CZ", void 0, j5.Text);
+      check("F16 \u5E76\u53D1\uFF1A\u8868\u7A7A\u65F6\u67E5\u300C\u5E76\u53D1\u65B0\u503CZ\u300D\u2192 \u53EF\u7528\uFF08\u7B2C\u4E00\u6B21\uFF0C\u6B63\u786E\uFF09", pre.status === "ok", pre);
+      serverVals.add("\u5E76\u53D1\u65B0\u503CZ");
+      const post = await checkOneValue(MAIN, "fldM1", "\u5E76\u53D1\u65B0\u503CZ", void 0, j5.Text);
+      check(
+        "F16 \u2605 \u5E76\u53D1\uFF1A\u522B\u4EBA\u521A\u5199\u5165\u540E\uFF0C\u672C\u8FDB\u7A0B\u518D\u67E5 \u2192 \u5FC5\u987B\u5224\u91CD\u590D\uFF08\u4FEE\u590D\u524D\u5224\u300C\u53EF\u7528\u300D\u2192 \u91CD\u590D\u6570\u636E\uFF09",
+        post.status === "dup",
+        post
+      );
+      const first1 = await checkOneValue(MAIN, "fldM1", "\u5DF2\u6709\u503CA", void 0, j5.Text);
+      const afterFirst = dynCalls.filter;
+      const second1 = await checkOneValue(MAIN, "fldM1", "\u5DF2\u6709\u503CA", void 0, j5.Text);
+      check(
+        "F16 \u5E76\u53D1\uFF1A\u300C\u91CD\u590D\u300D\u7ED3\u8BBA\u53EF\u7F13\u5B58\u590D\u7528\uFF08\u7A33\u5B9A\u4E8B\u5B9E\uFF0C\u7B2C\u4E8C\u6B21\u4E0D\u518D\u8BF7\u6C42\u670D\u52A1\u7AEF\uFF09",
+        first1.status === "dup" && second1.status === "dup" && dynCalls.filter === afterFirst,
+        { afterFirst, now: dynCalls.filter }
+      );
+      {
+        __setFullCacheTtlForTest(30);
+        const ttBase = {
+          getTableById: async () => ({
+            getField: async () => ({
+              getFieldValueListByPage: async () => ({
+                fieldValues: [...serverVals].map((v11, i3) => ({ recordId: `r${i3}`, value: v11 })),
+                hasMore: false
+              })
+            }),
+            // 不支持 filter → isDuplicate 会走全量兜底
+            getRecords: async () => ({ records: [], hasMore: false })
+          }),
+          getTableMetaList: async () => [{ id: MAIN, name: "\u4E3B\u8868" }]
+        };
+        invalidateExistingCache();
+        __setAppForTest({ base: ttBase });
+        const s1 = await loadAllExistingValues(MAIN, "fldM1", "\u5408\u540C\u53F7");
+        check("F16 TTL\uFF1A\u9996\u6B21\u5168\u91CF\u62C9\u53D6\u547D\u4E2D\u5DF2\u6709\u503C\uFF08\u5F52\u4E00\u5316\u540E\u4E3A\u5C0F\u5199\uFF09", s1.ok && s1.values.has("\u5DF2\u6709\u503Ca"), { size: s1.values.size });
+        serverVals.add("\u522B\u4EBA\u65B0\u5199\u5165Q");
+        const s22 = await loadAllExistingValues(MAIN, "fldM1", "\u5408\u540C\u53F7");
+        check(
+          "F16 TTL\uFF1A\u672A\u8FC7\u671F\u65F6\u590D\u7528\u7F13\u5B58\u5FEB\u7167\uFF08\u770B\u4E0D\u5230\u521A\u5199\u5165\u7684\u65B0\u503C\uFF0C\u5C5E\u9884\u671F\uFF09",
+          !s22.values.has("\u522B\u4EBA\u65B0\u5199\u5165q"),
+          { size: s22.values.size }
+        );
+        await new Promise((r10) => setTimeout(r10, 40));
+        const s32 = await loadAllExistingValues(MAIN, "fldM1", "\u5408\u540C\u53F7");
+        check(
+          "F16 \u2605 TTL\uFF1A\u8FC7\u671F\u540E\u91CD\u65B0\u62C9\u53D6\uFF0C\u80FD\u770B\u5230\u522B\u4EBA\u65B0\u5199\u5165\u7684\u503C\uFF08\u53BB\u6389 TTL \u4F1A\u957F\u671F\u6F0F\u5224 \u2192 \u91CD\u590D\u6570\u636E\uFF09",
+          s32.values.has("\u522B\u4EBA\u65B0\u5199\u5165q"),
+          { size: s32.values.size }
+        );
+        __setFullCacheTtlForTest(6e4);
+        invalidateExistingCache();
+      }
+    }
     invalidateExistingCache();
     __setAppForTest({ base: makeDupBase({ supportFilter: false }) });
     readCalls = 0;

@@ -38,6 +38,7 @@ import {
   loadAllExistingValues,
   normalizeForCompare,
   invalidateExistingCache,
+  __setFullCacheTtlForTest,
   noteSubmittedValues,
 } from '../src/services/uniqueCheck';
 import { classifySdkError } from '../src/utils/permError';
@@ -843,9 +844,111 @@ async function run() {
     const c3 = await checkOneValue(MAIN, 'fldM1', 'BRAND-NEW', undefined, FieldType.Text);
     check('F16 新值提示可用', c3.status === 'ok' && c3.message === '可用', c3);
 
+    // ★ 语义变更（并发修复）：「不重复」结论**不再缓存**。
+    //   本插件跑在每个用户自己的浏览器里，看不到别的用户刚写入的记录；
+    //   缓存「不重复」会让并发场景长期误放行 → 重复数据。
+    //   「重复」结论可以缓存（且带 TTL），因为它是稳定事实。
     const before = filterCalls;
-    await checkOneValue(MAIN, 'fldM1', 'BRAND-NEW', undefined, FieldType.Text);
-    check('F16 同一值复用过滤结果缓存，不重复请求', filterCalls === before, filterCalls);
+    const cFresh = await checkOneValue(MAIN, 'fldM1', 'BRAND-NEW', undefined, FieldType.Text);
+    check('F16 ★ 并发安全：「不重复」结论不缓存，每次都实时问服务端',
+      filterCalls === before + 1 && cFresh.status === 'ok', { before, after: filterCalls });
+    const beforeHit = filterCalls;
+    const cDup2 = await checkOneValue(MAIN, 'fldM1', '已存在B', undefined, FieldType.Text);
+    check('F16 「重复」结论复用缓存（稳定事实，可省一次请求）',
+      cDup2.status === 'dup' && filterCalls === beforeHit, { beforeHit, after: filterCalls });
+
+    /**
+     * ★ 并发回归（本轮核心）：别人刚写入的值，本进程稍后再查必须判重复。
+     *
+     * 这是多人同时录入时的真实缺陷：
+     *   ① 表空时查 001 → 判「可用」（正确）；
+     *   ② 另一位用户提交了 001（本进程看不到任何通知）；
+     *   ③ 本进程再查 001 → **必须判重复**。
+     * 修复前：②→③ 命中「不重复」缓存，仍判可用 → 直接产生重复数据。
+     */
+    {
+      invalidateExistingCache();
+      // 可变的「服务端」数据：支持模拟「另一位用户刚刚写入」
+      const serverVals = new Set(['已有值A']);
+      const dynCalls = { filter: 0, read: 0 };
+      const dynBase = {
+        getTableById: async () => ({
+          getField: async () => ({
+            getFieldValueListByPage: async () => {
+              dynCalls.read += 1;
+              return { fieldValues: [...serverVals].map((v, i) => ({ recordId: `r${i}`, value: v })), hasMore: false };
+            },
+          }),
+          getRecords: async (params = {}) => {
+            dynCalls.filter += 1;
+            const c = (params.filter?.conditions ?? [])[0];
+            const target = String(c?.value ?? '').trim().toLowerCase();
+            const hit = [...serverVals].filter((v) => v.toLowerCase() === target);
+            return { records: hit.map((v, i) => ({ recordId: `r${i}`, fields: { [c.fieldId]: v } })), hasMore: false };
+          },
+        }),
+        getTableMetaList: async () => [{ id: MAIN, name: '主表' }],
+      };
+      selectBaseForTest({ base: dynBase });
+
+      const pre = await checkOneValue(MAIN, 'fldM1', '并发新值Z', undefined, FieldType.Text);
+      check('F16 并发：表空时查「并发新值Z」→ 可用（第一次，正确）', pre.status === 'ok', pre);
+
+      // 模拟另一位用户在自己的浏览器里提交成功（本进程收不到任何通知）
+      serverVals.add('并发新值Z');
+
+      const post = await checkOneValue(MAIN, 'fldM1', '并发新值Z', undefined, FieldType.Text);
+      check('F16 ★ 并发：别人刚写入后，本进程再查 → 必须判重复（修复前判「可用」→ 重复数据）',
+        post.status === 'dup', post);
+
+      // 反向：真重复的结论可缓存（省请求），且不会因为缓存而对新值误判
+      const first1 = await checkOneValue(MAIN, 'fldM1', '已有值A', undefined, FieldType.Text);
+      const afterFirst = dynCalls.filter;
+      const second1 = await checkOneValue(MAIN, 'fldM1', '已有值A', undefined, FieldType.Text);
+      check('F16 并发：「重复」结论可缓存复用（稳定事实，第二次不再请求服务端）',
+        first1.status === 'dup' && second1.status === 'dup' && dynCalls.filter === afterFirst,
+        { afterFirst, now: dynCalls.filter });
+
+      /**
+       * 全量缓存 TTL（真实调用，不靠断言源码里有 'TTL' 字样）。
+       * 场景：过滤不可用（旧宿主/大表 skip）→ 走全量集合；别人随后写入，
+       * 缓存过期后必须重新拉取并识别到新值，否则会长期漏判。
+       */
+      {
+        __setFullCacheTtlForTest(30);
+        const ttBase = {
+          getTableById: async () => ({
+            getField: async () => ({
+              getFieldValueListByPage: async () => ({
+                fieldValues: [...serverVals].map((v, i) => ({ recordId: `r${i}`, value: v })),
+                hasMore: false,
+              }),
+            }),
+            // 不支持 filter → isDuplicate 会走全量兜底
+            getRecords: async () => ({ records: [], hasMore: false }),
+          }),
+          getTableMetaList: async () => [{ id: MAIN, name: '主表' }],
+        };
+        invalidateExistingCache();
+        selectBaseForTest({ base: ttBase });
+
+        const s1 = await loadAllExistingValues(MAIN, 'fldM1', '合同号');
+        check('F16 TTL：首次全量拉取命中已有值（归一化后为小写）', s1.ok && s1.values.has('已有值a'), { size: s1.values.size });
+
+        serverVals.add('别人新写入Q');
+        // 未过期 → 仍用缓存快照（看不到新值，这是缓存的正常代价）
+        const s2 = await loadAllExistingValues(MAIN, 'fldM1', '合同号');
+        check('F16 TTL：未过期时复用缓存快照（看不到刚写入的新值，属预期）',
+          !s2.values.has('别人新写入q'), { size: s2.values.size });
+
+        await new Promise((r) => setTimeout(r, 40)); // 越过 30ms TTL
+        const s3 = await loadAllExistingValues(MAIN, 'fldM1', '合同号');
+        check('F16 ★ TTL：过期后重新拉取，能看到别人新写入的值（去掉 TTL 会长期漏判 → 重复数据）',
+          s3.values.has('别人新写入q'), { size: s3.values.size });
+        __setFullCacheTtlForTest(60_000);
+        invalidateExistingCache();
+      }
+    }
 
     // ★ 关键回归：过滤不可用（旧宿主 / 返回无关记录）→ 必须回退整列分页全量，且真的翻满 2 页
     invalidateExistingCache();

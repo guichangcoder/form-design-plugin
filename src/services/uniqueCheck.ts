@@ -17,7 +17,16 @@
  *
  * 比较规则：转文本 → 去首尾空格 → 不区分大小写。
  *
- * 已知边界：并发提交仍存在极小概率重复（飞书无事务锁，插件层无法杜绝）。
+ * 并发边界（多人同时录入，必须读）：
+ * 1. 本模块所有缓存都是**进程内**的 —— 插件跑在每个用户自己的浏览器里，
+ *    缓存只属于当前用户，看不到别的用户写了什么，也收不到跨用户变更通知。
+ *    所以：「重复=true」可以短期缓存（重复是稳定事实）；「不重复=false」**绝不能缓存**
+ *    （别人随时可能写入，缓存它会让本进程长期误放行 → 重复数据）。
+ * 2. 残余窗口：`checkDuplicates`（查重）与 `addRecord`（写入）之间没有任何锁，
+ *    两个人若在几毫秒内提交同一个值，都可能通过查重。飞书 Bitable 未提供事务/悲观锁，
+ *    插件层只能缩小窗口、**无法彻底消除**。
+ * 3. 根治手段在平台侧：对该字段开启飞书原生「字段校验 → 唯一值」，
+ *    由服务端强校验（重复时返回 1252012），才能真正确保唯一。
  */
 import { FieldType } from '@lark-base-open/js-sdk';
 import {
@@ -81,9 +90,42 @@ export interface SingleCheckResult {
 
 /** 模块级缓存：同一「表+字段」只全量拉一次 */
 const cache = new Map<string, Promise<ExistingSet>>();
-/** 服务端过滤判定结果缓存（同一值不重复请求） */
-const filterCache = new Map<string, Promise<boolean | undefined>>();
+/**
+ * 全量集合缓存的写入时间，用于 TTL 判定。
+ *
+ * 并发场景（多人同时录入）：全量集合是本进程拉的一份**快照**，
+ * 看不到别人之后写入的记录。永不过期会让「别人刚提交的值」长期被判可用 → 重复数据。
+ * 因此给它一个较短的保鲜期，过期后重新拉。
+ */
+const cacheAt = new Map<string, number>();
+/**
+ * 全量集合缓存的保鲜期（毫秒）。
+ * 用可变变量而非 const，是为了让测试能把它改小以真实验证 TTL 行为
+ * （否则只能靠「断言源码里有 TTL」这种证明不了运行时行为的弱断言）。
+ */
+export let FULL_CACHE_TTL_MS = 60_000;
+/** 仅供测试：临时设定 TTL */
+export function __setFullCacheTtlForTest(ms: number): void {
+  FULL_CACHE_TTL_MS = ms;
+}
+/**
+ * 服务端过滤判定结果缓存（同一值不重复请求）。
+ *
+ * ⚠️ 只能缓存「重复=true」的肯定结果，不能缓存「不重复=false」。
+ *
+ * 原因（多人并发场景的真实缺陷）：本插件跑在每个用户自己的浏览器进程里，
+ * 这个缓存**只属于当前用户**，看不到别的用户刚提交的记录。
+ * 缓存「不重复」会让 A 用户查过的值在 B 用户提交后仍然判「可用」——
+ * 而 A 自己的进程里永远收不到 B 的写入通知，缓存也就永远不会失效。
+ * 实测复现：① 空表查 001 → 可用；② 表里落了 001 后同进程再查 → 仍「可用」（错）；
+ *          ③ 清缓存后 → 「已存在」（对）。
+ * 因此这里只保留「确实重复」的短期结论（重复是稳定事实，不会因为别人写入而变假），
+ * 「不重复」每次实时问服务端（一次带 filter 的轻量请求）。
+ */
+const filterCache = new Map<string, { hit: true; at: number }>();
 const FILTER_CACHE_MAX = 500;
+/** 「重复」结论的最长保留时间（毫秒）：跨用户删除记录后也要能自愈 */
+const FILTER_HIT_TTL_MS = 30_000;
 
 const cacheKey = (tableId: string, fieldId: string) => `${tableId}::${fieldId}`;
 const filterCacheKey = (tableId: string, fieldId: string, n: string) =>
@@ -94,20 +136,28 @@ export function invalidateExistingCache(tableId?: string, fieldId?: string): voi
   filterCache.clear();
   if (!tableId) {
     cache.clear();
+    cacheAt.clear();
     return;
   }
   if (fieldId) {
     cache.delete(cacheKey(tableId, fieldId));
+    cacheAt.delete(cacheKey(tableId, fieldId));
     return;
   }
   for (const k of [...cache.keys()]) {
-    if (k.startsWith(`${tableId}::`)) cache.delete(k);
+    if (k.startsWith(`${tableId}::`)) {
+      cache.delete(k);
+      cacheAt.delete(k);
+    }
   }
 }
 
 /**
- * 提交成功后：① 清掉过滤判定缓存；② 把新写入的值并入全量集合。
- * 否则刚提交过的值会被判为「可用」。
+ * 提交成功后：清掉该字段的过滤判定缓存。
+ *
+ * 注意：**不能**依赖它来感知别人的写入 —— 本进程只知道自己提交了什么。
+ * 别人的写入靠「不缓存『不重复』结论」保证：每次提交都把值实时发到服务端问一次，
+ * 从而看到别人在此期间写入的数据（缩小窗口，但无法彻底消除 —— 见文件头部「已知边界」）。
  */
 export function noteSubmittedValues(tableId: string, fieldId: string, raws: unknown[]): void {
   for (const k of [...filterCache.keys()]) {
@@ -292,7 +342,13 @@ export function loadAllExistingValues(
   const key = cacheKey(tableId, fieldId);
   if (!opts?.force) {
     const hit = cache.get(key);
-    if (hit) return hit;
+    if (hit) {
+      const at = cacheAt.get(key) ?? 0;
+      // ★ TTL：过期即重新拉，避免跨用户写入被长期漏判
+      if (Date.now() - at < FULL_CACHE_TTL_MS) return hit;
+      cache.delete(key);
+      cacheAt.delete(key);
+    }
   }
 
   const p = (async (): Promise<ExistingSet> => {
@@ -389,12 +445,17 @@ export function loadAllExistingValues(
   })();
 
   cache.set(key, p);
+  cacheAt.set(key, Date.now());
   return p;
 }
 
 /**
  * 判定单个值是否与已有数据重复。
  * 先走服务端过滤（准确、与表大小无关）；过滤不可用再回退全量集合。
+ *
+ * 并发正确性：**「不重复」绝不缓存**（见 filterCache 注释）。
+ * 「不重复」只是「此刻服务端看不到」，别人随时可能写入；
+ * 本进程收不到跨用户变更通知，缓存它就会长期误放行 → 重复数据。
  */
 async function isDuplicate(
   tableId: string,
@@ -407,15 +468,21 @@ async function isDuplicate(
 
   if (supportsFilter(fieldType)) {
     const fk = filterCacheKey(tableId, fieldId, n);
-    let fp = filterCache.get(fk);
-    if (!fp) {
-      fp = filterFindDup(tableId, fieldId, n, raw, fieldType);
-      if (filterCache.size >= FILTER_CACHE_MAX) filterCache.clear();
-      filterCache.set(fk, fp);
+    // ① 只复用「确实重复」的结论，且有 TTL（别人删除记录后可自愈）
+    const cachedHit = filterCache.get(fk);
+    if (cachedHit && Date.now() - cachedHit.at < FILTER_HIT_TTL_MS) {
+      return { dup: true };
     }
-    const r = await fp.catch(() => undefined);
-    if (r === true) return { dup: true };
-    if (r === false) return { dup: false };
+    if (cachedHit) filterCache.delete(fk);
+
+    // ② 「是否重复」每次都实时问服务端（一次带 filter 的轻量请求）
+    const r = await filterFindDup(tableId, fieldId, n, raw, fieldType).catch(() => undefined);
+    if (r === true) {
+      if (filterCache.size >= FILTER_CACHE_MAX) filterCache.clear();
+      filterCache.set(fk, { hit: true, at: Date.now() });
+      return { dup: true };
+    }
+    if (r === false) return { dup: false }; // ★ 刻意不缓存
     // undefined → 过滤不可用，继续走全量
   }
 
