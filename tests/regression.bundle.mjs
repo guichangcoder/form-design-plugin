@@ -152245,11 +152245,9 @@ init_appContext();
 // src/utils/writeRetry.ts
 var RETRYABLE_CODES = [
   1254291,
-  // Write conflict
+  // Write conflict：同表并发写被拒，请求确定未处理
   1254607,
-  // Data not ready
-  1255040,
-  // 请求超时
+  // Data not ready：前置操作未完成，请求确定未处理
   1255001,
   // InternalError
   1255002,
@@ -152261,12 +152259,20 @@ var RETRYABLE_CODES = [
   1255005
   // ConvError
 ];
+var AMBIGUOUS_CODES = [
+  1255040
+  // 请求超时（504）：可能已落库
+];
+var AMBIGUOUS_PATTERNS = [
+  /timeout|timed\s*out/i,
+  /请求超时|响应超时|网络超时/,
+  /超时/
+];
 var RETRYABLE_PATTERNS = [
   /write\s*conflict/i,
   /data\s*not\s*ready/i,
   /please\s*try\s*again/i,
   /try\s*again\s*later/i,
-  /timeout|timed\s*out|请求超时|超时/i,
   /internal\s*error|rpc\s*error/i,
   /服务繁忙|系统繁忙|请稍后重试/i
 ];
@@ -152296,18 +152302,35 @@ function extractErrorMessage(e11) {
     return "";
   }
 }
+function isAmbiguousError(e11) {
+  const code = extractErrorCode(e11);
+  if (code !== void 0) {
+    if (AMBIGUOUS_CODES.includes(code)) return true;
+    if (RETRYABLE_CODES.includes(code)) return false;
+  }
+  const text = extractErrorMessage(e11);
+  if (!text) return false;
+  return AMBIGUOUS_PATTERNS.some((p11) => p11.test(text));
+}
 function isRetryableError(e11) {
+  if (isAmbiguousError(e11)) return false;
   const code = extractErrorCode(e11);
   if (code !== void 0) return RETRYABLE_CODES.includes(code);
   const text = extractErrorMessage(e11);
   if (!text) return false;
   return RETRYABLE_PATTERNS.some((p11) => p11.test(text));
 }
-function retryDelayMs(attempt) {
+function retryBaseDelayMs(attempt) {
   const base = 500;
   const step = 300;
   const cap = 1200;
   return Math.min(base + step * attempt, cap);
+}
+var RETRY_JITTER_RATIO = 0.4;
+function retryDelayMs(attempt, random = Math.random) {
+  const base = retryBaseDelayMs(attempt);
+  const spread = base * RETRY_JITTER_RATIO;
+  return Math.round(base - spread + random() * spread * 2);
 }
 var defaultSleep = (ms2) => new Promise((r10) => setTimeout(r10, ms2));
 async function withWriteRetry(fn2, options = {}) {
@@ -152370,6 +152393,7 @@ function isFieldHiddenByCond(cond, tableId, fieldId, rowIndex) {
 async function submitForm(config, mainValues, subValues, cond) {
   let mainRecordId;
   const createdSubRecords = [];
+  let ambiguous = false;
   try {
     const mainTableId = config.mainTable.tableId;
     if (!mainTableId) throw new Error("\u4E3B\u8868\u672A\u914D\u7F6E\uFF1AmainTable.tableId \u4E3A\u7A7A");
@@ -152393,6 +152417,7 @@ async function submitForm(config, mainValues, subValues, cond) {
         console.info(`[recordService] \u4E3B\u8868\u5199\u5165\u91CD\u8BD5 ${r10.retries} \u6B21\u540E\u6210\u529F`);
       }
     } catch (e11) {
+      if (isAmbiguousError(e11)) ambiguous = true;
       throw new Error(`\u4E3B\u8868\u5199\u5165\u5931\u8D25\uFF08tableId=${mainTableId}\uFF09\uFF1A${describeError(e11)}`);
     }
     mainRecordId = typeof mainRes === "string" ? mainRes : mainRes.recordId;
@@ -152460,6 +152485,7 @@ async function submitForm(config, mainValues, subValues, cond) {
             );
           }
         } catch (e11) {
+          if (isAmbiguousError(e11)) ambiguous = true;
           throw new Error(
             `\u5B50\u8868\u5199\u5165\u5931\u8D25\uFF08tableId=${sub.tableId}\uFF0C\u5173\u8054\u5B57\u6BB5=${sub.linkFieldId}\uFF0C\u76EE\u6807\u8868=${linkTargetTableId}\uFF09\uFF1A${describeError(e11)}`
           );
@@ -152499,7 +152525,9 @@ async function submitForm(config, mainValues, subValues, cond) {
       success: false,
       error: err.message,
       rollback: !hadWrites ? "none" : failedCleanups.length === 0 ? "clean" : "partial",
-      rollbackDetail: failedCleanups.length > 0 ? failedCleanups.join("\uFF1B") : void 0
+      rollbackDetail: failedCleanups.length > 0 ? failedCleanups.join("\uFF1B") : void 0,
+      // ★ 结果未知（超时）：记录可能已落库。即使 rollback='none' 也不能断言「没写入」。
+      ambiguous
     };
   }
 }
@@ -157700,13 +157728,59 @@ async function run() {
       { boundCalls }
     );
     check(
-      "F33 \u91CD\u8BD5\u5224\u5B9A\uFF1A\u5B98\u65B9\u4E09\u7C7B\u77AC\u65F6\u9519\u8BEF\uFF081254291/1254607/1255040\uFF09\u5747\u53EF\u91CD\u8BD5",
-      [1254291, 1254607, 1255040].every((c11) => RETRYABLE_CODES.includes(c11)),
+      "F33 \u91CD\u8BD5\u5224\u5B9A\uFF1A\u786E\u5B9A\u672A\u5199\u5165\u7684\u4E24\u7C7B\u77AC\u65F6\u9519\u8BEF\uFF081254291/1254607\uFF09\u53EF\u91CD\u8BD5",
+      [1254291, 1254607].every((c11) => RETRYABLE_CODES.includes(c11)),
       RETRYABLE_CODES
     );
     check(
-      "F33 \u91CD\u8BD5\u5224\u5B9A\uFF1A\u65E0 code \u65F6\u6309\u6587\u6848\u515C\u5E95\u8BC6\u522B data not ready / timeout",
-      isRetryableError(new Error("data not ready, please try again later")) && isRetryableError(new Error("\u8BF7\u6C42\u8D85\u65F6")),
+      "F33 \u2605\u2605 \u8D85\u65F6 1255040 \u4E0D\u5728\u91CD\u8BD5\u6E05\u5355\uFF08\u5426\u5219\u91CD\u8BD5\u4F1A\u91CD\u590D\u5199\u5165\uFF09",
+      !RETRYABLE_CODES.includes(1255040),
+      RETRYABLE_CODES
+    );
+    check(
+      "F33 \u2605\u2605 \u8D85\u65F6\u88AB\u8BC6\u522B\u4E3A\u300C\u7ED3\u679C\u672A\u77E5\u300D",
+      isAmbiguousError(Object.assign(new Error("Request timed out"), { code: 1255040 })),
+      null
+    );
+    check(
+      "F33 \u2605\u2605 \u5B98\u65B9\u8D85\u65F6\u539F\u6587\u542B please try again\uFF0C\u4ECD\u5FC5\u987B\u5224\u4E3A\u4E0D\u53EF\u91CD\u8BD5\uFF08\u6587\u6848\u515C\u5E95\u4E0D\u80FD\u7FFB\u6848\uFF09",
+      isRetryableError(
+        Object.assign(new Error("Request timed out, please try again later."), { code: 1255040 })
+      ) === false && isRetryableError(new Error("\u8BF7\u6C42\u8D85\u65F6\uFF0C\u8BF7\u91CD\u8BD5")) === false,
+      null
+    );
+    check(
+      "F33 \u2605\u2605 Write conflict \u4E0D\u662F\u300C\u7ED3\u679C\u672A\u77E5\u300D\uFF08\u53EF\u5B89\u5168\u91CD\u8BD5\uFF0C\u4E0D\u80FD\u8BEF\u4F24\uFF09",
+      isAmbiguousError(Object.assign(new Error("Write conflict"), { code: 1254291 })) === false,
+      null
+    );
+    {
+      let writes = 0;
+      let call = 0;
+      const fakeAddRecord = async () => {
+        call += 1;
+        writes += 1;
+        if (call === 1) {
+          throw Object.assign(new Error("Request timed out"), { code: 1255040 });
+        }
+        return "rec_2";
+      };
+      let thrown = null;
+      try {
+        await withWriteRetry(fakeAddRecord, { maxRetries: 3, sleep: async () => {
+        } });
+      } catch (e11) {
+        thrown = e11;
+      }
+      check(
+        "F33 \u2605\u2605 \u7AEF\u5230\u7AEF\uFF1A\u8D85\u65F6\u540E\u4E0D\u91CD\u653E \u2192 \u53EA\u843D\u5E93 1 \u6761\u4E14\u660E\u786E\u629B\u9519",
+        writes === 1 && !!thrown,
+        { writes, call, thrown: String(thrown) }
+      );
+    }
+    check(
+      "F33 \u91CD\u8BD5\u5224\u5B9A\uFF1A\u65E0 code \u65F6\u6309\u6587\u6848\u515C\u5E95\u8BC6\u522B data not ready",
+      isRetryableError(new Error("data not ready, please try again later")),
       null
     );
     check(
@@ -157714,11 +157788,31 @@ async function run() {
       isRetryableError(new Error("not support")) === false,
       null
     );
-    check(
-      "F33 \u91CD\u8BD5\u5EF6\u8FDF\uFF1A0.5s \u8D77\u9012\u589E\u4E14\u5C01\u9876 1.2s\uFF08\u7B26\u5408\u5B98\u65B9 0.5~1s \u5EFA\u8BAE\uFF09",
-      retryDelayMs(0) === 500 && retryDelayMs(1) === 800 && retryDelayMs(2) === 1100 && retryDelayMs(99) === 1200,
-      [retryDelayMs(0), retryDelayMs(1), retryDelayMs(2), retryDelayMs(99)]
-    );
+    {
+      const base = retryBaseDelayMs(0);
+      const samples = Array.from({ length: 40 }, (_5, i3) => retryDelayMs(0, () => i3 / 39));
+      const uniq = new Set(samples);
+      check(
+        "F33 \u2605\u2605 \u91CD\u8BD5\u5EF6\u8FDF\u5E26\u6296\u52A8\uFF1A\u4E0D\u662F\u56FA\u5B9A\u503C\uFF08\u56FA\u5B9A\u503C\u4F1A\u8BA9\u5E76\u53D1\u91CD\u8BD5\u540C\u6B65\u78B0\u649E\uFF09",
+        uniq.size > 10,
+        { base, uniq: uniq.size, min: Math.min(...samples), max: Math.max(...samples) }
+      );
+      check(
+        "F33 \u2605 \u6296\u52A8\u5E45\u5EA6\u6709\u754C\uFF1A\u843D\u5728\u57FA\u51C6\u503C \xB140% \u5185\uFF08\u4ECD\u7B26\u5408\u5B98\u65B9 0.5~1s \u5EFA\u8BAE\uFF09",
+        Math.min(...samples) >= base * 0.6 - 1 && Math.max(...samples) <= base * 1.4 + 1,
+        { base, min: Math.min(...samples), max: Math.max(...samples) }
+      );
+      check(
+        "F33 \u6296\u52A8\uFF1Arandom \u6CE8\u5165\u53EF\u590D\u73B0\uFF08random=0.5 \u65F6\u7B49\u4E8E\u57FA\u51C6\u503C\uFF09",
+        retryDelayMs(0, () => 0.5) === base,
+        retryDelayMs(0, () => 0.5)
+      );
+      check(
+        "F33 \u91CD\u8BD5\u5EF6\u8FDF\u57FA\u51C6\uFF1A0.5s \u8D77\u9012\u589E\u4E14\u5C01\u9876 1.2s\uFF08\u7B26\u5408\u5B98\u65B9 0.5~1s \u5EFA\u8BAE\uFF09",
+        retryBaseDelayMs(0) === 500 && retryBaseDelayMs(1) === 800 && retryBaseDelayMs(2) === 1100 && retryBaseDelayMs(99) === 1200,
+        [retryBaseDelayMs(0), retryBaseDelayMs(1), retryBaseDelayMs(2), retryBaseDelayMs(99)]
+      );
+    }
     const cfgs = [
       { fieldId: "fldText", fieldName: "\u59D3\u540D", label: "\u59D3\u540D", fieldType: j5.Text, visible: true, required: false },
       { fieldId: "fldBad", fieldName: "\u7F16\u53F7", label: "\u7F16\u53F7", fieldType: j5.Text, visible: true, required: false }

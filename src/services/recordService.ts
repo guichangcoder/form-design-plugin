@@ -3,7 +3,7 @@ import { getLinkTargetTableId } from './baseService';
 import { convertToSdkFormat } from '../utils/valueConverter';
 import { isEmptyValue } from '../utils/validator';
 import { getBase } from './appContext';
-import { extractErrorCode, extractErrorMessage, withWriteRetry } from '../utils/writeRetry';
+import { extractErrorCode, extractErrorMessage, isAmbiguousError, withWriteRetry } from '../utils/writeRetry';
 
 export interface SubmitResult {
   success: boolean;
@@ -18,6 +18,12 @@ export interface SubmitResult {
   rollback?: 'none' | 'clean' | 'partial';
   /** 补偿细节（哪些子记录未能删除），用于 UI 提示与人工清理 */
   rollbackDetail?: string;
+  /**
+   * ★ 本次失败是否「结果未知」（如主表请求超时）：
+   * 请求可能已被服务端处理，记录**可能已经写入**。
+   * UI 必须提示用户先到数据表确认，避免重复提交造成重复数据。
+   */
+  ambiguous?: boolean;
 }
 
 const BATCH_SIZE = 200;
@@ -97,6 +103,8 @@ export async function submitForm(
   let mainRecordId: string | undefined;
   // 已创建的子记录（按写入顺序）：失败补偿时逆序删除
   const createdSubRecords: { tableId: string; tableName: string; ids: string[] }[] = [];
+  /** 本次失败是否「结果未知」（超时等）：记录可能已落库，需提示用户核查 */
+  let ambiguous = false;
 
   try {
     const mainTableId = config.mainTable.tableId;
@@ -113,10 +121,13 @@ export async function submitForm(
       /**
        * ★ 有界重试（线上「偶发主表写入失败」修复）。
        *
-       * 飞书多维表格底层按版本串行处理同一张表，官方明确「不支持并发」，
-       * 并建议调用方对 1254607 Data not ready / 1254291 Write conflict /
-       * 1255040 超时等瞬时错误加重试与 0.5–1 秒延迟。
-       * 原实现是**单次调用、零重试**，把平台抖动直接放大成用户可见的失败。
+       * 飞书多维表格底层按版本串行处理同一张表，官方明确「不支持并发写」，
+       * 建议对 1254607 Data not ready / 1254291 Write conflict 等
+       * 「请求确定未被处理」的错误重试。
+       *
+       * ⚠️ **超时（1255040）刻意不在重试清单里**：超时=客户端没等到响应，
+       * 服务端很可能已经写入成功，而 addRecord 非幂等、JS-SDK 也无 client_token，
+       * 重试会直接制造重复记录（已实测复现）。详见 utils/writeRetry.ts 头部说明。
        */
       const r = await withWriteRetry(() => mainTable.addRecord({ fields: mainFields as any }), {
         maxRetries: 3,
@@ -131,6 +142,8 @@ export async function submitForm(
         console.info(`[recordService] 主表写入重试 ${r.retries} 次后成功`);
       }
     } catch (e) {
+      // 结果未知（超时）→ 记录可能已写入，必须让 UI 提示用户先核查再重提
+      if (isAmbiguousError(e)) ambiguous = true;
       throw new Error(`主表写入失败（tableId=${mainTableId}）：${describeError(e)}`);
     }
     // 当前 SDK 类型直接返回 recordId 字符串；兼容旧宿主可能返回 { recordId } 的形态。
@@ -215,6 +228,8 @@ export async function submitForm(
             );
           }
         } catch (e) {
+          // 结果未知（超时）→ 这批子记录可能已写入
+          if (isAmbiguousError(e)) ambiguous = true;
           throw new Error(
             `子表写入失败（tableId=${sub.tableId}，关联字段=${sub.linkFieldId}，目标表=${linkTargetTableId}）：${describeError(e)}`
           );
@@ -258,6 +273,8 @@ export async function submitForm(
       error: (err as Error).message,
       rollback: !hadWrites ? 'none' : failedCleanups.length === 0 ? 'clean' : 'partial',
       rollbackDetail: failedCleanups.length > 0 ? failedCleanups.join('；') : undefined,
+      // ★ 结果未知（超时）：记录可能已落库。即使 rollback='none' 也不能断言「没写入」。
+      ambiguous,
     };
   }
 }

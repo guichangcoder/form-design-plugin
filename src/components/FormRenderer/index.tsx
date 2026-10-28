@@ -667,6 +667,14 @@ export function FormRenderer({ config, onBackToConfig, preview, metaStale, onRel
         setSubmitSeq((s) => s + 1);
         // 清空唯一性校验提示
         setUniqueState({});
+      } else if (r.ambiguous) {
+        // ★ 结果未知（请求超时）：服务端可能已经写入成功。
+        //   此时绝不能只说「失败」—— 用户会直接再点一次提交，结果就是**重复数据**。
+        //   必须明确要求先去数据表确认。（超时不自动重试的原因见 utils/writeRetry.ts）
+        toast(
+          `提交结果未确认：${r.error ?? '网络或服务端超时'}。这条数据可能已经写入，请先到数据表中确认，不要立刻重复提交，避免产生重复记录。`,
+          'error'
+        );
       } else if (r.rollback === 'partial') {
         // P0-2：失败且部分已写入记录未能自动清理，必须明确告知用户人工核查
         toast(

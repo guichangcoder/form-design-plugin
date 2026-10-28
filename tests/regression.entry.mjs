@@ -50,10 +50,13 @@ import {
 import {
   withWriteRetry,
   isRetryableError,
+  isAmbiguousError,
   retryDelayMs,
+  retryBaseDelayMs,
   extractErrorCode,
   extractErrorMessage,
   RETRYABLE_CODES,
+  AMBIGUOUS_CODES,
 } from '../src/utils/writeRetry';
 import { convertToSdkFormat } from '../src/utils/valueConverter';
 import { findStaleConfiguredField, describeStaleHit } from '../src/utils/metaStale';
@@ -4475,16 +4478,69 @@ async function run() {
     check('F33 ★ 重试有界：最多 3 次重试 = 4 次调用（不会无限重试打爆平台）',
       boundCalls === 4, { boundCalls });
 
-    check('F33 重试判定：官方三类瞬时错误（1254291/1254607/1255040）均可重试',
-      [1254291, 1254607, 1255040].every((c) => RETRYABLE_CODES.includes(c)), RETRYABLE_CODES);
-    check('F33 重试判定：无 code 时按文案兜底识别 data not ready / timeout',
-      isRetryableError(new Error('data not ready, please try again later')) &&
-      isRetryableError(new Error('请求超时')), null);
+    check('F33 重试判定：确定未写入的两类瞬时错误（1254291/1254607）可重试',
+      [1254291, 1254607].every((c) => RETRYABLE_CODES.includes(c)), RETRYABLE_CODES);
+
+    // ★★★ 超时（1255040）绝不能重试 ★★★
+    // 超时 = 客户端没等到响应，服务端**可能已经写入成功**；addRecord 非幂等、
+    // JS-SDK 无 client_token（官方 REST 才有），重试 = 再写一条 → 重复数据。
+    // 这是 2026-10-28 实测确认的缺陷：原实现把 1255040 归进「确定未落库」，会重复写入。
+    check('F33 ★★ 超时 1255040 不在重试清单（否则重试会重复写入）',
+      !RETRYABLE_CODES.includes(1255040), RETRYABLE_CODES);
+    check('F33 ★★ 超时被识别为「结果未知」',
+      isAmbiguousError(Object.assign(new Error('Request timed out'), { code: 1255040 })), null);
+    check('F33 ★★ 官方超时原文含 please try again，仍必须判为不可重试（文案兜底不能翻案）',
+      isRetryableError(
+        Object.assign(new Error('Request timed out, please try again later.'), { code: 1255040 })
+      ) === false && isRetryableError(new Error('请求超时，请重试')) === false, null);
+    check('F33 ★★ Write conflict 不是「结果未知」（可安全重试，不能误伤）',
+      isAmbiguousError(Object.assign(new Error('Write conflict'), { code: 1254291 })) === false, null);
+
+    // ★ 端到端：超时后**不得**产生第二条记录（真实调用 withWriteRetry）
+    {
+      let writes = 0;
+      let call = 0;
+      const fakeAddRecord = async () => {
+        call += 1;
+        writes += 1; // 服务端真实落库
+        if (call === 1) {
+          throw Object.assign(new Error('Request timed out'), { code: 1255040 });
+        }
+        return 'rec_2';
+      };
+      let thrown = null;
+      try {
+        await withWriteRetry(fakeAddRecord, { maxRetries: 3, sleep: async () => {} });
+      } catch (e) {
+        thrown = e;
+      }
+      check('F33 ★★ 端到端：超时后不重放 → 只落库 1 条且明确抛错',
+        writes === 1 && !!thrown, { writes, call, thrown: String(thrown) });
+    }
+
+    check('F33 重试判定：无 code 时按文案兜底识别 data not ready',
+      isRetryableError(new Error('data not ready, please try again later')), null);
     check('F33 ★ 重试判定：`not support` 不重试（不可恢复错误重试无意义，只会拖长用户等待）',
       isRetryableError(new Error('not support')) === false, null);
-    check('F33 重试延迟：0.5s 起递增且封顶 1.2s（符合官方 0.5~1s 建议）',
-      retryDelayMs(0) === 500 && retryDelayMs(1) === 800 && retryDelayMs(2) === 1100 &&
-      retryDelayMs(99) === 1200, [retryDelayMs(0), retryDelayMs(1), retryDelayMs(2), retryDelayMs(99)]);
+
+    // ★ 重试延迟必须有抖动：固定延迟会让并发用户在同一时刻一起重试 → 一起再撞
+    //   实测：并发 5 人时固定延迟只成功 4 人（天花板），加抖动后全部成功。
+    {
+      const base = retryBaseDelayMs(0);
+      const samples = Array.from({ length: 40 }, (_, i) => retryDelayMs(0, () => i / 39));
+      const uniq = new Set(samples);
+      check('F33 ★★ 重试延迟带抖动：不是固定值（固定值会让并发重试同步碰撞）',
+        uniq.size > 10, { base, uniq: uniq.size, min: Math.min(...samples), max: Math.max(...samples) });
+      check('F33 ★ 抖动幅度有界：落在基准值 ±40% 内（仍符合官方 0.5~1s 建议）',
+        Math.min(...samples) >= base * 0.6 - 1 && Math.max(...samples) <= base * 1.4 + 1,
+        { base, min: Math.min(...samples), max: Math.max(...samples) });
+      check('F33 抖动：random 注入可复现（random=0.5 时等于基准值）',
+        retryDelayMs(0, () => 0.5) === base, retryDelayMs(0, () => 0.5));
+      check('F33 重试延迟基准：0.5s 起递增且封顶 1.2s（符合官方 0.5~1s 建议）',
+        retryBaseDelayMs(0) === 500 && retryBaseDelayMs(1) === 800 && retryBaseDelayMs(2) === 1100 &&
+        retryBaseDelayMs(99) === 1200,
+        [retryBaseDelayMs(0), retryBaseDelayMs(1), retryBaseDelayMs(2), retryBaseDelayMs(99)]);
+    }
 
     // ---------- 4) 元数据失效判定：真实调用纯函数 findStaleConfiguredField ----------
     // ★ 这一组必须真实调用纯函数，不能只正则断言 App.tsx 里出现了某个函数名：
