@@ -60,6 +60,7 @@ import {
 } from '../src/utils/writeRetry';
 import { convertToSdkFormat } from '../src/utils/valueConverter';
 import { findStaleConfiguredField, describeStaleHit } from '../src/utils/metaStale';
+import { draftMountKey, shouldAdoptIncoming, resolveDashFormId } from '../src/utils/configDraft';
 import {
   loadHeadColumn,
   loadHeadRows,
@@ -4642,6 +4643,178 @@ async function run() {
       check('F33 ★ 结构：可录入判定改为白名单（WRITABLE_FIELD_TYPES.includes）',
         /WRITABLE_FIELD_TYPES\.includes\(type\)/.test(fm33) &&
         !/!isReadonlyField\(type\)\s*&&\s*!isUnsupportedField\(type\)/.test(fm33), null);
+    }
+
+    // ================= F34：配置草稿重挂载（「保存后只生效一次」缺陷） =================
+    // 🔴 缺陷复盘：ConfigPanel 用 useState(() => initialConfig…) 初始化草稿，
+    //    而 useState 的初始化函数**只在首次挂载执行一次**。key 原来只绑 baseToken，
+    //    于是「换一份配置 / 重新进入配置态」时组件不重挂载 → 草稿停留在旧对象
+    //    → 表现为：保存后只生效一次、再进配置态看不到上次保存的配置、刷新后像丢了。
+    //
+    // ★ 必须真实调用纯函数，不能只正则断言 App.tsx 里有 draftMountKey：
+    //   曾出现「函数存在但 key 拼接写错」的假绿（只断言字样存在证明不了运行时产出）。
+
+    // ---------- 1) 指纹：内容变了必须变 ----------
+    const baseCfg = {
+      mainTable: { tableId: 'tblA', columns: 1, fields: [{ fieldId: 'f1' }, { fieldId: 'f2' }] },
+      subTables: [],
+      version: 1,
+    };
+    const k0 = draftMountKey('form1', baseCfg);
+    check('F34 ★ 指纹：同一份配置 → 指纹稳定（否则每次渲染都重挂载，输入框会失焦）',
+      draftMountKey('form1', baseCfg) === k0, { k0 });
+
+    check('F34 ★★ 指纹：主表列数 1→2 必须改变指纹（列数变化要重挂载才能生效）',
+      draftMountKey('form1', { ...baseCfg, mainTable: { ...baseCfg.mainTable, columns: 2 } }) !== k0,
+      { a: k0, b: draftMountKey('form1', { ...baseCfg, mainTable: { ...baseCfg.mainTable, columns: 2 } }) });
+
+    check('F34 ★★ 指纹：换表单 id 必须改变指纹（编辑另一份表单不能沿用旧草稿）',
+      draftMountKey('form2', baseCfg) !== k0, null);
+
+    check('F34 ★★ 指纹：换主表必须改变指纹',
+      draftMountKey('form1', { ...baseCfg, mainTable: { ...baseCfg.mainTable, tableId: 'tblB' } }) !== k0, null);
+
+    check('F34 ★ 指纹：字段增减必须改变指纹',
+      draftMountKey('form1', {
+        ...baseCfg,
+        mainTable: { ...baseCfg.mainTable, fields: [{ fieldId: 'f1' }] },
+      }) !== k0, null);
+
+    check('F34 指纹：null 配置不崩且与有内容的不同',
+      draftMountKey('form1', null) !== k0 && typeof draftMountKey(undefined, null) === 'string',
+      draftMountKey('form1', null));
+
+    // ★★★ 关键：label / defaultValue 这类逐字内容**不能**进指纹 ★★★
+    // 否则用户在输入框每敲一个字 → 指纹变 → 重挂载 → 输入框失焦（灾难性体验）。
+    check('F34 ★★ 指纹：不含 label 等逐字内容（否则打字会触发重挂载 → 输入框失焦）',
+      draftMountKey('form1', {
+        ...baseCfg,
+        mainTable: {
+          ...baseCfg.mainTable,
+          fields: [{ fieldId: 'f1', label: '改了标签' }, { fieldId: 'f2' }],
+        },
+      }) === k0, null);
+
+    // ---------- 2) 采纳判定：shouldAdoptIncoming ----------
+    check('F34 ★★ 同一份配置不重复采纳（防止外部旧对象把用户正在编辑的内容冲掉）',
+      shouldAdoptIncoming(k0, k0, false) === false, null);
+    check('F34 ★★ 外部换了一份配置 → 必须采纳（这是「再进配置态看到最新配置」的关键）',
+      shouldAdoptIncoming('new-key', k0, false) === true, null);
+    check('F34 ★ 首次挂载（adopted 未知）→ 采纳',
+      shouldAdoptIncoming(k0, null, false) === true, null);
+    check('F34 同一份配置且有未保存改动 → 不覆盖',
+      shouldAdoptIncoming(k0, k0, true) === false, null);
+
+    // ---------- 3) 端到端：模拟「保存 → 再次进入配置态」 ----------
+    // 用最小 React-like 状态机复刻 ConfigPanel 的 draft 生命周期，
+    // 证明「加了指纹 key + 采纳判定」后，第二次进入能看到最新配置。
+    {
+      // 不带修复（只按 baseToken 决定是否重挂载）：草稿永远停在第一次的对象
+      const legacyMount = (() => {
+        let draft = null;
+        let mountedKey = null;
+        return (initialConfig, baseToken) => {
+          const key = baseToken || 'no-base'; // 旧 key：只绑 baseToken
+          if (mountedKey !== key) {
+            draft = initialConfig; // 只有重挂载时才初始化
+            mountedKey = key;
+          }
+          return draft;
+        };
+      })();
+
+      const savedV1 = { id: 'form1', mainTable: { tableId: 'tblA', columns: 1, fields: [{ fieldId: 'f1' }] }, subTables: [], version: 1 };
+      // 用户改成 2 列后保存，再次进入配置态时 initialConfig 已是 V2
+      const savedV2 = { id: 'form1', mainTable: { tableId: 'tblA', columns: 2, fields: [{ fieldId: 'f1' }] }, subTables: [], version: 1 };
+
+      const legacy1 = legacyMount(savedV1, 'tok');
+      const legacy2 = legacyMount(savedV2, 'tok'); // 同一个 baseToken → 不重挂载
+      check('F34 ★★ 端到端复现：旧 key 下再次进入配置态，草稿仍是旧值（缺陷本体）',
+        legacy1?.mainTable.columns === 1 && legacy2?.mainTable.columns === 1,
+        { first: legacy1?.mainTable.columns, second: legacy2?.mainTable.columns });
+
+      // 带修复：key 含内容指纹 → 配置变了就重挂载 → 拿到最新值
+      const fixedMount = (() => {
+        let draft = null;
+        let mountedKey = null;
+        let adopted = null;
+        return (initialConfig, baseToken) => {
+          const key = `${baseToken || 'no-base'}#${draftMountKey(initialConfig?.id, initialConfig)}`;
+          if (mountedKey !== key) {
+            draft = initialConfig;
+            mountedKey = key;
+            adopted = draftMountKey(initialConfig?.id, initialConfig);
+            return draft;
+          }
+          // 未重挂载时走 effect 兜底
+          const incoming = draftMountKey(initialConfig?.id, initialConfig);
+          if (shouldAdoptIncoming(incoming, adopted, false) && initialConfig) {
+            draft = initialConfig;
+            adopted = incoming;
+          }
+          return draft;
+        };
+      })();
+
+      const fixed1 = fixedMount(savedV1, 'tok');
+      const fixed2 = fixedMount(savedV2, 'tok');
+      check('F34 ★★★ 端到端验证：加指纹 key 后，再次进入配置态能看到最新保存的配置',
+        fixed1?.mainTable.columns === 1 && fixed2?.mainTable.columns === 2,
+        { first: fixed1?.mainTable.columns, second: fixed2?.mainTable.columns });
+
+      // 兜底：即使 key 被误改回只绑 baseToken，effect 也必须能纠正
+      {
+        let draft = savedV1;
+        let adopted = draftMountKey(savedV1.id, savedV1);
+        // 模拟 effect 收到新配置
+        const incoming = draftMountKey(savedV2.id, savedV2);
+        if (shouldAdoptIncoming(incoming, adopted, false)) {
+          draft = savedV2;
+          adopted = incoming;
+        }
+        check('F34 ★★ 兜底：key 失效时 effect 仍能把草稿同步到最新配置（双保险）',
+          draft.mainTable.columns === 2, { columns: draft.mainTable.columns });
+      }
+    }
+
+    // ---------- 4) 结构性保障：两处 ConfigPanel 都必须带内容指纹 key ----------
+    {
+      const fs34 = await import('node:fs');
+      const strip34 = (src) =>
+        src.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|\s)\/\/[^\n]*/g, '$1');
+      const read34 = (rel) => strip34(fs34.readFileSync(new URL(rel, import.meta.url), 'utf8'));
+
+      const app34 = read34('../src/App.tsx');
+      check('F34 ★★ 结构：应用模式配置面板的 key 含 draftMountKey（不再只绑 baseToken）',
+        /key=\{`\$\{baseToken \|\| 'no-base'\}#\$\{draftMountKey\(/.test(app34), null);
+      check('F34 ★ 结构：列表编辑分支的 ConfigPanel 也带 key（原来完全没有）',
+        /key=\{`edit#\$\{editorTarget\.id\}#\$\{draftMountKey\(/.test(app34), null);
+      check('F34 ★★ 结构：ConfigPanel 存在监听 initialConfig 的 effect（否则再次进入永远是旧草稿）',
+        /useEffect\(\(\)\s*=>\s*\{[\s\S]{0,600}?shouldAdoptIncoming\(/.test(
+          read34('../src/components/ConfigPanel/index.tsx')
+        ), null);
+      check('F34 结构：配置态解析目标表单走纯函数 resolveDashFormId',
+        /resolveDashFormId\(data\?\.forms \?\? \[\], data\?\.defaultFormId\)/.test(app34), null);
+      check('F34 ★ 结构：预览回退到已保存配置（否则刚进配置态预览空白 → 被误读成「配置丢了」）',
+        /\(previewDraft \?\? dashConfigInitial\)/.test(app34), null);
+    }
+
+    // ---------- 5) 悬空 defaultFormId 自愈 ----------
+    {
+      const forms = [{ id: 'a' }, { id: 'b' }];
+      check('F34 ★ 表单解析：defaultFormId 合法 → 用它',
+        resolveDashFormId(forms, 'b') === 'b', resolveDashFormId(forms, 'b'));
+      check('F34 ★★ 表单解析：defaultFormId 悬空（指向已删除表单）→ 回退第一份，不返回悬空 id',
+        resolveDashFormId(forms, 'ghost') === 'a', resolveDashFormId(forms, 'ghost'));
+      check('F34 表单解析：无 defaultFormId → 第一份',
+        resolveDashFormId(forms, undefined) === 'a', null);
+      check('F34 表单解析：空表单列表 → null（不伪造 id）',
+        resolveDashFormId([], 'a') === null && resolveDashFormId(null, 'a') === null, null);
+      check('F34 ★ 表单解析：返回的 id 一定真实存在于列表（这是自愈的关键不变式）',
+        [undefined, 'a', 'b', 'ghost', ''].every((d) => {
+          const got = resolveDashFormId(forms, d);
+          return got === null || forms.some((f) => f.id === got);
+        }), null);
     }
   }
 

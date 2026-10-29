@@ -24,6 +24,7 @@ import {
 import { getBase, getBaseToken, isWorkspaceAvailable } from './services/appContext';
 import { getFieldMetaList } from './services/baseService';
 import { findStaleConfiguredField, describeStaleHit } from './utils/metaStale';
+import { draftMountKey, resolveDashFormId } from './utils/configDraft';
 import { probeHost, probeOneLine } from './services/probe';
 import { exportDiagnosticBundle } from './services/diagExport';
 
@@ -382,7 +383,12 @@ export default function App() {
     const forms2 = exists
       ? base.forms.map((f) => (f.id === form.id ? form : f))
       : [...base.forms, form];
-    const defaultFormId = base.defaultFormId ?? forms2[0]?.id;
+    /**
+     * ★ defaultFormId 自愈：原写法 `base.defaultFormId ?? forms2[0]?.id` 会**沿用悬空引用**
+     *   （指向已删除的表单）→ 每次进配置态都回退到 forms[0]，多表单场景下表现为
+     *   「配了 A、回来看到 B」。这里改为「必须指向真实存在的表单」，否则落到第一份。
+     */
+    const defaultFormId = resolveDashFormId(forms2, base.defaultFormId) ?? undefined;
     // ★ 应用模式：baseToken 随配置持久化（P0-1）。View 态据此用 Workspace 重新绑定。
     const next: PluginData = {
       forms: forms2,
@@ -556,8 +562,20 @@ export default function App() {
   // 首次 Create 时用空表单；已有保存数据时回填默认表单
   const showDashConfig =
     context === 'dashboard' && inConfig;
+
+  /**
+   * 解析「配置态要编辑的那份表单」的 id。
+   *
+   * 🔴 不能只靠 defaultFormId：它可能是**悬空引用**（指向已删除的表单），
+   * 原实现 `find(...) ?? forms[0]` 会回退到 forms[0] 显示，
+   * 但保存时仍沿用那个悬空 defaultFormId → 下次又回退到 forms[0]，
+   * 多表单场景下表现为「改的不是这个表单」/「配置对不上」。
+   *
+   * 抽成纯函数 resolveDashFormId 便于回归测试真实调用（见 F34）。
+   */
+  const dashFormId = resolveDashFormId(data?.forms ?? [], data?.defaultFormId);
   const dashConfigInitial = showDashConfig
-    ? (data?.forms.find((f) => f.id === data?.defaultFormId) ?? data?.forms[0] ?? null)
+    ? (data?.forms.find((f) => f.id === dashFormId) ?? null)
     : null;
 
   const showManager = !showDashConfig && inConfig && inner === 'list';
@@ -756,8 +774,13 @@ export default function App() {
           // 预览随草稿实时渲染（含主题色与条件联动），提交按钮在预览中禁用。
           <div className="app-config-layout">
             <div className="app-config-preview">
-              {previewDraft && previewDraft.mainTable.tableId ? (
-                <FormRenderer config={previewDraft} preview />
+              {/*
+                ★ 预览优先用实时草稿；草稿还没抛上来时（刚进入配置态、用户尚未改动）
+                  回退到「已保存的配置」，否则预览区会空白一片 —— 这会被误读成
+                  「上次的配置没保存上」。实际上配置在，只是预览没接上初始值。
+              */}
+              {(previewDraft ?? dashConfigInitial)?.mainTable?.tableId ? (
+                <FormRenderer config={(previewDraft ?? dashConfigInitial)!} preview />
               ) : (
                 <div className="app-config-preview-empty">
                   <div style={{ fontSize: 32, marginBottom: 8 }}>👀</div>
@@ -772,7 +795,15 @@ export default function App() {
             </div>
             <div className="app-config-panel">
               <ConfigPanel
-                key={baseToken || 'no-base'}
+                /**
+                 * 🔴 key 必须包含「配置内容指纹」，不能只绑 baseToken（2026-10-29 缺陷）。
+                 *
+                 * 原来 key 只有 baseToken：换一份表单 / 重新进入配置态时 key 不变
+                 * → 组件不重挂载 → `useState` 初始化不执行 → 草稿停留在旧对象
+                 * → 表现为「保存后只生效一次，再进配置态看不到上次保存的配置」。
+                 * 改用内容指纹：配置一变即整体重挂载，彻底消除这类残留。
+                 */
+                key={`${baseToken || 'no-base'}#${draftMountKey(dashConfigInitial?.id, dashConfigInitial)}`}
                 initialConfig={dashConfigInitial}
                 appMode
                 baseToken={baseToken}
@@ -798,6 +829,11 @@ export default function App() {
 
         {showEdit && editorTarget && (
           <ConfigPanel
+            /**
+             * ★ 同样是内容指纹 key（原来完全没有 key）：
+             * 从列表编辑不同的表单时若不重挂载，草稿会沿用上一份表单的内容。
+             */
+            key={`edit#${editorTarget.id}#${draftMountKey(editorTarget.id, editorTarget)}`}
             initialConfig={editorTarget}
             onSave={handleSaveForm}
             onCancel={() => {

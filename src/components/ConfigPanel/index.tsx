@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { FormPluginConfig, CONFIG_VERSION, genId, FieldConfig } from '../../types';
 import { useTableMeta } from '../../hooks/useTableMeta';
 import { useFieldMeta } from '../../hooks/useFieldMeta';
@@ -13,6 +13,7 @@ import { toast } from '../../utils/toast';
 import { DEFAULT_THEME, PRESET_COLORS, applyThemeColor } from '../../utils/theme';
 import { isWorkspaceAvailable } from '../../services/appContext';
 import { MAIN_COLUMNS_OPTIONS, resolveMainColumns } from '../../utils/mainLayout';
+import { draftMountKey, shouldAdoptIncoming } from '../../utils/configDraft';
 
 interface Props {
   initialConfig: FormPluginConfig | null;
@@ -58,6 +59,35 @@ export function ConfigPanel({ initialConfig, onSave, onCancel, appMode, baseToke
     initialConfig && initialConfig.mainTable ? initialConfig : defaultConfig()
   );
   const { fields: mainFields } = useFieldMeta(draft.mainTable.tableId || undefined);
+
+  /**
+   * 🔴 外部配置变化时同步草稿（2026-10-29 线上缺陷修复）。
+   *
+   * 背景：`useState` 的初始化函数**只在首次挂载执行一次**，之后 `initialConfig`
+   * 怎么变都不会再进 draft。于是「保存后只生效一次、再进配置态看不到上次配置、
+   * 刷新后配置像丢了」——根因就在这一行没有监听。
+   *
+   * 修法：用「内容指纹」判定是否换了一份配置；只有真的换了才覆盖草稿，
+   * 否则用户每敲一个字都会被外部旧对象冲回去（半受控频闪）。
+   * 判定逻辑抽在 utils/configDraft.ts::shouldAdoptIncoming，可被测试真实调用。
+   */
+  const adoptedKeyRef = useRef<string | null>(null);
+  const draftRef = useRef<FormPluginConfig>(draft);
+  draftRef.current = draft;
+  // 首次挂载即记录当前指纹：避免挂载后立刻把自己覆盖一遍
+  if (adoptedKeyRef.current === null) {
+    adoptedKeyRef.current = draftMountKey(initialConfig?.id, initialConfig);
+  }
+  useEffect(() => {
+    const incomingKey = draftMountKey(initialConfig?.id, initialConfig);
+    const should = shouldAdoptIncoming(incomingKey, adoptedKeyRef.current, false);
+    if (!should) return;
+    if (initialConfig && initialConfig.mainTable) {
+      console.log('[ConfigPanel] 检测到外部配置变化，同步草稿', incomingKey);
+      setDraft(initialConfig);
+      adoptedKeyRef.current = incomingKey;
+    }
+  }, [initialConfig]);
 
   // 应用模式必须显式选择数据源后才能继续配置（P0-1：不混用默认 base）
   const needBase = !!appMode && isWorkspaceAvailable();

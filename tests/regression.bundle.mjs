@@ -153497,6 +153497,33 @@ function describeStaleHit(hit) {
   return `\u5B57\u6BB5\u300C${hit.label}\u300D\u7684\u7C7B\u578B\u5DF2\u53D8\u6210\u4E0D\u53EF\u5199\u5165\u7684\u7C7B\u578B`;
 }
 
+// src/utils/configDraft.ts
+function draftMountKey(formId, cfg) {
+  if (!cfg) return `empty:${formId ?? ""}`;
+  const main = cfg.mainTable;
+  const mainFields = (main?.fields ?? []).map((f12) => f12?.fieldId ?? "").join(",");
+  const subs = (cfg.subTables ?? []).map((s) => `${s?.tableId ?? ""}[${(s?.fields ?? []).map((f12) => f12?.fieldId ?? "").join(",")}]`).join("|");
+  return [
+    formId ?? "",
+    cfg.version ?? "",
+    main?.tableId ?? "",
+    String(main?.columns ?? ""),
+    mainFields,
+    subs
+  ].join("#");
+}
+function shouldAdoptIncoming(incomingKey, adoptedKey, dirty) {
+  if (incomingKey === adoptedKey) return false;
+  if (dirty && adoptedKey !== null && incomingKey === adoptedKey) return false;
+  return true;
+}
+function resolveDashFormId(forms, defaultFormId) {
+  const list = forms ?? [];
+  if (list.length === 0) return null;
+  if (defaultFormId && list.some((f12) => f12?.id === defaultFormId)) return defaultFormId;
+  return list[0]?.id ?? null;
+}
+
 // tests/regression.entry.mjs
 init_tableRecordCache();
 var results = [];
@@ -157950,6 +157977,204 @@ async function run() {
       check(
         "F33 \u2605 \u7ED3\u6784\uFF1A\u53EF\u5F55\u5165\u5224\u5B9A\u6539\u4E3A\u767D\u540D\u5355\uFF08WRITABLE_FIELD_TYPES.includes\uFF09",
         /WRITABLE_FIELD_TYPES\.includes\(type\)/.test(fm33) && !/!isReadonlyField\(type\)\s*&&\s*!isUnsupportedField\(type\)/.test(fm33),
+        null
+      );
+    }
+    const baseCfg = {
+      mainTable: { tableId: "tblA", columns: 1, fields: [{ fieldId: "f1" }, { fieldId: "f2" }] },
+      subTables: [],
+      version: 1
+    };
+    const k02 = draftMountKey("form1", baseCfg);
+    check(
+      "F34 \u2605 \u6307\u7EB9\uFF1A\u540C\u4E00\u4EFD\u914D\u7F6E \u2192 \u6307\u7EB9\u7A33\u5B9A\uFF08\u5426\u5219\u6BCF\u6B21\u6E32\u67D3\u90FD\u91CD\u6302\u8F7D\uFF0C\u8F93\u5165\u6846\u4F1A\u5931\u7126\uFF09",
+      draftMountKey("form1", baseCfg) === k02,
+      { k0: k02 }
+    );
+    check(
+      "F34 \u2605\u2605 \u6307\u7EB9\uFF1A\u4E3B\u8868\u5217\u6570 1\u21922 \u5FC5\u987B\u6539\u53D8\u6307\u7EB9\uFF08\u5217\u6570\u53D8\u5316\u8981\u91CD\u6302\u8F7D\u624D\u80FD\u751F\u6548\uFF09",
+      draftMountKey("form1", { ...baseCfg, mainTable: { ...baseCfg.mainTable, columns: 2 } }) !== k02,
+      { a: k02, b: draftMountKey("form1", { ...baseCfg, mainTable: { ...baseCfg.mainTable, columns: 2 } }) }
+    );
+    check(
+      "F34 \u2605\u2605 \u6307\u7EB9\uFF1A\u6362\u8868\u5355 id \u5FC5\u987B\u6539\u53D8\u6307\u7EB9\uFF08\u7F16\u8F91\u53E6\u4E00\u4EFD\u8868\u5355\u4E0D\u80FD\u6CBF\u7528\u65E7\u8349\u7A3F\uFF09",
+      draftMountKey("form2", baseCfg) !== k02,
+      null
+    );
+    check(
+      "F34 \u2605\u2605 \u6307\u7EB9\uFF1A\u6362\u4E3B\u8868\u5FC5\u987B\u6539\u53D8\u6307\u7EB9",
+      draftMountKey("form1", { ...baseCfg, mainTable: { ...baseCfg.mainTable, tableId: "tblB" } }) !== k02,
+      null
+    );
+    check(
+      "F34 \u2605 \u6307\u7EB9\uFF1A\u5B57\u6BB5\u589E\u51CF\u5FC5\u987B\u6539\u53D8\u6307\u7EB9",
+      draftMountKey("form1", {
+        ...baseCfg,
+        mainTable: { ...baseCfg.mainTable, fields: [{ fieldId: "f1" }] }
+      }) !== k02,
+      null
+    );
+    check(
+      "F34 \u6307\u7EB9\uFF1Anull \u914D\u7F6E\u4E0D\u5D29\u4E14\u4E0E\u6709\u5185\u5BB9\u7684\u4E0D\u540C",
+      draftMountKey("form1", null) !== k02 && typeof draftMountKey(void 0, null) === "string",
+      draftMountKey("form1", null)
+    );
+    check(
+      "F34 \u2605\u2605 \u6307\u7EB9\uFF1A\u4E0D\u542B label \u7B49\u9010\u5B57\u5185\u5BB9\uFF08\u5426\u5219\u6253\u5B57\u4F1A\u89E6\u53D1\u91CD\u6302\u8F7D \u2192 \u8F93\u5165\u6846\u5931\u7126\uFF09",
+      draftMountKey("form1", {
+        ...baseCfg,
+        mainTable: {
+          ...baseCfg.mainTable,
+          fields: [{ fieldId: "f1", label: "\u6539\u4E86\u6807\u7B7E" }, { fieldId: "f2" }]
+        }
+      }) === k02,
+      null
+    );
+    check(
+      "F34 \u2605\u2605 \u540C\u4E00\u4EFD\u914D\u7F6E\u4E0D\u91CD\u590D\u91C7\u7EB3\uFF08\u9632\u6B62\u5916\u90E8\u65E7\u5BF9\u8C61\u628A\u7528\u6237\u6B63\u5728\u7F16\u8F91\u7684\u5185\u5BB9\u51B2\u6389\uFF09",
+      shouldAdoptIncoming(k02, k02, false) === false,
+      null
+    );
+    check(
+      "F34 \u2605\u2605 \u5916\u90E8\u6362\u4E86\u4E00\u4EFD\u914D\u7F6E \u2192 \u5FC5\u987B\u91C7\u7EB3\uFF08\u8FD9\u662F\u300C\u518D\u8FDB\u914D\u7F6E\u6001\u770B\u5230\u6700\u65B0\u914D\u7F6E\u300D\u7684\u5173\u952E\uFF09",
+      shouldAdoptIncoming("new-key", k02, false) === true,
+      null
+    );
+    check(
+      "F34 \u2605 \u9996\u6B21\u6302\u8F7D\uFF08adopted \u672A\u77E5\uFF09\u2192 \u91C7\u7EB3",
+      shouldAdoptIncoming(k02, null, false) === true,
+      null
+    );
+    check(
+      "F34 \u540C\u4E00\u4EFD\u914D\u7F6E\u4E14\u6709\u672A\u4FDD\u5B58\u6539\u52A8 \u2192 \u4E0D\u8986\u76D6",
+      shouldAdoptIncoming(k02, k02, true) === false,
+      null
+    );
+    {
+      const legacyMount = /* @__PURE__ */ (() => {
+        let draft = null;
+        let mountedKey = null;
+        return (initialConfig, baseToken) => {
+          const key2 = baseToken || "no-base";
+          if (mountedKey !== key2) {
+            draft = initialConfig;
+            mountedKey = key2;
+          }
+          return draft;
+        };
+      })();
+      const savedV1 = { id: "form1", mainTable: { tableId: "tblA", columns: 1, fields: [{ fieldId: "f1" }] }, subTables: [], version: 1 };
+      const savedV2 = { id: "form1", mainTable: { tableId: "tblA", columns: 2, fields: [{ fieldId: "f1" }] }, subTables: [], version: 1 };
+      const legacy1 = legacyMount(savedV1, "tok");
+      const legacy2 = legacyMount(savedV2, "tok");
+      check(
+        "F34 \u2605\u2605 \u7AEF\u5230\u7AEF\u590D\u73B0\uFF1A\u65E7 key \u4E0B\u518D\u6B21\u8FDB\u5165\u914D\u7F6E\u6001\uFF0C\u8349\u7A3F\u4ECD\u662F\u65E7\u503C\uFF08\u7F3A\u9677\u672C\u4F53\uFF09",
+        legacy1?.mainTable.columns === 1 && legacy2?.mainTable.columns === 1,
+        { first: legacy1?.mainTable.columns, second: legacy2?.mainTable.columns }
+      );
+      const fixedMount = /* @__PURE__ */ (() => {
+        let draft = null;
+        let mountedKey = null;
+        let adopted = null;
+        return (initialConfig, baseToken) => {
+          const key2 = `${baseToken || "no-base"}#${draftMountKey(initialConfig?.id, initialConfig)}`;
+          if (mountedKey !== key2) {
+            draft = initialConfig;
+            mountedKey = key2;
+            adopted = draftMountKey(initialConfig?.id, initialConfig);
+            return draft;
+          }
+          const incoming = draftMountKey(initialConfig?.id, initialConfig);
+          if (shouldAdoptIncoming(incoming, adopted, false) && initialConfig) {
+            draft = initialConfig;
+            adopted = incoming;
+          }
+          return draft;
+        };
+      })();
+      const fixed1 = fixedMount(savedV1, "tok");
+      const fixed2 = fixedMount(savedV2, "tok");
+      check(
+        "F34 \u2605\u2605\u2605 \u7AEF\u5230\u7AEF\u9A8C\u8BC1\uFF1A\u52A0\u6307\u7EB9 key \u540E\uFF0C\u518D\u6B21\u8FDB\u5165\u914D\u7F6E\u6001\u80FD\u770B\u5230\u6700\u65B0\u4FDD\u5B58\u7684\u914D\u7F6E",
+        fixed1?.mainTable.columns === 1 && fixed2?.mainTable.columns === 2,
+        { first: fixed1?.mainTable.columns, second: fixed2?.mainTable.columns }
+      );
+      {
+        let draft = savedV1;
+        let adopted = draftMountKey(savedV1.id, savedV1);
+        const incoming = draftMountKey(savedV2.id, savedV2);
+        if (shouldAdoptIncoming(incoming, adopted, false)) {
+          draft = savedV2;
+          adopted = incoming;
+        }
+        check(
+          "F34 \u2605\u2605 \u515C\u5E95\uFF1Akey \u5931\u6548\u65F6 effect \u4ECD\u80FD\u628A\u8349\u7A3F\u540C\u6B65\u5230\u6700\u65B0\u914D\u7F6E\uFF08\u53CC\u4FDD\u9669\uFF09",
+          draft.mainTable.columns === 2,
+          { columns: draft.mainTable.columns }
+        );
+      }
+    }
+    {
+      const fs34 = await import("node:fs");
+      const strip34 = (src) => src.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|\s)\/\/[^\n]*/g, "$1");
+      const read34 = (rel) => strip34(fs34.readFileSync(new URL(rel, import.meta.url), "utf8"));
+      const app34 = read34("../src/App.tsx");
+      check(
+        "F34 \u2605\u2605 \u7ED3\u6784\uFF1A\u5E94\u7528\u6A21\u5F0F\u914D\u7F6E\u9762\u677F\u7684 key \u542B draftMountKey\uFF08\u4E0D\u518D\u53EA\u7ED1 baseToken\uFF09",
+        /key=\{`\$\{baseToken \|\| 'no-base'\}#\$\{draftMountKey\(/.test(app34),
+        null
+      );
+      check(
+        "F34 \u2605 \u7ED3\u6784\uFF1A\u5217\u8868\u7F16\u8F91\u5206\u652F\u7684 ConfigPanel \u4E5F\u5E26 key\uFF08\u539F\u6765\u5B8C\u5168\u6CA1\u6709\uFF09",
+        /key=\{`edit#\$\{editorTarget\.id\}#\$\{draftMountKey\(/.test(app34),
+        null
+      );
+      check(
+        "F34 \u2605\u2605 \u7ED3\u6784\uFF1AConfigPanel \u5B58\u5728\u76D1\u542C initialConfig \u7684 effect\uFF08\u5426\u5219\u518D\u6B21\u8FDB\u5165\u6C38\u8FDC\u662F\u65E7\u8349\u7A3F\uFF09",
+        /useEffect\(\(\)\s*=>\s*\{[\s\S]{0,600}?shouldAdoptIncoming\(/.test(
+          read34("../src/components/ConfigPanel/index.tsx")
+        ),
+        null
+      );
+      check(
+        "F34 \u7ED3\u6784\uFF1A\u914D\u7F6E\u6001\u89E3\u6790\u76EE\u6807\u8868\u5355\u8D70\u7EAF\u51FD\u6570 resolveDashFormId",
+        /resolveDashFormId\(data\?\.forms \?\? \[\], data\?\.defaultFormId\)/.test(app34),
+        null
+      );
+      check(
+        "F34 \u2605 \u7ED3\u6784\uFF1A\u9884\u89C8\u56DE\u9000\u5230\u5DF2\u4FDD\u5B58\u914D\u7F6E\uFF08\u5426\u5219\u521A\u8FDB\u914D\u7F6E\u6001\u9884\u89C8\u7A7A\u767D \u2192 \u88AB\u8BEF\u8BFB\u6210\u300C\u914D\u7F6E\u4E22\u4E86\u300D\uFF09",
+        /\(previewDraft \?\? dashConfigInitial\)/.test(app34),
+        null
+      );
+    }
+    {
+      const forms = [{ id: "a" }, { id: "b" }];
+      check(
+        "F34 \u2605 \u8868\u5355\u89E3\u6790\uFF1AdefaultFormId \u5408\u6CD5 \u2192 \u7528\u5B83",
+        resolveDashFormId(forms, "b") === "b",
+        resolveDashFormId(forms, "b")
+      );
+      check(
+        "F34 \u2605\u2605 \u8868\u5355\u89E3\u6790\uFF1AdefaultFormId \u60AC\u7A7A\uFF08\u6307\u5411\u5DF2\u5220\u9664\u8868\u5355\uFF09\u2192 \u56DE\u9000\u7B2C\u4E00\u4EFD\uFF0C\u4E0D\u8FD4\u56DE\u60AC\u7A7A id",
+        resolveDashFormId(forms, "ghost") === "a",
+        resolveDashFormId(forms, "ghost")
+      );
+      check(
+        "F34 \u8868\u5355\u89E3\u6790\uFF1A\u65E0 defaultFormId \u2192 \u7B2C\u4E00\u4EFD",
+        resolveDashFormId(forms, void 0) === "a",
+        null
+      );
+      check(
+        "F34 \u8868\u5355\u89E3\u6790\uFF1A\u7A7A\u8868\u5355\u5217\u8868 \u2192 null\uFF08\u4E0D\u4F2A\u9020 id\uFF09",
+        resolveDashFormId([], "a") === null && resolveDashFormId(null, "a") === null,
+        null
+      );
+      check(
+        "F34 \u2605 \u8868\u5355\u89E3\u6790\uFF1A\u8FD4\u56DE\u7684 id \u4E00\u5B9A\u771F\u5B9E\u5B58\u5728\u4E8E\u5217\u8868\uFF08\u8FD9\u662F\u81EA\u6108\u7684\u5173\u952E\u4E0D\u53D8\u5F0F\uFF09",
+        [void 0, "a", "b", "ghost", ""].every((d12) => {
+          const got = resolveDashFormId(forms, d12);
+          return got === null || forms.some((f12) => f12.id === got);
+        }),
         null
       );
     }
