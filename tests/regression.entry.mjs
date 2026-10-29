@@ -4818,6 +4818,328 @@ async function run() {
     }
   }
 
+  // ================= F35：条件引用选项的「刷新稳定性」 =================
+  // 用户诉求：「配置保存后，单条件/多条件引用选项，无论前端刷新多少次都能生效，
+  //            除非管理员重新配置。」
+  //
+  // 🔴 为什么需要这一组：F31/F34 只证明了「保存那一刻写进去了」「再进配置态能看到」，
+  //    但**没有证明反复刷新的结果一致**。历史上本项目多次栽在「第一轮对、第二轮错」：
+  //    · fieldType 属 STRIP_FIELDS → 刷新后被剥离，靠 hydrate 从 base 元信息补回；
+  //      补不回即为 undefined → switch 落 default → 引用控件退化成文本框。
+  //    · 若 hydrate/serialize 往返不是幂等的（每轮丢一点），第 N 轮才会塌。
+  //    所以这里必须做**多轮真实往返 + 真实取选项**，不能只跑一次。
+  //
+  // ★ 必须同时断言三件事，缺一都会漏掉真实缺陷：
+  //    ① 选项「取得出来且内容正确」（值级，不是字段级）
+  //    ② 序列化往返幂等（字节级稳定 → 排除累积漂移）
+  //    ③ 指纹稳定（否则每次刷新都重挂载 → 输入框失焦/草稿被冲）
+  {
+    const MAIN35 = 'tblMain35';
+    const SRC35 = 'tblSrc35';
+    const F_PROV_FORM = 'fldProvinceForm35';
+    const F_CITY_FORM = 'fldCityForm35';
+    const SRC_PROV = 'fldProvince35';
+    const SRC_CITY = 'fldCity35';
+    const SRC_LEVEL = 'fldLevel35';
+
+    // 源表：浙江省(杭州/宁波,一级)、江苏省(南京,一级 / 苏州,二级)
+    const SRC_ROWS35 = [
+      { recordId: 'r1', fields: { [SRC_PROV]: '浙江省', [SRC_CITY]: '杭州', [SRC_LEVEL]: '一级' } },
+      { recordId: 'r2', fields: { [SRC_PROV]: '浙江省', [SRC_CITY]: '宁波', [SRC_LEVEL]: '一级' } },
+      { recordId: 'r3', fields: { [SRC_PROV]: '江苏省', [SRC_CITY]: '南京', [SRC_LEVEL]: '一级' } },
+      { recordId: 'r4', fields: { [SRC_PROV]: '江苏省', [SRC_CITY]: '苏州', [SRC_LEVEL]: '二级' } },
+    ];
+    const META35 = {
+      [MAIN35]: [
+        { id: F_PROV_FORM, name: '省份', type: FieldType.SingleSelect, property: { options: [] } },
+        { id: F_CITY_FORM, name: '城市', type: FieldType.SingleSelect, property: { options: [] } },
+      ],
+      [SRC35]: [
+        { id: SRC_PROV, name: '省份', type: FieldType.SingleSelect, property: { options: [] } },
+        { id: SRC_CITY, name: '城市', type: FieldType.SingleSelect, property: { options: [] } },
+        { id: SRC_LEVEL, name: '级别', type: FieldType.SingleSelect, property: { options: [] } },
+      ],
+    };
+
+    // 模拟宿主服务端 filter（is / contains）。注意：这是**简化**版，
+    // 真正「宿主忽略 filter」的假空场景由 F26 单独覆盖，这里只保证条件链没断。
+    const applyFilter35 = (records, filter) => {
+      if (!filter?.conditions?.length) return records;
+      return records.filter((r) =>
+        filter.conditions.every((c) => {
+          const cell = (r.fields ?? {})[c.fieldId];
+          const v = Array.isArray(cell) ? cell.map((x) => (x && x.text) || x).join(' ') : String(cell ?? '');
+          if (c.operator === 'is') return v === String(c.value);
+          if (c.operator === 'contains') return v.includes(String(c.value));
+          return true;
+        })
+      );
+    };
+    const tableApi35 = (tid) => ({
+      getFieldMetaList: async () => META35[tid],
+      getField: async (fid) => ({ getMeta: async () => META35[tid].find((m) => m.id === fid) }),
+      getRecords: async ({ filter } = {}) => {
+        const hits = applyFilter35(SRC_ROWS35, filter);
+        return { records: hits, hasMore: false, total: hits.length };
+      },
+      getRecordsByPage: async ({ pageSize = 200, pageToken, filter } = {}) => {
+        const base = filter ? applyFilter35(SRC_ROWS35, filter) : SRC_ROWS35;
+        const start = pageToken ? Number(pageToken) : 0;
+        const slice = base.slice(start, start + pageSize);
+        const next = start + pageSize < base.length ? String(start + pageSize) : undefined;
+        return { records: slice, hasMore: !!next, pageToken: next, total: base.length };
+      },
+      getFieldValueListByPage: async ({ pageSize = 200, pageToken } = {}) => {
+        const start = pageToken ? Number(pageToken) : 0;
+        const slice = SRC_ROWS35.slice(start, start + pageSize);
+        const next = start + pageSize < SRC_ROWS35.length ? String(start + pageSize) : undefined;
+        return { values: slice.map((r) => r.fields), hasMore: !!next, pageToken: next, total: SRC_ROWS35.length };
+      },
+      getMeta: async () => ({ id: tid, name: tid === MAIN35 ? '主表' : '源表' }),
+    });
+    selectBaseForTest({
+      base: {
+        getTableById: async (tid) => tableApi35(tid),
+        getTableMetaList: async () => [{ id: MAIN35, name: '主表' }, { id: SRC35, name: '源表' }],
+      },
+    });
+
+    // 管理员配置：省份=单条件（级别=一级）；城市=多条件（级别=一级 AND 省份=本表单省份）
+    const makeCfg35 = () => ({
+      forms: [{
+        id: 'form35', version: 1, formTitle: '刷新稳定性',
+        mainTable: {
+          tableId: MAIN35, tableName: '主表', sectionName: '信息', columns: 3,
+          fields: [
+            {
+              fieldId: F_PROV_FORM, fieldName: '省份', fieldType: FieldType.SingleSelect,
+              visible: true, required: false, label: '省份',
+              optionRef: {
+                tableId: SRC35, fieldId: SRC_PROV, fieldType: FieldType.SingleSelect,
+                conditions: [{
+                  sourceFieldId: SRC_LEVEL, sourceFieldType: FieldType.SingleSelect,
+                  valueSource: 'static', staticValue: '一级',
+                }],
+              },
+            },
+            {
+              fieldId: F_CITY_FORM, fieldName: '城市', fieldType: FieldType.SingleSelect,
+              visible: true, required: false, label: '城市',
+              optionRef: {
+                tableId: SRC35, fieldId: SRC_CITY, fieldType: FieldType.SingleSelect,
+                conditions: [
+                  {
+                    sourceFieldId: SRC_LEVEL, sourceFieldType: FieldType.SingleSelect,
+                    valueSource: 'static', staticValue: '一级',
+                  },
+                  {
+                    sourceFieldId: SRC_PROV, sourceFieldType: FieldType.SingleSelect,
+                    valueSource: 'field', formFieldId: F_PROV_FORM,
+                  },
+                ],
+              },
+            },
+          ],
+        },
+        subTables: [], conditionalRules: [],
+      }],
+      defaultFormId: 'form35', baseToken: 'bascnF35',
+    });
+
+    const thin35 = serializeConfig(makeCfg35());
+    const thinStr35 = JSON.stringify(thin35);
+
+    // ★ 选项比较一律走「集合相等」，绝不排序后拼字符串比较。
+    //   中文 .sort() 按 UTF-16 码点（杭 < 宁 < 苏），不是拼音序 ——
+    //   按拼音手写期望值必错，且错了还像真缺陷。踩过一次，不再踩。
+    const sameSet35 = (got, want) => {
+      const a = [...new Set(got)].sort();
+      const b = [...new Set(want)].sort();
+      return a.length === b.length && a.every((v, i) => v === b[i]);
+    };
+
+    // ---------- 1) 反复刷新：保真 + 真实取选项（20 轮，兼顾耗时） ----------
+    // 「刷新」= 清空进程内缓存 + 从持久化字符串重新 hydrate，与真实 reload 等价。
+    const ROUNDS = 20;
+    let roundsOk = 0;
+    const badRounds = [];
+    let firstName = null;
+    let normStr35 = null;
+    const formValues35 = { [F_PROV_FORM]: '浙江省' }; // 用户填了浙江省
+
+    for (let round = 1; round <= ROUNDS; round += 1) {
+      invalidateTableRecords(); // 等同刷新：丢掉进程内缓存
+      const back = await hydrateConfig(JSON.parse(thinStr35)); // 从持久化副本还原
+      const f0 = back.forms[0];
+      const prov = f0.mainTable.fields.find((x) => x.fieldId === F_PROV_FORM);
+      const city = f0.mainTable.fields.find((x) => x.fieldId === F_CITY_FORM);
+
+      // ★ 防御式取值：配置被剥离时 optionRef 可能整个消失。
+      //   这里必须容错并记为「本轮失败」，不能直接抛异常 ——
+      //   否则一个真实缺陷会以「测试崩溃」形式中断整轮，连带掩盖其它失败项
+      //   （反向注入实测：漏登 optionRef 时抛 TypeError 直接终止，看不到任何 FAIL 明细）。
+      const provType = prov?.optionRef?.fieldType;
+      const cityType = city?.optionRef?.fieldType;
+      const provHadRef = !!prov?.optionRef;
+      const cityHadRef = !!city?.optionRef;
+
+      // ① 结构性保真
+      const structOk =
+        provHadRef && prov.optionRef.conditions?.length === 1 &&
+        prov.optionRef.conditions[0].valueSource === 'static' &&
+        prov.optionRef.conditions[0].staticValue === '一级' &&
+        prov.optionRef.conditions[0].sourceFieldId === SRC_LEVEL &&
+        prov.optionRef.conditions[0].sourceFieldType === FieldType.SingleSelect &&
+        cityHadRef && city.optionRef.conditions?.length === 2 &&
+        city.optionRef.conditions[1].valueSource === 'field' &&
+        city.optionRef.conditions[1].formFieldId === F_PROV_FORM &&
+        city.optionRef.conditions[1].sourceFieldId === SRC_PROV &&
+        f0.mainTable.columns === 3;
+
+      // ② 运行时条件（用户填浙江省后）
+      const provSpecs = (prov?.optionRef?.conditions ?? []).map((c) => conditionSpecOf(c, formValues35)).filter(Boolean);
+      const citySpecs = (city?.optionRef?.conditions ?? []).map((c) => conditionSpecOf(c, formValues35)).filter(Boolean);
+      const specsOk = provSpecs.length === 1 && citySpecs.length === 2;
+
+      // ③ 真实取选项（不是字段级断言，是值级）
+      let provVals = [];
+      let cityVals = [];
+      try {
+        const provR = await enumerateRefOptions(SRC35, SRC_PROV, provSpecs, {
+          valueFieldType: provType, engine: 'scan',
+        }).promise;
+        const cityR = await enumerateRefOptions(SRC35, SRC_CITY, citySpecs, {
+          valueFieldType: cityType, engine: 'scan',
+        }).promise;
+        provVals = provR.values.slice();
+        cityVals = cityR.values.slice();
+      } catch (e) {
+        // 取选项失败也是「本轮不生效」，记入 badRounds 而不是炸掉测试
+        provVals = [`<throw:${e && e.message || e}>`];
+      }
+      const valuesOk = sameSet35(provVals, ['浙江省', '江苏省']) &&
+                       sameSet35(cityVals, ['杭州', '宁波']);
+
+      // ④ 指纹稳定（同一份配置刷多少次都是同一个指纹 → 不会误重挂载）
+      const fp = draftMountKey(f0.id, f0);
+      if (firstName === null) firstName = fp;
+      const fpOk = fp === firstName;
+
+      // ⑤ 幂等：hydrate 会把缺省 readonly 归一化为 false，这属**首轮一次性**归一化
+      //    （第 1 轮 444→461 字节），不是累积漂移。
+      //    所以基准取「第 1 轮归一化后的形态」，从第 2 轮起必须逐字节恒等 ——
+      //    这才能证伪「每刷新一次丢一点」的累积腐蚀。
+      const againStr = JSON.stringify(serializeConfig(back));
+      if (normStr35 === null) {
+        normStr35 = againStr;
+      }
+      const idemOk = againStr === normStr35;
+
+      if (structOk && specsOk && valuesOk && fpOk && idemOk) {
+        roundsOk += 1;
+      } else {
+        badRounds.push({
+          round, structOk, specsOk, valuesOk, fpOk, idemOk,
+          provVals, cityVals,
+        });
+      }
+    }
+
+    check('F35 ★★★ 单条件引用选项：20 轮刷新每轮都取得出正确选项（浙江省/江苏省，不多不少）',
+      badRounds.length === 0 && roundsOk === ROUNDS,
+      { roundsOk, bad: badRounds.slice(0, 3) });
+
+    check('F35 ★★★ 多条件引用选项：同 20 轮每轮都取得出正确选项（杭州/宁波，不多不少）',
+      badRounds.length === 0, { bad: badRounds.slice(0, 3) });
+
+    check('F35 ★★ 反复刷新后 columns / 条件全字段（含 sourceFieldType、formFieldId）零丢失',
+      badRounds.length === 0, null);
+
+    check('F35 ★★ 配置指纹在 20 轮刷新中恒定（不漂移 → 不会每次刷新都重挂载/丢草稿）',
+      badRounds.length === 0, { firstName });
+
+    check('F35 ★★★ serialize↔hydrate 往返收敛：归一化一次后 20 轮字节恒定（排除累积漂移）',
+      badRounds.length === 0, { normLen: normStr35?.length, rawLen: thinStr35.length });
+
+    // ---------- 2) 反向对照：证明上面不是「怎么写都过」 ----------
+    // 把 staticValue 改掉再跑一轮，选项必须随之变化 —— 否则说明断言写松了。
+    {
+      const cfg2 = makeCfg35();
+      cfg2.forms[0].mainTable.fields[0].optionRef.conditions[0].staticValue = '二级';
+      const back2 = await hydrateConfig(JSON.parse(JSON.stringify(serializeConfig(cfg2))));
+      const prov2 = back2.forms[0].mainTable.fields.find((x) => x.fieldId === F_PROV_FORM);
+      const conds2 = prov2?.optionRef?.conditions ?? [];
+      const specs2 = conds2.map((c) => conditionSpecOf(c, formValues35)).filter(Boolean);
+      const r2 = await enumerateRefOptions(SRC35, SRC_PROV, specs2, {
+        valueFieldType: prov2?.optionRef?.fieldType, engine: 'scan',
+      }).promise;
+      check('F35 ★★ 反向对照：改条件值（一级→二级）必须改变选项（证明上一组断言不是恒真）',
+        conds2.length === 1 && sameSet35(r2.values, ['江苏省']) &&
+        !sameSet35(r2.values, ['浙江省', '江苏省']),
+        { got: r2.values });
+    }
+
+    // ---------- 3) 边界：「除非管理员重新配置」 ----------
+    // 管理员改了条件 → 持久化内容与指纹必须都变 → 刷新后立刻按新配置生效。
+    {
+      const cfgA = makeCfg35();
+      const cfgB = makeCfg35();
+      cfgB.forms[0].mainTable.fields[1].optionRef.conditions.pop(); // 多条件 → 单条件
+      const thinA = JSON.stringify(serializeConfig(cfgA));
+      const thinB = JSON.stringify(serializeConfig(cfgB));
+      check('F35 ★ 边界：管理员改配置 → 持久化内容必变（下一轮刷新才能读到新规则）',
+        thinA !== thinB, null);
+
+      const back32 = await hydrateConfig(JSON.parse(thinB));
+      const city32 = back32.forms[0].mainTable.fields.find((x) => x.fieldId === F_CITY_FORM);
+      const conds32 = city32?.optionRef?.conditions ?? [];
+      check('F35 ★ 边界：改后刷新 → 条件数随之变为 1（不多留旧条件）',
+        conds32.length === 1, { n: conds32.length });
+      const specs32 = conds32.map((c) => conditionSpecOf(c, formValues35)).filter(Boolean);
+      const r32 = await enumerateRefOptions(SRC35, SRC_CITY, specs32, {
+        valueFieldType: city32?.optionRef?.fieldType, engine: 'scan',
+      }).promise;
+      check('F35 ★★ 边界：改后刷新 → 选项按新规则重算（级别=一级 → 杭州/宁波/南京，不含二级的苏州）',
+        sameSet35(r32.values, ['杭州', '宁波', '南京']) && !r32.values.includes('苏州'),
+        { got: r32.values });
+    }
+
+    // ---------- 4) 结构性保障：刷新链路上不得有「只执行一次」的初始化 ----------
+    // optionRef 的取值必须每次挂载都从 field.optionRef 重新读，不能缓存在模块级一次性状态里。
+    {
+      const fs35 = await import('node:fs');
+      const { resolveRefSelectVariant } = await import('../src/utils/optionRef.ts');
+      const strip35 = (src) =>
+        src.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|\s)\/\/[^\n]*/g, '$1');
+      const read35 = (rel) => strip35(fs35.readFileSync(new URL(rel, import.meta.url), 'utf8'));
+
+      const cs35 = read35('../src/services/configSize.ts');
+      check('F35 ★★ 结构：optionRef / formRef 已登记 KEEP_FIELDS（漏登就会被剥离 → 刷新即失效）',
+        /optionRef/.test(cs35) && /formRef/.test(cs35) &&
+        /KEEP_FIELDS/.test(cs35), null);
+      check('F35 ★ 结构：fieldType 明确在 STRIP_FIELDS（说明刷新必须靠 hydrate 补回，不可单靠它分流）',
+        /STRIP_FIELDS/.test(cs35) && /fieldType/.test(cs35), null);
+
+      const or35 = read35('../src/utils/optionRef.ts');
+      check('F35 ★ 结构：refresh 链路不依赖「模块级一次性状态」（无顶层 let 缓存 optionRef 结果）',
+        !/^(?:let|var)\s+\w*(?:optionRef|refOptions|refCache)/im.test(or35), null);
+
+      // ★★★ 必须真实调用，不能只正则断言「函数里出现了 hasOptionRef」★★★
+      //    实测教训：把实现改成 switch/default:null（正是本项目历史上的真缺陷）后，
+      //    正则断言照样命中字样 → 假绿。只有真实调用才能证明运行时产出。
+      check('F35 ★★★ 真实调用：摘要完好但 fieldType 丢失（刷新后 hydrate 未补回）→ 仍判定为引用控件',
+        resolveRefSelectVariant({ fieldId: 'x35', optionRef: { tableId: SRC35, fieldId: SRC_PROV } }) === 'single',
+        { got: resolveRefSelectVariant({ fieldId: 'x35', optionRef: { tableId: SRC35, fieldId: SRC_PROV } }) });
+
+      check('F35 ★★★ 真实调用：类型明确为多选 → 多选（不因兜底而错降成单选）',
+        resolveRefSelectVariant({ fieldId: 'x35', fieldType: FieldType.MultiSelect, optionRef: { tableId: SRC35, fieldId: SRC_PROV } }) === 'multiple',
+        null);
+
+      check('F35 ★★ 真实调用：未配 optionRef → null（不把普通字段误判成引用控件）',
+        resolveRefSelectVariant({ fieldId: 'x35', fieldType: FieldType.SingleSelect }) === null, null);
+    }
+  }
+
   const failed = results.filter((r) => !r.pass);
   log(`\n=== ${results.length - failed.length}/${results.length} 通过 ===`);
   if (failed.length) process.exit(1);

@@ -158179,6 +158179,314 @@ async function run() {
       );
     }
   }
+  {
+    const MAIN35 = "tblMain35";
+    const SRC35 = "tblSrc35";
+    const F_PROV_FORM = "fldProvinceForm35";
+    const F_CITY_FORM = "fldCityForm35";
+    const SRC_PROV = "fldProvince35";
+    const SRC_CITY = "fldCity35";
+    const SRC_LEVEL = "fldLevel35";
+    const SRC_ROWS35 = [
+      { recordId: "r1", fields: { [SRC_PROV]: "\u6D59\u6C5F\u7701", [SRC_CITY]: "\u676D\u5DDE", [SRC_LEVEL]: "\u4E00\u7EA7" } },
+      { recordId: "r2", fields: { [SRC_PROV]: "\u6D59\u6C5F\u7701", [SRC_CITY]: "\u5B81\u6CE2", [SRC_LEVEL]: "\u4E00\u7EA7" } },
+      { recordId: "r3", fields: { [SRC_PROV]: "\u6C5F\u82CF\u7701", [SRC_CITY]: "\u5357\u4EAC", [SRC_LEVEL]: "\u4E00\u7EA7" } },
+      { recordId: "r4", fields: { [SRC_PROV]: "\u6C5F\u82CF\u7701", [SRC_CITY]: "\u82CF\u5DDE", [SRC_LEVEL]: "\u4E8C\u7EA7" } }
+    ];
+    const META35 = {
+      [MAIN35]: [
+        { id: F_PROV_FORM, name: "\u7701\u4EFD", type: j5.SingleSelect, property: { options: [] } },
+        { id: F_CITY_FORM, name: "\u57CE\u5E02", type: j5.SingleSelect, property: { options: [] } }
+      ],
+      [SRC35]: [
+        { id: SRC_PROV, name: "\u7701\u4EFD", type: j5.SingleSelect, property: { options: [] } },
+        { id: SRC_CITY, name: "\u57CE\u5E02", type: j5.SingleSelect, property: { options: [] } },
+        { id: SRC_LEVEL, name: "\u7EA7\u522B", type: j5.SingleSelect, property: { options: [] } }
+      ]
+    };
+    const applyFilter35 = (records, filter) => {
+      if (!filter?.conditions?.length) return records;
+      return records.filter(
+        (r10) => filter.conditions.every((c11) => {
+          const cell = (r10.fields ?? {})[c11.fieldId];
+          const v11 = Array.isArray(cell) ? cell.map((x11) => x11 && x11.text || x11).join(" ") : String(cell ?? "");
+          if (c11.operator === "is") return v11 === String(c11.value);
+          if (c11.operator === "contains") return v11.includes(String(c11.value));
+          return true;
+        })
+      );
+    };
+    const tableApi35 = (tid) => ({
+      getFieldMetaList: async () => META35[tid],
+      getField: async (fid) => ({ getMeta: async () => META35[tid].find((m10) => m10.id === fid) }),
+      getRecords: async ({ filter } = {}) => {
+        const hits = applyFilter35(SRC_ROWS35, filter);
+        return { records: hits, hasMore: false, total: hits.length };
+      },
+      getRecordsByPage: async ({ pageSize = 200, pageToken, filter } = {}) => {
+        const base = filter ? applyFilter35(SRC_ROWS35, filter) : SRC_ROWS35;
+        const start = pageToken ? Number(pageToken) : 0;
+        const slice = base.slice(start, start + pageSize);
+        const next = start + pageSize < base.length ? String(start + pageSize) : void 0;
+        return { records: slice, hasMore: !!next, pageToken: next, total: base.length };
+      },
+      getFieldValueListByPage: async ({ pageSize = 200, pageToken } = {}) => {
+        const start = pageToken ? Number(pageToken) : 0;
+        const slice = SRC_ROWS35.slice(start, start + pageSize);
+        const next = start + pageSize < SRC_ROWS35.length ? String(start + pageSize) : void 0;
+        return { values: slice.map((r10) => r10.fields), hasMore: !!next, pageToken: next, total: SRC_ROWS35.length };
+      },
+      getMeta: async () => ({ id: tid, name: tid === MAIN35 ? "\u4E3B\u8868" : "\u6E90\u8868" })
+    });
+    __setAppForTest({
+      base: {
+        getTableById: async (tid) => tableApi35(tid),
+        getTableMetaList: async () => [{ id: MAIN35, name: "\u4E3B\u8868" }, { id: SRC35, name: "\u6E90\u8868" }]
+      }
+    });
+    const makeCfg35 = () => ({
+      forms: [{
+        id: "form35",
+        version: 1,
+        formTitle: "\u5237\u65B0\u7A33\u5B9A\u6027",
+        mainTable: {
+          tableId: MAIN35,
+          tableName: "\u4E3B\u8868",
+          sectionName: "\u4FE1\u606F",
+          columns: 3,
+          fields: [
+            {
+              fieldId: F_PROV_FORM,
+              fieldName: "\u7701\u4EFD",
+              fieldType: j5.SingleSelect,
+              visible: true,
+              required: false,
+              label: "\u7701\u4EFD",
+              optionRef: {
+                tableId: SRC35,
+                fieldId: SRC_PROV,
+                fieldType: j5.SingleSelect,
+                conditions: [{
+                  sourceFieldId: SRC_LEVEL,
+                  sourceFieldType: j5.SingleSelect,
+                  valueSource: "static",
+                  staticValue: "\u4E00\u7EA7"
+                }]
+              }
+            },
+            {
+              fieldId: F_CITY_FORM,
+              fieldName: "\u57CE\u5E02",
+              fieldType: j5.SingleSelect,
+              visible: true,
+              required: false,
+              label: "\u57CE\u5E02",
+              optionRef: {
+                tableId: SRC35,
+                fieldId: SRC_CITY,
+                fieldType: j5.SingleSelect,
+                conditions: [
+                  {
+                    sourceFieldId: SRC_LEVEL,
+                    sourceFieldType: j5.SingleSelect,
+                    valueSource: "static",
+                    staticValue: "\u4E00\u7EA7"
+                  },
+                  {
+                    sourceFieldId: SRC_PROV,
+                    sourceFieldType: j5.SingleSelect,
+                    valueSource: "field",
+                    formFieldId: F_PROV_FORM
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        subTables: [],
+        conditionalRules: []
+      }],
+      defaultFormId: "form35",
+      baseToken: "bascnF35"
+    });
+    const thin35 = serializeConfig(makeCfg35());
+    const thinStr35 = JSON.stringify(thin35);
+    const sameSet35 = (got, want) => {
+      const a = [...new Set(got)].sort();
+      const b10 = [...new Set(want)].sort();
+      return a.length === b10.length && a.every((v11, i3) => v11 === b10[i3]);
+    };
+    const ROUNDS = 20;
+    let roundsOk = 0;
+    const badRounds = [];
+    let firstName = null;
+    let normStr35 = null;
+    const formValues35 = { [F_PROV_FORM]: "\u6D59\u6C5F\u7701" };
+    for (let round = 1; round <= ROUNDS; round += 1) {
+      invalidateTableRecords();
+      const back = await hydrateConfig(JSON.parse(thinStr35));
+      const f02 = back.forms[0];
+      const prov = f02.mainTable.fields.find((x11) => x11.fieldId === F_PROV_FORM);
+      const city = f02.mainTable.fields.find((x11) => x11.fieldId === F_CITY_FORM);
+      const provType = prov?.optionRef?.fieldType;
+      const cityType = city?.optionRef?.fieldType;
+      const provHadRef = !!prov?.optionRef;
+      const cityHadRef = !!city?.optionRef;
+      const structOk = provHadRef && prov.optionRef.conditions?.length === 1 && prov.optionRef.conditions[0].valueSource === "static" && prov.optionRef.conditions[0].staticValue === "\u4E00\u7EA7" && prov.optionRef.conditions[0].sourceFieldId === SRC_LEVEL && prov.optionRef.conditions[0].sourceFieldType === j5.SingleSelect && cityHadRef && city.optionRef.conditions?.length === 2 && city.optionRef.conditions[1].valueSource === "field" && city.optionRef.conditions[1].formFieldId === F_PROV_FORM && city.optionRef.conditions[1].sourceFieldId === SRC_PROV && f02.mainTable.columns === 3;
+      const provSpecs = (prov?.optionRef?.conditions ?? []).map((c11) => conditionSpecOf(c11, formValues35)).filter(Boolean);
+      const citySpecs = (city?.optionRef?.conditions ?? []).map((c11) => conditionSpecOf(c11, formValues35)).filter(Boolean);
+      const specsOk = provSpecs.length === 1 && citySpecs.length === 2;
+      let provVals = [];
+      let cityVals = [];
+      try {
+        const provR = await enumerateRefOptions(SRC35, SRC_PROV, provSpecs, {
+          valueFieldType: provType,
+          engine: "scan"
+        }).promise;
+        const cityR = await enumerateRefOptions(SRC35, SRC_CITY, citySpecs, {
+          valueFieldType: cityType,
+          engine: "scan"
+        }).promise;
+        provVals = provR.values.slice();
+        cityVals = cityR.values.slice();
+      } catch (e11) {
+        provVals = [`<throw:${e11 && e11.message || e11}>`];
+      }
+      const valuesOk = sameSet35(provVals, ["\u6D59\u6C5F\u7701", "\u6C5F\u82CF\u7701"]) && sameSet35(cityVals, ["\u676D\u5DDE", "\u5B81\u6CE2"]);
+      const fp2 = draftMountKey(f02.id, f02);
+      if (firstName === null) firstName = fp2;
+      const fpOk = fp2 === firstName;
+      const againStr = JSON.stringify(serializeConfig(back));
+      if (normStr35 === null) {
+        normStr35 = againStr;
+      }
+      const idemOk = againStr === normStr35;
+      if (structOk && specsOk && valuesOk && fpOk && idemOk) {
+        roundsOk += 1;
+      } else {
+        badRounds.push({
+          round,
+          structOk,
+          specsOk,
+          valuesOk,
+          fpOk,
+          idemOk,
+          provVals,
+          cityVals
+        });
+      }
+    }
+    check(
+      "F35 \u2605\u2605\u2605 \u5355\u6761\u4EF6\u5F15\u7528\u9009\u9879\uFF1A20 \u8F6E\u5237\u65B0\u6BCF\u8F6E\u90FD\u53D6\u5F97\u51FA\u6B63\u786E\u9009\u9879\uFF08\u6D59\u6C5F\u7701/\u6C5F\u82CF\u7701\uFF0C\u4E0D\u591A\u4E0D\u5C11\uFF09",
+      badRounds.length === 0 && roundsOk === ROUNDS,
+      { roundsOk, bad: badRounds.slice(0, 3) }
+    );
+    check(
+      "F35 \u2605\u2605\u2605 \u591A\u6761\u4EF6\u5F15\u7528\u9009\u9879\uFF1A\u540C 20 \u8F6E\u6BCF\u8F6E\u90FD\u53D6\u5F97\u51FA\u6B63\u786E\u9009\u9879\uFF08\u676D\u5DDE/\u5B81\u6CE2\uFF0C\u4E0D\u591A\u4E0D\u5C11\uFF09",
+      badRounds.length === 0,
+      { bad: badRounds.slice(0, 3) }
+    );
+    check(
+      "F35 \u2605\u2605 \u53CD\u590D\u5237\u65B0\u540E columns / \u6761\u4EF6\u5168\u5B57\u6BB5\uFF08\u542B sourceFieldType\u3001formFieldId\uFF09\u96F6\u4E22\u5931",
+      badRounds.length === 0,
+      null
+    );
+    check(
+      "F35 \u2605\u2605 \u914D\u7F6E\u6307\u7EB9\u5728 20 \u8F6E\u5237\u65B0\u4E2D\u6052\u5B9A\uFF08\u4E0D\u6F02\u79FB \u2192 \u4E0D\u4F1A\u6BCF\u6B21\u5237\u65B0\u90FD\u91CD\u6302\u8F7D/\u4E22\u8349\u7A3F\uFF09",
+      badRounds.length === 0,
+      { firstName }
+    );
+    check(
+      "F35 \u2605\u2605\u2605 serialize\u2194hydrate \u5F80\u8FD4\u6536\u655B\uFF1A\u5F52\u4E00\u5316\u4E00\u6B21\u540E 20 \u8F6E\u5B57\u8282\u6052\u5B9A\uFF08\u6392\u9664\u7D2F\u79EF\u6F02\u79FB\uFF09",
+      badRounds.length === 0,
+      { normLen: normStr35?.length, rawLen: thinStr35.length }
+    );
+    {
+      const cfg2 = makeCfg35();
+      cfg2.forms[0].mainTable.fields[0].optionRef.conditions[0].staticValue = "\u4E8C\u7EA7";
+      const back2 = await hydrateConfig(JSON.parse(JSON.stringify(serializeConfig(cfg2))));
+      const prov2 = back2.forms[0].mainTable.fields.find((x11) => x11.fieldId === F_PROV_FORM);
+      const conds2 = prov2?.optionRef?.conditions ?? [];
+      const specs2 = conds2.map((c11) => conditionSpecOf(c11, formValues35)).filter(Boolean);
+      const r22 = await enumerateRefOptions(SRC35, SRC_PROV, specs2, {
+        valueFieldType: prov2?.optionRef?.fieldType,
+        engine: "scan"
+      }).promise;
+      check(
+        "F35 \u2605\u2605 \u53CD\u5411\u5BF9\u7167\uFF1A\u6539\u6761\u4EF6\u503C\uFF08\u4E00\u7EA7\u2192\u4E8C\u7EA7\uFF09\u5FC5\u987B\u6539\u53D8\u9009\u9879\uFF08\u8BC1\u660E\u4E0A\u4E00\u7EC4\u65AD\u8A00\u4E0D\u662F\u6052\u771F\uFF09",
+        conds2.length === 1 && sameSet35(r22.values, ["\u6C5F\u82CF\u7701"]) && !sameSet35(r22.values, ["\u6D59\u6C5F\u7701", "\u6C5F\u82CF\u7701"]),
+        { got: r22.values }
+      );
+    }
+    {
+      const cfgA = makeCfg35();
+      const cfgB = makeCfg35();
+      cfgB.forms[0].mainTable.fields[1].optionRef.conditions.pop();
+      const thinA = JSON.stringify(serializeConfig(cfgA));
+      const thinB = JSON.stringify(serializeConfig(cfgB));
+      check(
+        "F35 \u2605 \u8FB9\u754C\uFF1A\u7BA1\u7406\u5458\u6539\u914D\u7F6E \u2192 \u6301\u4E45\u5316\u5185\u5BB9\u5FC5\u53D8\uFF08\u4E0B\u4E00\u8F6E\u5237\u65B0\u624D\u80FD\u8BFB\u5230\u65B0\u89C4\u5219\uFF09",
+        thinA !== thinB,
+        null
+      );
+      const back32 = await hydrateConfig(JSON.parse(thinB));
+      const city32 = back32.forms[0].mainTable.fields.find((x11) => x11.fieldId === F_CITY_FORM);
+      const conds32 = city32?.optionRef?.conditions ?? [];
+      check(
+        "F35 \u2605 \u8FB9\u754C\uFF1A\u6539\u540E\u5237\u65B0 \u2192 \u6761\u4EF6\u6570\u968F\u4E4B\u53D8\u4E3A 1\uFF08\u4E0D\u591A\u7559\u65E7\u6761\u4EF6\uFF09",
+        conds32.length === 1,
+        { n: conds32.length }
+      );
+      const specs32 = conds32.map((c11) => conditionSpecOf(c11, formValues35)).filter(Boolean);
+      const r32 = await enumerateRefOptions(SRC35, SRC_CITY, specs32, {
+        valueFieldType: city32?.optionRef?.fieldType,
+        engine: "scan"
+      }).promise;
+      check(
+        "F35 \u2605\u2605 \u8FB9\u754C\uFF1A\u6539\u540E\u5237\u65B0 \u2192 \u9009\u9879\u6309\u65B0\u89C4\u5219\u91CD\u7B97\uFF08\u7EA7\u522B=\u4E00\u7EA7 \u2192 \u676D\u5DDE/\u5B81\u6CE2/\u5357\u4EAC\uFF0C\u4E0D\u542B\u4E8C\u7EA7\u7684\u82CF\u5DDE\uFF09",
+        sameSet35(r32.values, ["\u676D\u5DDE", "\u5B81\u6CE2", "\u5357\u4EAC"]) && !r32.values.includes("\u82CF\u5DDE"),
+        { got: r32.values }
+      );
+    }
+    {
+      const fs35 = await import("node:fs");
+      const { resolveRefSelectVariant: resolveRefSelectVariant2 } = await Promise.resolve().then(() => (init_optionRef(), optionRef_exports));
+      const strip35 = (src) => src.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|\s)\/\/[^\n]*/g, "$1");
+      const read35 = (rel) => strip35(fs35.readFileSync(new URL(rel, import.meta.url), "utf8"));
+      const cs35 = read35("../src/services/configSize.ts");
+      check(
+        "F35 \u2605\u2605 \u7ED3\u6784\uFF1AoptionRef / formRef \u5DF2\u767B\u8BB0 KEEP_FIELDS\uFF08\u6F0F\u767B\u5C31\u4F1A\u88AB\u5265\u79BB \u2192 \u5237\u65B0\u5373\u5931\u6548\uFF09",
+        /optionRef/.test(cs35) && /formRef/.test(cs35) && /KEEP_FIELDS/.test(cs35),
+        null
+      );
+      check(
+        "F35 \u2605 \u7ED3\u6784\uFF1AfieldType \u660E\u786E\u5728 STRIP_FIELDS\uFF08\u8BF4\u660E\u5237\u65B0\u5FC5\u987B\u9760 hydrate \u8865\u56DE\uFF0C\u4E0D\u53EF\u5355\u9760\u5B83\u5206\u6D41\uFF09",
+        /STRIP_FIELDS/.test(cs35) && /fieldType/.test(cs35),
+        null
+      );
+      const or35 = read35("../src/utils/optionRef.ts");
+      check(
+        "F35 \u2605 \u7ED3\u6784\uFF1Arefresh \u94FE\u8DEF\u4E0D\u4F9D\u8D56\u300C\u6A21\u5757\u7EA7\u4E00\u6B21\u6027\u72B6\u6001\u300D\uFF08\u65E0\u9876\u5C42 let \u7F13\u5B58 optionRef \u7ED3\u679C\uFF09",
+        !/^(?:let|var)\s+\w*(?:optionRef|refOptions|refCache)/im.test(or35),
+        null
+      );
+      check(
+        "F35 \u2605\u2605\u2605 \u771F\u5B9E\u8C03\u7528\uFF1A\u6458\u8981\u5B8C\u597D\u4F46 fieldType \u4E22\u5931\uFF08\u5237\u65B0\u540E hydrate \u672A\u8865\u56DE\uFF09\u2192 \u4ECD\u5224\u5B9A\u4E3A\u5F15\u7528\u63A7\u4EF6",
+        resolveRefSelectVariant2({ fieldId: "x35", optionRef: { tableId: SRC35, fieldId: SRC_PROV } }) === "single",
+        { got: resolveRefSelectVariant2({ fieldId: "x35", optionRef: { tableId: SRC35, fieldId: SRC_PROV } }) }
+      );
+      check(
+        "F35 \u2605\u2605\u2605 \u771F\u5B9E\u8C03\u7528\uFF1A\u7C7B\u578B\u660E\u786E\u4E3A\u591A\u9009 \u2192 \u591A\u9009\uFF08\u4E0D\u56E0\u515C\u5E95\u800C\u9519\u964D\u6210\u5355\u9009\uFF09",
+        resolveRefSelectVariant2({ fieldId: "x35", fieldType: j5.MultiSelect, optionRef: { tableId: SRC35, fieldId: SRC_PROV } }) === "multiple",
+        null
+      );
+      check(
+        "F35 \u2605\u2605 \u771F\u5B9E\u8C03\u7528\uFF1A\u672A\u914D optionRef \u2192 null\uFF08\u4E0D\u628A\u666E\u901A\u5B57\u6BB5\u8BEF\u5224\u6210\u5F15\u7528\u63A7\u4EF6\uFF09",
+        resolveRefSelectVariant2({ fieldId: "x35", fieldType: j5.SingleSelect }) === null,
+        null
+      );
+    }
+  }
   const failed = results.filter((r10) => !r10.pass);
   log2(`
 === ${results.length - failed.length}/${results.length} \u901A\u8FC7 ===`);
