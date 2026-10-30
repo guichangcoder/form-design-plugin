@@ -21,7 +21,8 @@ import {
   HostContext,
   repairDashboardConfigFromLastSave,
 } from './services/configService';
-import { getBase, getBaseToken, getDashboard, isWorkspaceAvailable, diagnoseAppContext } from './services/appContext';
+import { getBase, getBaseToken, getBaseStrict, getDeclaredBaseToken, getDashboard, isWorkspaceAvailable, diagnoseAppContext, selectBase, AUTO_REBIND_MAX, BASE_READY_RETRY_MS, getTableStrict} from './services/appContext';
+import { runRebindWithRetry } from './utils/rebindRetry';
 import { getFieldMetaList } from './services/baseService';
 import { collectDeclaredTableIds, buildDataConditions } from './utils/dataConditions';
 import { serializeConfig } from './services/configSize';
@@ -293,6 +294,68 @@ export default function App() {
     if (data?.baseToken) setBaseToken(data.baseToken);
   }, [data?.baseToken]);
 
+  /**
+   * 🔴 展示态「数据源绑定自愈」（2026-10-30 第五轮）。
+   *
+   * 根因：SDK 的 `workspace.getBitable(baseToken)` 在宿主数据未拉完时
+   * **直接返回 null 且不等待**（源码实证），所以刷新后首次加载常常绑不上，
+   * 代码静默回退默认 base → 用错 base 查源表 → `msg: undefined code: 12`。
+   *
+   * `selectBase` 里已加了「先等 getBitableReady 再取实例」；但页面刷新存在竞态，
+   * 仍可能整个 loadConfig 都跑在「尚未就绪」的窗口里。这里再兜一层：
+   * 展示态一旦发现「声明了 baseToken 但没绑上」，就自动重绑 + 重新加载配置。
+   *
+   * ⚠️ 两处必须留在 effect 内部/本组件，不能依赖 effect 自己重跑：
+   *   · 重试循环 → 用 `runRebindWithRetry` 在同一次执行里循环。若指望
+   *     `[inConfig, loading, data?.baseToken]` 变化来重跑，而重绑失败时三者都不变，
+   *     effect 根本不会再跑，轮数上限形同虚设。
+   *   · 计数重置 → 换数据源（`want` 变了）必须清零，否则用户按提示重选后
+   *     预算早已耗尽、明明能修好却再也不自愈。
+   */
+  const autoRebindTried = useRef(0);
+  /** 上一次自愈针对的 baseToken —— 换了数据源必须重新给足重试预算 */
+  const rebindTargetRef = useRef('');
+  useEffect(() => {
+    if (inConfig || loading) return;
+    const want = data?.baseToken;
+    if (!want) return; // 未声明数据源（侧边栏/旧配置）→ 无需绑定
+    // 🔴 必须在「目标变了」时重置计数：否则用户按提示重新选了数据源后，
+    //    自愈预算早已耗尽 → 明明能修好却再也不自愈，等于把人从坑里拉出来又推回去。
+    if (rebindTargetRef.current !== want) {
+      rebindTargetRef.current = want;
+      autoRebindTried.current = 0;
+    }
+    if (getBaseToken() === want) return; // 已绑对
+    if (autoRebindTried.current >= AUTO_REBIND_MAX) return;
+    let alive = true;
+    (async () => {
+      // 重试必须在**这一次执行内部**循环，而不是指望 effect 重跑
+      // （重绑失败不会改变任何依赖）。编排逻辑见 utils/rebindRetry.ts。
+      const r = await runRebindWithRetry({
+        maxRounds: AUTO_REBIND_MAX - autoRebindTried.current,
+        retryDelayMs: 600,
+        isAlive: () => alive,
+        onRound: (round) => {
+          autoRebindTried.current += 1;
+          console.warn(
+            `[appContext] 展示态发现未绑定配置声明的数据源，自动重绑（第 ${round} 轮 / 累计 ${autoRebindTried.current}）`
+          );
+        },
+        // ⚠️ 必须用**短的**就绪预算：loadConfig 里首次绑定已经等过一轮，自愈只是补一刀。
+        //    若仍用 8s，多轮累加会让用户干等十几秒还看不到界面。
+        tryBind: () => selectBase(want, undefined, BASE_READY_RETRY_MS),
+        onGiveUp: () => console.warn('[appContext] 自动重绑全部失败，交由故障面板提示用户'),
+      });
+      if (!alive || !r.ok) return;
+      console.log('[appContext] 自动重绑成功，重新加载配置与数据');
+      await load();
+    })();
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inConfig, loading, data?.baseToken]);
+
   // P1-5：展示态监听底表数据/结构变化。字段被删除、选项变更或权限变化时
   // 暂停提交并提示重新载入 —— 不静默清空用户正在填写的数据，也不自动整表重载。
   useEffect(() => {
@@ -430,23 +493,35 @@ export default function App() {
           return '';
         }
       })();
-      let actualBaseId = '';
+      // ★ 先看「绑定状态」这个第一判据（getTableMetaList 失败时说明不了问题：
+      //   绑定错了它当然也失败，上一版据此报「无法读取数据表清单」把根因藏住了）。
       try {
-        const metas = await getBase().getTableMetaList();
-        const actualIds = metas.map((t) => t.id);
-        const notFound = findTablesOutsideActualBase(tableIds, actualIds);
+        const strict = getBaseStrict();
         console.log(
-          '[scopeCheck] base 绑定校验：配置 baseToken =',
-          cfgToken ? `...${cfgToken.slice(-6)}` : '(无)',
-          '｜当前 base 可见表数 =', actualIds.length,
-          notFound.length ? `｜🔴 其中 ${notFound.length} 张查不到: ${notFound.join(', ')}` : '｜✅ 全部可见'
+          '[scopeCheck] base 绑定：声明 =',
+          getDeclaredBaseToken() ? `...${getDeclaredBaseToken().slice(-6)}` : '(无)',
+          '｜已绑定 =', strict.bound ? '是' : '🔴 否（正在用宿主默认 base，读源表必失败）'
         );
-        if (notFound.length > 0) {
-          setScopeIssue(describeBaseMismatch(notFound, cfgToken));
+        if (!strict.bound) {
+          setScopeIssue(
+            `插件没有连上配置所指定的多维表格（数据源标记 ${
+              getDeclaredBaseToken() ? `...${getDeclaredBaseToken().slice(-6)}` : '(未标记)'
+            }）。请先刷新页面；若仍失败，请进入配置模式重新选择数据源并保存。`
+          );
+        } else {
+          const metas = await strict.base!.getTableMetaList();
+          const actualIds = metas.map((t) => t.id);
+          const notFound = findTablesOutsideActualBase(tableIds, actualIds);
+          console.log(
+            '[scopeCheck] base 可见表数 =', actualIds.length,
+            notFound.length ? `｜🔴 其中 ${notFound.length} 张查不到: ${notFound.join(', ')}` : '｜✅ 全部可见'
+          );
+          if (notFound.length > 0) {
+            setScopeIssue(describeBaseMismatch(notFound, cfgToken));
+          }
         }
-        void actualBaseId;
       } catch (e) {
-        console.warn('[scopeCheck] 取 base 表列表失败（可能整个 base 都读不到）:', e);
+        console.warn('[scopeCheck] 取 base 表列表失败:', e);
       }
       console.log('[scopeCheck] 配置需要的表 =', tableIds);
 
@@ -513,7 +588,7 @@ export default function App() {
         //   所以必须区分「这个表整个读不到」还是「只是某种调用方式不支持」。
         const detail: Record<string, string> = {};
         try {
-          const t = await getBase().getTableById(tableId);
+          const t = await getTableStrict(tableId);
           try {
             await t.getFieldMetaList();
             metaOk = true;

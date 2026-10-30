@@ -7,6 +7,7 @@ import {
 } from './configSize';
 import {
   getBase,
+  getBaseStrict,
   getBridge,
   getDashboard,
   getBaseToken,
@@ -250,15 +251,26 @@ export interface SaveResult {
  */
 async function ensureBaseBound(parsed: PluginData | null): Promise<boolean> {
   const token = parsed?.baseToken;
-  if (!token || !isWorkspaceAvailable()) return false;
+  if (!token) return false;
   if (getBaseToken() === token) return true;
+  if (!isWorkspaceAvailable()) {
+    // 侧边栏/旧宿主没有 Workspace，只能退全局 base（语义正确，不是缺陷）
+    console.warn('[config] Workspace 不可用，使用全局默认 base');
+    return false;
+  }
+  // 🔴 selectBase 内部已包含「先等数据源就绪（getBitableReady 轮询）+ 取实例有界重试」。
+  //   这一步是 2026-10-30 第五轮的真根因修复：SDK 的 workspace.getBitable 在数据
+  //   未拉完时**直接返回 null 且不等待**，导致刷新后绑不上、静默回退错 base。
   const ok = await selectBase(token);
   if (ok) {
     resetBaseIdCache();
     console.log('[config] 已通过 Workspace 绑定配置所属 base');
     return true;
   }
-  console.warn('[config] Workspace.getBitable 失败，回退全局默认 base');
+  console.warn(
+    '[config] 绑定配置所属 base 失败（数据源未就绪或未授权），' +
+      '后续读表将如实报错而不是静默使用错误的 base'
+  );
   return false;
 }
 
@@ -434,7 +446,12 @@ export async function saveConfig(data: PluginData): Promise<SaveResult> {
         //   跨 base 或不属于本多维表格的源表在发布后必然读不到（选项为空/报错）。
         if (allIds.length > 0) {
           try {
-            const metas = await getBase().getTableMetaList();
+            // 🔴 必须用严格绑定：若拿宿主默认 base 来校验，配置里合法的表会被
+            //    判成「不属于已选择的多维表格」→ 保存被无理由拦下。
+            //    未绑定时无法判定，跳过校验（容错），而不是用错 base 下结论。
+            const { base: cb, bound: cbound } = getBaseStrict();
+            if (!cbound || !cb) throw new Error('__base_unbound__');
+            const metas = await cb.getTableMetaList();
             const inBase = new Set(metas.map((t) => t.id));
             const outsiders = allIds.filter((id) => !inBase.has(id));
             if (outsiders.length > 0) {

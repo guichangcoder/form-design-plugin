@@ -11,7 +11,7 @@ import { RuleEditor } from './RuleEditor';
 import { BasePicker } from './BasePicker';
 import { toast } from '../../utils/toast';
 import { DEFAULT_THEME, PRESET_COLORS, applyThemeColor } from '../../utils/theme';
-import { isWorkspaceAvailable } from '../../services/appContext';
+import { canListBases } from '../../services/appContext';
 import { MAIN_COLUMNS_OPTIONS, resolveMainColumns } from '../../utils/mainLayout';
 import { draftMountKey, shouldAdoptIncoming } from '../../utils/configDraft';
 
@@ -90,7 +90,7 @@ export function ConfigPanel({ initialConfig, onSave, onCancel, appMode, baseToke
   }, [initialConfig]);
 
   // 应用模式必须显式选择数据源后才能继续配置（P0-1：不混用默认 base）
-  const needBase = !!appMode && isWorkspaceAvailable();
+  const needBase = !!appMode && canListBases();
   const baseReady = !needBase || !!baseToken;
 
   // 主题色实时预览：draft 变化即应用到页面

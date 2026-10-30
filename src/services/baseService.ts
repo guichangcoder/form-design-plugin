@@ -1,7 +1,7 @@
 import { FieldType } from '@lark-base-open/js-sdk';
 import { isInputtableField, extractSelectOptions } from '../utils/fieldMapper';
 import { FieldConfig } from '../types';
-import { getBase } from './appContext';
+import { getTableStrict, getBaseOrThrow } from './appContext';
 
 export interface TableMetaLite {
   id: string;
@@ -18,13 +18,13 @@ export interface FieldMetaLite {
 
 /** 获取当前多维表格所有数据表元信息 */
 export async function getTableMetaList(): Promise<TableMetaLite[]> {
-  const list = await getBase().getTableMetaList();
+  const list = await getBaseOrThrow().getTableMetaList();
   return list.map((t) => ({ id: t.id, name: t.name }));
 }
 
 /** 获取某表的字段元信息（仅可录入字段），并附带单选/多选项 */
 export async function getFieldMetaList(tableId: string): Promise<FieldMetaLite[]> {
-  const table = await getBase().getTableById(tableId);
+  const table = await getTableStrict(tableId);
   const metas = await table.getFieldMetaList();
   return metas
     .filter((m) => isInputtableField(m.type))
@@ -59,7 +59,7 @@ export async function getLinkFields(
   tableId: string,
   targetTableId?: string
 ): Promise<{ fieldId: string; fieldName: string; fieldType: FieldType }[]> {
-  const table = await getBase().getTableById(tableId);
+  const table = await getTableStrict(tableId);
   const metas = await table.getFieldMetaList();
   return metas
     .filter((m) => m.type === FieldType.SingleLink || m.type === FieldType.DuplexLink)
@@ -79,12 +79,12 @@ export async function getLinkFields(
 export async function buildFieldTableMap(): Promise<Map<string, string>> {
   const map = new Map<string, string>();
   try {
-    const tables = await getBase().getTableMetaList();
+    const tables = await getBaseOrThrow().getTableMetaList();
     // 表单首屏只需要恢复少量 tableId；并行读取能明显降低 dashboard hydration 耗时。
     await Promise.all(
       tables.map(async (t) => {
         try {
-          const table = await getBase().getTableById(t.id);
+          const table = await getTableStrict(t.id);
           const metas = await table.getFieldMetaList();
           for (const m of metas) {
             if (m?.id) map.set(m.id, t.id);
@@ -105,7 +105,7 @@ export async function getLinkTargetTableId(
   tableId: string,
   fieldId: string
 ): Promise<string | null> {
-  const table = await getBase().getTableById(tableId);
+  const table = await getTableStrict(tableId);
   const meta = await table.getFieldMetaById(fieldId);
   if (meta.type !== FieldType.SingleLink && meta.type !== FieldType.DuplexLink) return null;
   return (meta as { property?: { tableId?: string } }).property?.tableId ?? null;

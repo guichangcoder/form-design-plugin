@@ -1,7 +1,7 @@
 import { FieldType } from '@lark-base-open/js-sdk';
 import { FieldConfig, FormValues } from '../types';
 import { isEmptyValue } from './validator';
-import { getBase } from '../services/appContext';
+import { getTableStrict, getBaseOrThrow } from '../services/appContext';
 import { getLinkTargetTableId } from '../services/baseService';
 import { isWritableFieldType } from './fieldMapper';
 
@@ -52,7 +52,7 @@ export async function convertToSdkFormat(
   values: FormValues,
   tableId: string
 ): Promise<Record<string, unknown>> {
-  const table = await getBase().getTableById(tableId);
+  const table = await getTableStrict(tableId);
   const result: Record<string, unknown> = {};
 
   for (const field of fields) {
@@ -83,7 +83,7 @@ export async function convertToSdkFormat(
     if (field.fieldType === FieldType.Attachment && Array.isArray(raw)) {
       const files = (raw as File[]).filter((f) => f instanceof File);
       if (files.length === 0) continue;
-      const tokens = await getBase().batchUploadFile(files);
+      const tokens = await getBaseOrThrow().batchUploadFile(files);
       result[field.fieldId] = files.map((f, i) => ({
         name: f.name,
         size: f.size,

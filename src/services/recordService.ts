@@ -2,7 +2,7 @@ import { FormPluginConfig, FormValues, ConditionalState } from '../types';
 import { getLinkTargetTableId } from './baseService';
 import { convertToSdkFormat } from '../utils/valueConverter';
 import { isEmptyValue } from '../utils/validator';
-import { getBase } from './appContext';
+import { getBaseStrict } from './appContext';
 import { extractErrorCode, extractErrorMessage, isAmbiguousError, withWriteRetry } from '../utils/writeRetry';
 
 export interface SubmitResult {
@@ -42,8 +42,17 @@ function describeError(e: unknown): string {
 }
 
 async function getTableOrThrow(tableId: string, label: string) {
+  // 🔴 写路径必须走严格绑定校验：若绑定失败而静默回退到宿主默认 base，
+  //    用户提交的内容会被**写进错误的表**（比读不到数据严重得多，且难以察觉）。
+  const { base, bound } = getBaseStrict();
+  if (!bound || !base) {
+    throw new Error(
+      `未能连接配置所指定的多维表格，${label}无法写入。请刷新页面重试；` +
+        `若持续失败，请进入配置模式重新选择数据源并保存（数据不会被写入其它表）。`
+    );
+  }
   try {
-    return await getBase().getTableById(tableId);
+    return await base.getTableById(tableId);
   } catch (e) {
     throw new Error(`${label}不可访问（tableId=${tableId}）：${describeError(e)}`);
   }
@@ -246,7 +255,11 @@ export async function submitForm(
       for (let i = createdSubRecords.length - 1; i >= 0; i -= 1) {
         const created = createdSubRecords[i];
         try {
-          const table = await getBase().getTableById(created.tableId);
+          // 🔴 回滚是**删除**操作：绑定失败时绝不能拿宿主默认 base 去删，
+          //    否则可能误删别的表的数据。宁可回滚失败并如实报告，也不冒险。
+          const { base: rbBase, bound: rbBound } = getBaseStrict();
+          if (!rbBound || !rbBase) throw new Error('数据源未绑定，已跳过删除以免误删其它表');
+          const table = await rbBase.getTableById(created.tableId);
           for (let j = 0; j < created.ids.length; j += BATCH_SIZE) {
             await table.deleteRecords(created.ids.slice(j, j + BATCH_SIZE));
           }
@@ -259,7 +272,10 @@ export async function submitForm(
       }
       if (mainRecordId) {
         try {
-          const mainTable = await getBase().getTableById(config.mainTable.tableId);
+          // 同上：删除类操作一律要求真实绑定，绝不回退默认 base。
+          const { base: rbBase2, bound: rbBound2 } = getBaseStrict();
+          if (!rbBound2 || !rbBase2) throw new Error('数据源未绑定，已跳过删除以免误删其它表');
+          const mainTable = await rbBase2.getTableById(config.mainTable.tableId);
           await mainTable.deleteRecords([mainRecordId]);
         } catch (ce) {
           console.error('[recordService] 回滚主表记录失败:', ce);

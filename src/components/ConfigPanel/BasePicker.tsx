@@ -5,7 +5,7 @@
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Select, Typography } from '@douyinfe/semi-ui';
-import { listBases, selectBase, isWorkspaceAvailable } from '../../services/appContext';
+import { listBases, selectBase, canListBases } from '../../services/appContext';
 import type { IBaseInfo } from '../../services/appContext';
 import { toast } from '../../utils/toast';
 
@@ -25,7 +25,7 @@ export function BasePicker({ value, onChange }: Props) {
   const [selectedName, setSelectedName] = useState('');
 
   const fetchList = useCallback(async (query: string, append: boolean) => {
-    if (!isWorkspaceAvailable()) return;
+    if (!canListBases()) return;
     setLoading(true);
     try {
       const res = await listBases(query || undefined, append ? cursorRef.current || undefined : undefined);
@@ -88,7 +88,7 @@ export function BasePicker({ value, onChange }: Props) {
     onChange(token, name);
   };
 
-  if (!isWorkspaceAvailable()) {
+  if (!canListBases()) {
     return (
       <Typography.Text type="warning" style={{ fontSize: 12 }}>
         当前环境不支持 Workspace（非应用模式点位），将使用默认多维表格

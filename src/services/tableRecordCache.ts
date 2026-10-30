@@ -13,8 +13,29 @@
  * 飞书服务端只会返回该用户在该多维表格里有权限看到的记录 —— 即「只加载用户权限内的数据」，
  * 与多维表格自身的权限体系完全一致；插件层不做也不应做提权。
  */
-import { getBase, getBaseToken, getDashboard } from './appContext';
+import { getBase, getBaseStrict, getBaseToken, getDashboard, getTableStrict, BASE_NOT_BOUND_MSG } from './appContext';
 import { stringifyCellValue, extractOptionTexts } from '../utils/cellText';
+
+/**
+ * 🔴 读表统一入口：先做「数据源绑定」校验，再取表实例。
+ *
+ * 为什么必须统一（2026-10-30 第五轮真根因）：
+ * `getBase()` 在绑定失败时会**静默回退宿主默认 base**。此时拿默认 base 去
+ * `getTableById(配置里的源表)` 必然查不到，宿主抛出的是一句被降级、无 message 的低层错误
+ * （`getRecordsByPage error, msg: undefined code: 12`）——
+ * 真实原因是「根本没连上配置所选的 base」，却表现得像「表权限/表不存在」。
+ *
+ * 这里改成：绑定没成功就**立即抛一个说人话的错误**，
+ * 让上层（以及用户看到的错误框）直接显示「未能连接所选多维表格」，
+ * 而不是把宿主那句无意义的 `code: 12` 原样透出去。
+ */
+// ⚠️ 文案只在 appContext 定义一份，这里转出以免两处文案漂移（用户会看到不同说法）。
+export { BASE_NOT_BOUND_MSG };
+
+async function getTableForRead(tableId: string): Promise<any> {
+  // 统一到 appContext.getTableStrict，避免两套「严格取表」实现各自漂移。
+  return await getTableStrict(tableId);
+}
 
 /** 分页大小：飞书 SDK 单次上限就是 200，传更大值非法 */
 export const PAGE_SIZE = 200;
@@ -189,7 +210,7 @@ export function loadHeadColumn(
   if (!p) {
     p = (async (): Promise<HeadResult<FieldRow>> => {
       try {
-        const table = await getBase().getTableById(tableId);
+        const table = await getTableForRead(tableId);
         const sortFieldId = await findSortFieldId(table, tableId);
         const params: any = {
           pageSize: HEAD_SIZE,
@@ -234,7 +255,7 @@ export function loadHeadRows(
   if (!p) {
     p = (async (): Promise<HeadResult<FullRow>> => {
       try {
-        const table = await getBase().getTableById(tableId);
+        const table = await getTableForRead(tableId);
         const sortFieldId = await findSortFieldId(table, tableId);
         const params: any = {
           pageSize: HEAD_SIZE,
@@ -419,7 +440,7 @@ export function loadRowsByConditions(
       // 仍保留熔断，避免极端表把页面拖死。
       const maxPages = opts?.maxPages ?? COND_MAX_PAGES;
       try {
-        const table = await getBase().getTableById(tableId);
+        const table = await getTableForRead(tableId);
         const useByPage = typeof (table as any).getRecordsByPage === 'function';
 
         // —— 第一级：带字段类型的精确条件（单选 is / 多选 contains）——
@@ -569,7 +590,7 @@ export function queryDistinctByConditions(
 
   const promise = (async (): Promise<QueryDistinctResult> => {
     try {
-      const table = await getBase().getTableById(tableId);
+      const table = await getTableForRead(tableId);
       const useByPage = typeof (table as any).getRecordsByPage === 'function';
 
       /** 按给定条件构造方式与自证方式拉取（strict / loose 共用） */
@@ -727,7 +748,7 @@ export function scanRowsByConditionsLocal(
     let scanned = 0;
     let total: number | undefined;
     try {
-      const table = await getBase().getTableById(tableId);
+      const table = await getTableForRead(tableId);
       const useByPage = typeof (table as any).getRecordsByPage === 'function';
       let token: any;
       let guard = 0;
@@ -1032,7 +1053,7 @@ export function loadFieldSelectOptions(
   if (!p) {
     p = (async (): Promise<FieldOptionsResult> => {
       try {
-        const table = await getBase().getTableById(tableId);
+        const table = await getTableForRead(tableId);
         const metas: any[] = await table.getFieldMetaList();
         const meta = (metas ?? []).find((m) => m?.id === fieldId);
         if (!meta) return { options: [], found: false };
@@ -1123,7 +1144,7 @@ export function probeOptionExists(
 ): Promise<ProbeResult> {
   return (async (): Promise<ProbeResult> => {
     try {
-      const table = await getBase().getTableById(tableId);
+      const table = await getTableForRead(tableId);
       const useByPage = typeof (table as any).getRecordsByPage === 'function';
       const loose = opts?.loose === true;
       const filter = {
@@ -1430,7 +1451,7 @@ export function enumerateFieldValuesByColumn(
     let truncated = false;
     let filterEffective = false;
     try {
-      const table = await getBase().getTableById(tableId);
+      const table = await getTableForRead(tableId);
       const field = await (table as any).getFieldById?.(fieldId);
       if (!field || typeof field.getFieldValueListByPage !== 'function') {
         return {
@@ -1707,6 +1728,8 @@ export function enumerateRefOptions(
  */
 export interface RefReadContext {
   baseToken: string;
+  /** ★ 是否成功绑定到配置声明的 base（false = 回退了/未绑定，这才是首要根因） */
+  baseBound?: boolean;
   /** 当前实际 base 可见的表 id；null = 探测失败 */
   visibleTableIds: string[] | null;
   /** 宿主持有的 dataConditions 声明表 id；null = 拿不到 */
@@ -1726,11 +1749,24 @@ export async function collectRefReadContext(): Promise<RefReadContext> {
   } catch {
     /* ignore */
   }
+  // ★ 先记录「到底有没有绑定成功」——这才是区分根因的第一判据。
+  //   （上一版直接调 getTableMetaList，绑定失败时它同样失败，
+  //     结果只能报「无法读取数据表清单」，把根因藏在后面。）
+  let base: ReturnType<typeof getBase> | undefined;
   try {
-    const metas = await getBase().getTableMetaList();
-    ctx.visibleTableIds = (metas ?? []).map((t: any) => t.id).filter(Boolean);
+    const strict = getBaseStrict();
+    ctx.baseBound = strict.bound;
+    base = strict.base;
   } catch {
-    ctx.visibleTableIds = null;
+    ctx.baseBound = false;
+  }
+  if (base) {
+    try {
+      const metas = await base.getTableMetaList();
+      ctx.visibleTableIds = (metas ?? []).map((t: any) => t.id).filter(Boolean);
+    } catch {
+      ctx.visibleTableIds = null;
+    }
   }
   try {
     const cfg: any = await (getDashboard() as any).getConfig();
@@ -1797,7 +1833,7 @@ export function searchAllPages(
     let sawEffective = false;
 
     try {
-      const table = await getBase().getTableById(tableId);
+      const table = await getTableForRead(tableId);
       const useByPage = typeof (table as any).getRecordsByPage === 'function';
       for (;;) {
         if (cancelled) return;
@@ -1882,7 +1918,7 @@ export function searchAllRows(
     let hits = 0;
     let sawEffective = false;
     try {
-      const table = await getBase().getTableById(tableId);
+      const table = await getTableForRead(tableId);
       const useByPage = typeof (table as any).getRecordsByPage === 'function';
       for (;;) {
         if (cancelled) return;

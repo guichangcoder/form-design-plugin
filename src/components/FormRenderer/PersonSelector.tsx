@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Select, Tag, Space, Typography } from '@douyinfe/semi-ui';
-import { getBase } from '../../services/appContext';
+import { getBase, getTableStrict} from '../../services/appContext';
 import { getCachedUserIdSync, loadCurrentUserId } from '../../utils/currentUser';
 import { buildNameMap, resolvePersonLabel } from '../../utils/personLabel';
 import { fuzzyOptionFilter } from './fuzzyOptionFilter';
@@ -87,7 +87,7 @@ export function PersonSelector({ value, onChange, disabled, tableId, fieldId, pr
       // 只取最新的一页（200 行）即可覆盖团队常见人员：人员字段取值高度重复，
       // 首屏 1 次请求 ≈ 秒出；不再翻 5 页，避免「仅等加载就要等很久」。
       try {
-        const table = await getBase().getTableById(tableId);
+        const table = await getTableStrict(tableId);
         const field: any = await table.getField(fieldId);
         const HEAD_ROWS = 200; // 与 SDK 单次上限一致，1 次请求
         const collect = (items: Array<{ value?: unknown }>) => {

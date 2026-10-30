@@ -39,7 +39,7 @@ import {
 } from '../types';
 import { isEmptyValue, isHiddenField } from '../utils/validator';
 import { classifySdkError } from '../utils/permError';
-import { getBase } from './appContext';
+import { getBase, getTableStrict } from './appContext';
 
 /** 分页大小（飞书 SDK 单次上限就是 200，不可超过） */
 const PAGE_SIZE = 200;
@@ -249,7 +249,7 @@ async function filterFindDup(
   const fv = filterValueOf(raw, fieldType);
   if (fv === null) return undefined;
   try {
-    const table = await getBase().getTableById(tableId);
+    const table = await getTableStrict(tableId);
     const res: any = await table.getRecords({
       pageSize: 20,
       filter: {
@@ -371,7 +371,7 @@ export function loadAllExistingValues(
     };
 
     try {
-      const table = await getBase().getTableById(tableId);
+      const table = await getTableStrict(tableId);
 
       // —— 路径 1：整列取值（推荐）——
       try {

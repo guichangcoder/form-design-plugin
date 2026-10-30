@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Select, Tag, Space, Typography } from '@douyinfe/semi-ui';
 import { getLinkTargetTableId } from '../../services/baseService';
-import { getBase } from '../../services/appContext';
+import { getBase, getTableStrict} from '../../services/appContext';
 import {
   loadHeadColumn,
   getHeadCache,
@@ -74,7 +74,7 @@ export function LinkSelector({
           if (alive) setError('未找到关联目标表，请重新保存配置');
           return;
         }
-        const table = await getBase().getTableById(tid);
+        const table = await getTableStrict(tid);
         const metas = await table.getFieldMetaList();
         const primary = metas.find((m) => (m as { isPrimary?: boolean }).isPrimary) ?? metas[0];
         if (alive) {
@@ -133,7 +133,7 @@ export function LinkSelector({
     let alive = true;
     (async () => {
       try {
-        const table = await getBase().getTableById(targetTableId);
+        const table = await getTableStrict(targetTableId);
         const recs: any[] = await (table as any).getRecordsByIds(missing.slice(0, 200));
         const map = new Map<string, string>();
         for (const r of recs ?? []) {

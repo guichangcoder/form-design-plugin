@@ -181,6 +181,8 @@ export function describeBaseMismatch(
 export function explainRefReadFailure(input: {
   sourceTableId: string;
   baseToken?: string | null;
+  /** ★ 是否成功绑定到配置声明的 base（false = 根本没连上，这是首要根因） */
+  baseBound?: boolean;
   visibleTableIds?: string[] | null;
   hostDeclaredIds?: string[] | null;
 }): string {
@@ -193,6 +195,12 @@ export function explainRefReadFailure(input: {
   const visible = Array.isArray(input.visibleTableIds) ? input.visibleTableIds : null;
   const declared = Array.isArray(input.hostDeclaredIds) ? input.hostDeclaredIds : null;
 
+  // ⓪ 绑定失败（最根本的一类）：连配置声明的多维表格都没连上。
+  //    此时后面所有探测（表清单、表是否存在、是否登记）全部没有意义，
+  //    必须优先报这一条，否则会把用户引向权限/重新保存等错误处置。
+  if (input?.baseBound === false) {
+    return `插件没有连上配置所指定的多维表格（数据源标记 ${token}），当前使用的是宿主默认的多维表格，因此读不到源表 ${src}。这通常是页面刷新后数据源尚未就绪导致的 —— 请先刷新页面重试；若仍失败，请进入配置模式重新选择数据源并保存。`;
+  }
   // ④ base 表清单都拿不到 → 整个 base 不可达
   if (visible === null) {
     return `无法读取当前多维表格的数据表清单（数据源标记 ${token}）。插件可能没有连上任何多维表格，请刷新页面重试；若持续失败，请重新进入配置模式选择数据源并保存。`;

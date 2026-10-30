@@ -91,6 +91,31 @@ function check(name, cond, extra) {
   log(`${cond ? 'PASS' : 'FAIL'} ${name}${extra ? ' | ' + JSON.stringify(extra) : ''}`);
 }
 
+/**
+ * 从源码中**精确提取**某个函数声明（含 `export function` / `const x = ` 形式）的
+ * 函数体文本 —— 用于「只在这个函数里出现/不出现某关键字」类断言。
+ *
+ * 🔴 为什么必须有：早先图省事用「从起点切 400 字符」当函数体，结果把紧随其后的
+ * 下一个函数也切进来，导致 `!/getBaseList/` 这类否定断言被隔壁函数干扰而误报 FAIL。
+ * 静态断言的取样范围必须与断言语义严格对齐，否则「绿」和「红」都不可信。
+ */
+function extractFnBody(src, signature) {
+  const i = src.indexOf(signature);
+  if (i < 0) return '';
+  const open = src.indexOf('{', i);
+  if (open < 0) return '';
+  let depth = 0;
+  for (let k = open; k < src.length; k += 1) {
+    const ch = src[k];
+    if (ch === '{') depth += 1;
+    else if (ch === '}') {
+      depth -= 1;
+      if (depth === 0) return src.slice(open, k + 1);
+    }
+  }
+  return src.slice(open);
+}
+
 const MAIN = 'tblMain';
 const SUB1 = 'tblSub1';
 const SUB2 = 'tblSub2';
@@ -5749,6 +5774,557 @@ async function run() {
     check('F40 ★★ 结论渲染进 DOM（refDiagnosis 有实际使用处，不是只 setState）',
       /setRefDiagnosis\s*\(/.test(r40) && /\{refDiagnosis\s*&&/.test(r40),
       null);
+  }
+
+  // ================================================================
+  // F41 —— 真正的根因：workspace.getBitable 不等待数据就绪（2026-10-30 第五轮）
+  //
+  // SDK 源码（chunk-L3XSIM3S.mjs）实证：
+  //   getBitable(e){
+  //     if(!cache.has(e)){
+  //       if(!(await this.getBitableReady(e))) return null;   // ← 关键
+  //       cache.set(e, this.genBitable(e))
+  //     }
+  //     return cache.get(e)
+  //   }
+  // 即：数据源没拉完时**立刻返回 null，不等待、不重试**。
+  //
+  // 于是刷新页面后首次 loadConfig 绑不上 → getBase() 静默回退宿主默认 base
+  // → 拿默认 base 查配置里的源表 → 必然查不到
+  // → 宿主抛出被降级、无 message 的错误 → `getRecordsByPage error, msg: undefined code: 12`
+  //
+  // 这解释了全部现象：配置态保存那一刻数据还在缓存里所以正常；刷新后必失败；
+  // 改 dataConditions 结构、换任何读表接口都无效（问题不在读表）。
+  // ================================================================
+  log('\n--- F41 getBitable 不等待就绪 → 刷新后绑错 base ---');
+  {
+    const { explainRefReadFailure } = await import('../src/utils/scopeCheck');
+    const SRC = 'tblSrc41';
+
+    // ★ 绑定失败必须是**第一优先级**结论：后面的探测此时全无意义
+    const mBound = explainRefReadFailure({
+      sourceTableId: SRC,
+      baseToken: 'bascnQWE123456',
+      baseBound: false,
+      visibleTableIds: ['tblOther'],       // 故意给一份「看起来正常」的表清单
+      hostDeclaredIds: ['tblOther'],       // 制造「未登记」假象，验证优先级
+    });
+    check('F41 ★★★ 绑定失败优先于其它所有根因（不被「未登记」假象盖住）',
+      mBound.includes('没有连上配置所指定的多维表格') && !mBound.includes('没有被登记'),
+      { msg: mBound });
+    check('F41 ★★★ 绑定失败的结论指向「刷新重试 / 重选数据源」，不是找管理员',
+      mBound.includes('刷新') && mBound.includes('重新选择数据源') && !mBound.includes('管理员'),
+      { msg: mBound });
+    check('F41 ★★ 绑定失败结论带上数据源标记尾号',
+      mBound.includes('...123456'),
+      { msg: mBound });
+
+    // 绑定成功（baseBound 未传/为 true）时，仍走原有四分支
+    const mOk = explainRefReadFailure({
+      sourceTableId: SRC,
+      baseToken: 'bascnQWE123456',
+      baseBound: true,
+      visibleTableIds: ['tblMain41', SRC],
+      hostDeclaredIds: ['tblMain41'],
+    });
+    check('F41 ★★★ 绑定成功时才轮到「未登记数据源」分支（证明优先级真的生效）',
+      mOk.includes('没有被登记'),
+      { msg: mOk });
+    check('F41 ★★ 绑定失败与未登记是两条不同结论（不能混成一句）',
+      mBound !== mOk,
+      null);
+
+    // ---------- 结构断言（剥离注释） ----------
+    const fs41 = await import('node:fs');
+    const strip41 = (src) =>
+      src.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|\s)\/\/[^\n]*/g, '$1');
+    const read41 = (rel) => strip41(fs41.readFileSync(new URL(rel, import.meta.url), 'utf8'));
+
+    const ac41 = read41('../src/services/appContext.ts');
+    check('F41 ★★★ selectBase 先等数据源就绪（waitBitableReady 在 getBitable 之前调用）',
+      (() => {
+        const iReady = ac41.indexOf('await waitBitableReady(');
+        const iGet = ac41.indexOf('getBitable(');
+        return iReady > 0 && iGet > 0 && iReady < iGet;
+      })(),
+      null);
+    check('F41 ★★★ 取实例有界重试（不再一次失败就永久降级）',
+      /BASE_BIND_RETRY/.test(ac41) && /for\s*\(\s*let\s+attempt/.test(ac41),
+      null);
+    check('F41 ★★★ getBaseStrict 绝不对「声明了却没绑上」回退全局 base',
+      // ⚠️ 这条只是「接线存在」的粗筛。行为正确性由下面 F41d 的真实调用证明 ——
+      //    反向注入已证明：把 return {bound:false} 换成「回退全局 base + bound:true」
+      //    （等于废掉整个修复），只靠这条正则断言 **726/726 全绿**。
+      /declaredBaseToken/.test(ac41) && /getBaseStrict/.test(ac41),
+      null);
+    check('F41 ★★★ isWorkspaceAvailable 判据改用 getBitable（展示态没有 getBaseList）',
+      (() => {
+        // ⚠️ 取样必须精确到函数体花括号范围：早先用「固定 400 字符窗口」，
+        //    会把紧随其后的 canListBases()（内含 getBaseList）一并吞进来 → 误报 FAIL。
+        const fn = extractFnBody(ac41, 'export function isWorkspaceAvailable');
+        if (!fn) return false;
+        return /getBitable/.test(fn) && !/getBaseList/.test(fn);
+      })(),
+      null);
+
+    const tc41 = read41('../src/services/tableRecordCache.ts');
+    check('F41 ★★★ 所有读表都走 getTableForRead（绑定失败即抛可读错误，不透出 code:12）',
+      /getTableForRead\s*\(/.test(tc41) && !/getBase\(\)\.getTableById/.test(tc41),
+      null);
+    check('F41 ★★ 采集器记录 baseBound（根因第一判据，而不是只看表清单）',
+      /baseBound/.test(tc41),
+      null);
+
+    const app41 = read41('../src/App.tsx');
+    check('F41 ★★★ 展示态有自动重绑自愈（用户不必手动重进配置态）',
+      // ⚠️ 不能写成 selectBase\(want\) —— 自愈调用带缩水预算（第三个参数），
+      //    钉死成「右括号紧跟」会让正常改动误报 FAIL。
+      /selectBase\(\s*want\s*[,)]/.test(app41) && /autoRebindTried/.test(app41),
+      null);
+    check('F41 ★★★ 自愈重试真的在 effect 内部循环（依赖不变时上限才不会形同虚设）',
+      (() => {
+        const fn = extractFnBody(app41, 'const autoRebindTried');
+        if (!fn) return false;
+        // ⚠️ 这条只是「接线存在」的粗筛 —— 真正证明行为的是下面 F41c 的真实调用。
+        //    反向注入已证明：把循环条件改成 while (false && ...)，源码里 `while (` 照样匹配，
+        //    只靠这条断言会**假绿**。
+        return /runRebindWithRetry\(/.test(fn) && /AUTO_REBIND_MAX\s*-/.test(fn);
+      })(),
+      null);
+    check('F41 ★★ 换数据源后重置自愈计数（否则重新选完也再不自愈）',
+      /rebindTargetRef/.test(app41),
+      null);
+    check('F41 ★★★ 自检先看绑定状态，不再用 getTableMetaList 失败去推断根因',
+      /getBaseStrict\(\)/.test(app41),
+      null);
+
+    // ---------- F41b：waitReady 纯函数**真实调用**（假时钟 + 假 sleep） ----------
+    //
+    // 为什么不靠正则：这段逻辑的全部价值是「什么时候继续等 / 什么时候立刻放行」。
+    // 正则最多证明「代码里有 catch」，证明不了「catch 之后没有再空转 8 秒」。
+    // 曾经写成一律 catch 后继续等 → 宿主不支持该 API 时每轮白等满预算。
+    const { waitReady } = await import('../src/utils/baseReady');
+
+    /** 造一个假时钟 + 假 sleep：sleep 直接把虚拟时间推进，不真等 */
+    const mkClock = () => {
+      let t = 0;
+      const slept = [];
+      return {
+        now: () => t,
+        sleep: async (ms) => {
+          slept.push(ms);
+          t += ms;
+        },
+        slept,
+        advance: (ms) => {
+          t += ms;
+        },
+      };
+    };
+
+    // ① 明确未就绪 → 必须等到超时，并多次探测（这是「值得等」的唯一情形）
+    {
+      const c = mkClock();
+      let n = 0;
+      const r = await waitReady(async () => {
+        n += 1;
+        return false;
+      }, 'tk1', { timeoutMs: 1000, pollMs: 250, now: c.now, sleep: c.sleep });
+      check('F41b ★★★ 明确未就绪 → 一直等满预算，且探测多次（不是一次就放弃）',
+        r.ready === false && r.reason === 'timeout' && n >= 3,
+        { reason: r.reason, probes: n });
+      check('F41b ★★★ 等待期间按 pollMs 轮询（250ms 一次，没有忙等）',
+        c.slept.length >= 3 && c.slept.every((x) => x === 250),
+        { slept: c.slept });
+    }
+
+    // ② 宿主「未注册该 API」(10299997) → 必须**立刻放行**，探测次数为 1
+    {
+      const c = mkClock();
+      let n = 0;
+      const r = await waitReady(async () => {
+        n += 1;
+        const e = new Error('not registered');
+        e.code = 10299997;
+        throw e;
+      }, 'tk2', { timeoutMs: 8000, pollMs: 250, now: c.now, sleep: c.sleep });
+      check('F41b ★★★ 宿主未注册 getBitableReady → 立刻放行，绝不满预算空转',
+        r.ready === true && r.reason === 'host-unsupported' && n === 1 && c.slept.length === 0,
+        { reason: r.reason, probes: n, slept: c.slept });
+    }
+
+    // ③ 不支持(996) 同款处理
+    {
+      const c = mkClock();
+      let n = 0;
+      const r = await waitReady(async () => {
+        n += 1;
+        const e = new Error('not supported');
+        e.code = 996;
+        throw e;
+      }, 'tk3', { timeoutMs: 8000, pollMs: 250, now: c.now, sleep: c.sleep });
+      check('F41b ★★ 宿主报不支持(996) → 同样立刻放行',
+        r.ready === true && r.reason === 'host-unsupported' && n === 1 && c.slept.length === 0,
+        { reason: r.reason, probes: n });
+    }
+
+    // ④ 其它异常（判断不了）→ 也要立刻放行，不能拖住首屏
+    {
+      const c = mkClock();
+      let n = 0;
+      const r = await waitReady(async () => {
+        n += 1;
+        throw new Error('network boom');
+      }, 'tk4', { timeoutMs: 8000, pollMs: 250, now: c.now, sleep: c.sleep });
+      check('F41b ★★★ 探测抛其它异常 → 立刻放行（判断不了就不该阻塞用户）',
+        r.ready === true && r.reason === 'probe-error' && n === 1 && c.slept.length === 0,
+        { reason: r.reason, probes: n });
+    }
+
+    // ⑤ 第 3 次才就绪 → 应该成功且只探测 3 次（不浪费更多轮询）
+    {
+      const c = mkClock();
+      let n = 0;
+      const r = await waitReady(async () => {
+        n += 1;
+        return n >= 3;
+      }, 'tk5', { timeoutMs: 8000, pollMs: 250, now: c.now, sleep: c.sleep });
+      check('F41b ★★★ 数据源晚到（第 3 次才就绪）→ 等到并绑定成功，不误判失败',
+        r.ready === true && r.reason === 'ready' && n === 3,
+        { reason: r.reason, probes: n });
+    }
+
+    // ⑥ 宿主没有该 API → 放行（不能因为探测手段缺失就阻止绑定）
+    {
+      const c = mkClock();
+      const r = await waitReady(null, 'tk6', { timeoutMs: 8000, pollMs: 250, now: c.now, sleep: c.sleep });
+      check('F41b ★★ 宿主没有 getBitableReady → 放行让 getBitable 自己定论',
+        r.ready === true && r.reason === 'no-api' && c.slept.length === 0,
+        { reason: r.reason });
+    }
+
+    // ⑦ 空 token → 不放行（没有目标就谈不上就绪）
+    {
+      const c = mkClock();
+      const r = await waitReady(async () => true, '', { timeoutMs: 8000, pollMs: 250, now: c.now, sleep: c.sleep });
+      check('F41b ★★ 空 baseToken → 不假装就绪',
+        r.ready === false && r.reason === 'no-token',
+        { reason: r.reason });
+    }
+
+    // ⑧ 预算为 0 仍要探测一次（不能因为预算 0 连唯一一次机会都放弃）
+    {
+      const c = mkClock();
+      let n = 0;
+      const r = await waitReady(async () => {
+        n += 1;
+        return true;
+      }, 'tk8', { timeoutMs: 0, pollMs: 250, now: c.now, sleep: c.sleep });
+      check('F41b ★★★ 预算为 0 也要探测一次（已就绪时不因预算 0 而误报未就绪）',
+        r.ready === true && r.reason === 'ready' && n === 1,
+        { reason: r.reason, probes: n });
+    }
+
+    // ---------- F41c：runRebindWithRetry 纯函数**真实调用** ----------
+    //
+    // 为什么不能只做静态断言：本轮反向注入实测，把循环条件改成
+    // `while (false && ...)` 后，源码里 `while (` 依然匹配 → 718/718 全绿 = 假绿。
+    // 只有真的跑一遍并数「调用了几次 tryBind」，才能证明重试上限不是装饰。
+    const { runRebindWithRetry } = await import('../src/utils/rebindRetry');
+
+    // ① 一直失败 → 必须跑满轮数，不能只跑 1 轮（这正是我修掉的那个缺陷）
+    {
+      let calls = 0;
+      const waits = [];
+      const r = await runRebindWithRetry({
+        maxRounds: 3,
+        retryDelayMs: 600,
+        tryBind: async () => {
+          calls += 1;
+          return false;
+        },
+        wait: async (ms) => waits.push(ms),
+      });
+      check('F41c ★★★ 持续失败 → 真的跑满 3 轮（重试上限不是装饰）',
+        calls === 3 && r.ok === false && r.reason === 'exhausted' && r.attempts === 3,
+        { calls, reason: r.reason, attempts: r.attempts });
+      check('F41c ★★ 最后一轮失败后不再白等一次（只等 2 次，不是 3 次）',
+        waits.length === 2,
+        { waits });
+    }
+
+    // ② 第 2 轮成功 → 立刻停止，不浪费第 3 轮
+    {
+      let calls = 0;
+      const r = await runRebindWithRetry({
+        maxRounds: 3,
+        retryDelayMs: 600,
+        tryBind: async () => {
+          calls += 1;
+          return calls >= 2;
+        },
+        wait: async () => undefined,
+      });
+      check('F41c ★★★ 中途成功 → 立刻停止（不多打无谓请求）',
+        r.ok === true && r.reason === 'bound' && calls === 2,
+        { calls, reason: r.reason });
+    }
+
+    // ③ 单轮抛异常 → 当作失败继续重试，不中断整个自愈
+    {
+      let calls = 0;
+      const r = await runRebindWithRetry({
+        maxRounds: 2,
+        retryDelayMs: 10,
+        tryBind: async () => {
+          calls += 1;
+          throw new Error('boom');
+        },
+        wait: async () => undefined,
+      });
+      check('F41c ★★★ 单轮抛异常 → 不中断自愈，仍跑满轮数',
+        calls === 2 && r.ok === false && r.reason === 'exhausted',
+        { calls, reason: r.reason });
+    }
+
+    // ④ 组件已卸载（isAlive=false）→ 一次都不该发起请求
+    {
+      let calls = 0;
+      const r = await runRebindWithRetry({
+        maxRounds: 3,
+        retryDelayMs: 10,
+        isAlive: () => false,
+        tryBind: async () => {
+          calls += 1;
+          return true;
+        },
+        wait: async () => undefined,
+      });
+      check('F41c ★★★ 已卸载 → 一次都不请求（避免卸载后仍打接口）',
+        calls === 0 && r.ok === false && r.reason === 'cancelled',
+        { calls, reason: r.reason });
+    }
+
+    // ⑤ 中途卸载 → 立即停止，不再继续后续轮次
+    {
+      let calls = 0;
+      let alive = true;
+      const r = await runRebindWithRetry({
+        maxRounds: 5,
+        retryDelayMs: 10,
+        isAlive: () => alive,
+        tryBind: async () => {
+          calls += 1;
+          alive = false; // 第一轮后就被卸载
+          return false;
+        },
+        wait: async () => undefined,
+      });
+      check('F41c ★★ 中途卸载 → 立刻停止（不会跑满 5 轮）',
+        calls === 1 && r.ok === false,
+        { calls, reason: r.reason });
+    }
+
+    // ⑥ 轮数为 0 → 一次都不试（预算耗尽时不该再发请求）
+    {
+      let calls = 0;
+      const r = await runRebindWithRetry({
+        maxRounds: 0,
+        retryDelayMs: 10,
+        tryBind: async () => {
+          calls += 1;
+          return true;
+        },
+        wait: async () => undefined,
+      });
+      check('F41c ★★ 轮数为 0 → 一次都不试（预算耗尽即停）',
+        calls === 0 && r.reason === 'no-rounds',
+        { calls, reason: r.reason });
+    }
+
+    // ⑦ 全失败时给出 onGiveUp 回调（必须让上层知道该提示用户了）
+    {
+      let gaveUp = 0;
+      await runRebindWithRetry({
+        maxRounds: 2,
+        retryDelayMs: 10,
+        tryBind: async () => false,
+        wait: async () => undefined,
+        onGiveUp: () => {
+          gaveUp += 1;
+        },
+      });
+      check('F41c ★★ 全部失败会回调 onGiveUp（上层据此提示用户，而不是静默）',
+        gaveUp === 1,
+        { gaveUp });
+    }
+
+    // ---------- F41d：decideBaseBinding 纯函数**真实调用** ----------
+    //
+    // 反面教材（本轮实测）：原断言只看源码里有没有 declaredBaseToken / getBaseStrict。
+    // 把 `return { bound: false }` 换成「回退全局 base 且 bound:true」——即把整轮修复
+    // 彻底废掉、回到「用错 base 查表」的老路——测试仍然 726/726 全绿。
+    const { decideBaseBinding } = await import('../src/utils/baseReady');
+
+    // ① 声明了却绑不上 → 绝不提供 base
+    {
+      const v = decideBaseBinding({ hasApp: false, currentToken: '', declaredToken: 'bascnX' });
+      check('F41d ★★★ 声明了但没绑上 → bound:false 且不给 base（不静默回退）',
+        v.bound === false && v.useGlobal === false,
+        v);
+    }
+    // ② 同上，但 currentToken 有值（绑到别的 base 的中间态）→ 仍不得放行
+    {
+      const v = decideBaseBinding({ hasApp: false, currentToken: 'otherToken', declaredToken: 'bascnX' });
+      check('F41d ★★★ 当前 token 与声明的不同且没绑上 → 同样不放行',
+        v.bound === false,
+        v);
+    }
+    // ③ 从未声明（侧边栏/旧配置）→ 全局 base 是正确语义
+    {
+      const v = decideBaseBinding({ hasApp: false, currentToken: '', declaredToken: '' });
+      check('F41d ★★★ 从未声明数据源 → 用全局 base 且放行（侧边栏/旧配置不受影响）',
+        v.bound === true && v.useGlobal === true,
+        v);
+    }
+    // ④ 已绑定 → 用绑定实例，不用全局
+    {
+      const v = decideBaseBinding({ hasApp: true, currentToken: 'bascnX', declaredToken: 'bascnX' });
+      check('F41d ★★★ 已绑定 → 用 Workspace 实例（不混用全局 base）',
+        v.bound === true && v.useGlobal === false,
+        v);
+    }
+    // ⑤ 已绑定但 declared 为空（旧配置经 Workspace 绑定）→ 仍用实例
+    {
+      const v = decideBaseBinding({ hasApp: true, currentToken: '', declaredToken: '' });
+      check('F41 ★★ 有绑定实例就优先用实例（不被 declared 为空干扰）',
+        v.bound === true && v.useGlobal === false,
+        v);
+    }
+
+    // ---------- F41e：全仓库不得再出现「宽松 base 直连取表」 ----------
+    //
+    // 反向注入已证明：只要 getTableForRead 被换回宽松写法，F41 那条断言就会 FAIL。
+    // 但「新增一个文件时又用了 getBase().getTableById」这种**扩散**它管不住，
+    // 所以这里对 src 全目录做一次扫描，把风险面钉死。
+    {
+      const path = await import('node:path');
+      const { fileURLToPath } = await import('node:url');
+      const srcRoot = fileURLToPath(new URL('../src', import.meta.url));
+      const walk = (dir) => {
+        const out = [];
+        for (const ent of fs41.readdirSync(dir, { withFileTypes: true })) {
+          const p = path.join(dir, ent.name);
+          if (ent.isDirectory()) out.push(...walk(p));
+          else if (/\.(ts|tsx)$/.test(ent.name)) out.push(p);
+        }
+        return out;
+      };
+      // ⚠️ 断言必须能「优雅失败」：这里整体 try/catch，任何扫描异常降级为一条 FAIL，
+      //    绝不允许以异常中断整轮 —— 否则会连坐吞掉同轮其它 FAIL（项目铁律）。
+      let offenders = null;
+      let scanError = null;
+      try {
+        offenders = [];
+        for (const f of walk(srcRoot)) {
+          const src = strip41(fs41.readFileSync(f, 'utf8'));
+          const rel = path.relative(srcRoot, f).replace(/\\/g, '/');
+          // 宽松 base 直连取表（绑定失败会静默落到宿主默认 base）
+          if (/getBase\(\)\s*\.\s*getTableById/.test(src)) offenders.push(`${rel}: getTableById`);
+          // 宽松 base 直接上传（附件会落到错误 base）
+          if (/getBase\(\)\s*\.\s*batchUploadFile/.test(src)) offenders.push(`${rel}: batchUploadFile`);
+          // 宽松 base 直接列表（诊断会把错 base 当成对的）
+          if (/getBase\(\)\s*\.\s*getTableMetaList/.test(src)) offenders.push(`${rel}: getTableMetaList`);
+        }
+      } catch (e) {
+        scanError = String((e && e.message) || e);
+      }
+      check('F41e ★★★ 全 src 无「宽松 base 直连取表/上传」（防扩散）',
+        offenders !== null && offenders.length === 0,
+        offenders === null ? { scanError } : offenders.slice(0, 6));
+      check('F41e ★★★ 写路径用严格入口（绑定失败绝不写入错误的表）',
+        /getBaseStrict\(\)|getBaseOrThrow\(\)/.test(read41('../src/services/recordService.ts')),
+        null);
+      check('F41e ★★ 回滚删除也走严格入口（绑定失败宁可不删，也不误删）',
+        (() => {
+          try {
+            const src = read41('../src/services/recordService.ts');
+            const fn = extractFnBody(src, 'async function getTableOrThrow');
+            return /getBaseStrict\(\)/.test(fn) && !/getBase\(\)/.test(src);
+          } catch {
+            return false;
+          }
+        })(),
+        null);
+    }
+
+    // ---------- F41f：getBaseOrThrow / getTableStrict **真实调用** ----------
+    //
+    // 反面教材（本轮实测）：把 getBaseOrThrow 改成 `return getBase()`（即静默回退），
+    // 只靠「源码里有 getBaseStrict 字样」的断言 → **734/734 全绿**。
+    // 必须真的调一次，看它到底抛不抛。
+    {
+      const acMod = await import('../src/services/appContext');
+      const { __setDeclaredBaseForTest, __setAppForTest, getBaseOrThrow, getTableStrict, BASE_NOT_BOUND_MSG } = acMod;
+
+      // ① 声明了 baseToken 却没绑上 → getBaseOrThrow 必须抛，而不是给个错 base
+      __setDeclaredBaseForTest('bascnDeclared123');
+      let threw = null;
+      let got = null;
+      try {
+        got = getBaseOrThrow();
+      } catch (e) {
+        threw = e;
+      }
+      check('F41f ★★★ 声明了但没绑上 → getBaseOrThrow 抛错（不返回宿主默认 base）',
+        threw instanceof Error && got === null,
+        { threwMsg: threw && threw.message, gotType: got && typeof got });
+      check('F41f ★★★ 抛出的文案是「未能连接所指定的多维表格」（说人话，不是 code:12）',
+        !!threw && threw.message === BASE_NOT_BOUND_MSG && !/code/.test(threw.message),
+        { msg: threw && threw.message });
+
+      // ② 同状态下 getTableStrict 也必须抛，不能拿错 base 去 getTableById
+      let tsThrew = null;
+      try {
+        await getTableStrict('tblAny');
+      } catch (e) {
+        tsThrew = e;
+      }
+      check('F41f ★★★ 声明了但没绑上 → getTableStrict 也抛（不拿错 base 查表）',
+        tsThrew instanceof Error && tsThrew.message === BASE_NOT_BOUND_MSG,
+        { msg: tsThrew && tsThrew.message });
+
+      // ③ 已正常绑定 → 二者都应正常返回（不能因为加了校验就把正常路径也拦掉）
+      const fakeTable = { id: 'tblOk' };
+      __setAppForTest({
+        base: { getTableById: async () => fakeTable, getTableMetaList: async () => [] },
+      });
+      let okBase = null;
+      let okTable = null;
+      let okErr = null;
+      try {
+        okBase = getBaseOrThrow();
+        okTable = await getTableStrict('tblOk');
+      } catch (e) {
+        okErr = e;
+      }
+      check('F41f ★★★ 已绑定 → 正常放行（加了校验不能把正常路径拦死）',
+        !okErr && !!okBase && okTable === fakeTable,
+        { tableId: okTable && okTable.id, err: okErr && okErr.message });
+
+      // ④ 恢复干净状态，避免污染后续用例
+      __setAppForTest(null);
+      __setDeclaredBaseForTest(null);
+      let cleanBound = null;
+      try {
+        cleanBound = getBaseOrThrow() !== undefined;
+      } catch {
+        cleanBound = false;
+      }
+      check('F41f ★★ 未声明任何数据源 → 回退全局 base 且不抛（侧边栏/旧配置兼容）',
+        cleanBound === true,
+        { cleanBound });
+    }
   }
 
   const failed = results.filter((r) => !r.pass);

@@ -184,6 +184,7 @@ export function RefOptionSelect({
                 const why = explainRefReadFailure({
                   sourceTableId: ref.tableId,
                   baseToken: ctx.baseToken,
+                  baseBound: ctx.baseBound,
                   visibleTableIds: ctx.visibleTableIds,
                   hostDeclaredIds: ctx.hostDeclaredIds,
                 });
