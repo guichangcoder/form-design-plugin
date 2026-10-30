@@ -43,6 +43,12 @@ import {
 } from '../src/services/uniqueCheck';
 import { classifySdkError } from '../src/utils/permError';
 import {
+  describeOptionError,
+  buildRefFooterText,
+  buildRefEmptyContent,
+  resolveFallbackOptions,
+} from '../src/utils/optionError';
+import {
   WRITABLE_FIELD_TYPES,
   isWritableFieldType,
   isInputtableField,
@@ -80,6 +86,7 @@ import {
   enumerateRefOptions,
   shouldCacheFieldOptions,
   isScanComplete,
+  shouldCacheScanResult as shouldCacheScanResultPure,
   MAX_PROBE_OPTIONS,
   DISTINCT_SCAN_MAX_PAGES,
 } from '../src/services/tableRecordCache';
@@ -6324,6 +6331,223 @@ async function run() {
       check('F41f ★★ 未声明任何数据源 → 回退全局 base 且不抛（侧边栏/旧配置兼容）',
         cleanBound === true,
         { cleanBound });
+    }
+  }
+
+  /* ==================================================================
+     F42 「取不到 ≠ 没有选项」+ 源表读不到时的降级
+     ------------------------------------------------------------------
+     🔴 本组的存在理由（2026-10-30 第七轮，用户连续第六次报同一问题）：
+     用户截图同时出现两句**互相矛盾**的话：
+       · 顶部自检：「表 tblcUCBkIHqTtvet：字段结构接口失败」
+       · 下拉底部：「已加载全部 0 个选项，输入关键字可搜索」
+     前者说读不到，后者说读完了且确实没有 —— 二者不可能同时为真。
+     真相是代码把「读不到」伪装成了「成功加载，只是没有选项」，
+     于是用户怎么重试都没用（系统一直在告诉他「一切正常」）。
+
+     本组全部为**真实调用**（喂真实入参、看真实产出），
+     不使用源码正则断言 —— 本项目已多次栽在「正则全绿但运行时是错的」上。
+     ================================================================== */
+  {
+    log('\n--- F42 「取不到 ≠ 没有选项」+ 读不到时降级 ---');
+
+    /* ---------- ① 空结果定性：errorCode 必须如实给出 ---------- */
+    {
+      // meta 读不到 → 连字段类型都没拿到，无权声称「没有选项」
+      const c = describeOptionError('meta-failed', 'FieldMetaList error, code: 12');
+      check('F42a ★★★ meta 读不到 → 结论不得是「没有选项」，且不得建议原地重试', !!c &&
+        /读不到/.test(c.title) && !/重试/.test(c.title) && /重新选择/.test(c.action),
+        { title: c && c.title });
+
+      // 字段 ID 已失效 → 重试毫无意义，必须指向「重新配置」
+      const f = describeOptionError('field-invalid', 'x');
+      check('F42a ★★★ 字段已失效 → 明确指向「重新配置」而非「重试」', !!f &&
+        /失效/.test(f.title) && /重试无效/.test(f.action),
+        { title: f && f.title, action: f && f.action });
+
+      // 服务端说有记录却读不到 → 权限类结论
+      const p = describeOptionError('records-unreadable', '');
+      check('F42a ★★ 读不到记录 → 归为权限/视图类并可操作', !!p &&
+        p.kind === 'permission' && /权限/.test(p.action),
+        { kind: p && p.kind });
+
+      // 未知码 → 返回 null，交由分类器兜底（不能凭空编一个结论）
+      check('F42a ★★ 未知 code → 返回 null（交分类器兜底，不瞎编结论）',
+        describeOptionError(undefined, 'x') === null && describeOptionError('nope', 'x') === null);
+    }
+
+    /* ---------- ② 底部文案：读不到时绝不能说「已加载全部 0 个」 ---------- */
+    {
+      const base = {
+        searching: false, inSearch: false, searchHitCount: 0, searchScanned: 0,
+        hasPendingCond: false, enumRunning: false, scanned: 0, done: true,
+        condApplied: false, source: 'scan',
+      };
+
+      // ★ 核心断言：用户截图里那句误导文案必须消失
+      const bad = buildRefFooterText({ ...base, valueCount: 0, complete: false, hasError: true });
+      check('F42b ★★★ 读不到时底部【不得】出现「已加载全部 0 个选项」（用户截图原句）',
+        !/已加载全部/.test(bad) && !/已取到 0 个/.test(bad) && /读不到|没能读到/.test(bad),
+        { footer: bad });
+
+      // 也不能说成「已达上限，可能不全」—— 那是「数据太多」的语义，会误导方向
+      check('F42b ★★★ 读不到时【不得】说成「已达上限，可能不全」',
+        !/已达上限/.test(bad),
+        { footer: bad });
+
+      // 真正的空表仍然要说「0 个」（不能为了防误报而把真话也改掉）
+      const empty = buildRefFooterText({ ...base, valueCount: 0, complete: true, hasError: false });
+      check('F42b ★★ 表确实为空时仍如实说「已加载全部 0 个」（不制造反向误报）',
+        /已加载全部 0 个/.test(empty),
+        { footer: empty });
+
+      // 有值但被截断 → 保留「可能不全」语义
+      const trunc = buildRefFooterText({ ...base, valueCount: 5, complete: false, hasError: false });
+      check('F42b ★★ 有值且未完整 → 保留「已达上限，可能不全」',
+        /可能不全/.test(trunc),
+        { footer: trunc });
+
+      // 降级态必须如实标注「非实时值」
+      const deg = buildRefFooterText({ ...base, valueCount: 3, complete: false, hasError: false, degraded: true });
+      check('F42b ★★★ 降级态必须标注「非实时值」（不能让用户以为源表就这几个）',
+        /非实时/.test(deg) && /降级|读不到/.test(deg),
+        { footer: deg });
+
+      // 空态文案同理
+      const emptyContent = buildRefEmptyContent({
+        opened: true, searching: false, keyword: '', hasPendingCond: false,
+        done: true, condApplied: false, hasError: true,
+      });
+      check('F42b ★★★ 读不到时下拉空态【不得】说「没有可用的引用选项」',
+        !/没有可用的引用选项/.test(emptyContent),
+        { emptyContent });
+    }
+
+    /* ---------- ③ 降级判定：只在语义安全时才允许 ---------- */
+    {
+      const STATIC = [{ name: '浙江省' }, { name: '江苏省' }, { name: '浙江省' }, { name: '' }];
+
+      // 无条件 + 有静态选项 + 一个值都没取到 → 可降级（去重、去空）
+      const ok = resolveFallbackOptions({ staticOptions: STATIC, conditionCount: 0, valueCount: 0 });
+      check('F42c ★★★ 源表读不到 + 有静态选项 + 无条件 → 允许降级（保证能填完表单）',
+        ok.length === 2 && ok[0] === '浙江省' && ok[1] === '江苏省',
+        { fallback: ok });
+
+      // 有联动条件 → 必须禁止：用全量静态选项会放出不该出现的值（比空更危险）
+      const cond = resolveFallbackOptions({ staticOptions: STATIC, conditionCount: 1, valueCount: 0 });
+      check('F42c ★★★ 有联动条件 → 禁止降级（否则会放出错误的候选值）',
+        cond.length === 0,
+        { fallback: cond });
+
+      // 已经有部分源表值 → 不能丢弃，不降级
+      const partial = resolveFallbackOptions({ staticOptions: STATIC, conditionCount: 0, valueCount: 1 });
+      check('F42c ★★★ 已有源表值 → 不降级（绝不能拿静态选项覆盖实测值）',
+        partial.length === 0,
+        { fallback: partial });
+
+      // 字段没有静态选项域 → 无从降级
+      const none = resolveFallbackOptions({ staticOptions: [], conditionCount: 0, valueCount: 0 });
+      check('F42c ★★ 无静态选项域 → 不降级（宁可不给，也不给错）',
+        none.length === 0,
+        { fallback: none });
+    }
+
+    /* ---------- ④ 端到端：用户截图场景下，枚举层必须如实定性 ---------- */
+    {
+      const T42 = 'tblcUCBkIHqTtvet';
+      const F42 = 'fldProvince';
+      const mkBase = (opts) => ({
+        getTableById: async () => ({
+          getFieldMetaList: async () => {
+            if (opts.metaThrows) throw new Error('FieldMetaList error, msg: undefined code: 12');
+            return opts.hasField
+              ? [{ id: F42, name: '省份', type: 3, property: { options: [] } }]
+              : [{ id: 'fldOTHER', name: '其它', type: 1 }];
+          },
+          getRecordsByPage: async () => opts.records,
+        }),
+        getTableMetaList: async () => [{ id: T42 }],
+      });
+
+      // 场景 A：字段结构失败 + 0 条记录（= 用户截图）
+      selectBaseForTest({ base: mkBase({ metaThrows: true, hasField: true, records: { records: [], total: 0, hasMore: false } }) });
+      invalidateTableRecords();
+      let rA = null;
+      try {
+        rA = await enumerateRefOptions(T42, F42, [], { valueFieldType: FieldType.SingleSelect }).promise;
+      } catch (e) {
+        rA = { values: [], complete: true, error: undefined, errorCode: undefined, _threw: String(e) };
+      }
+      check('F42d ★★★【用户截图场景】meta 失败 + 0 条 → 必须 complete=false 且带 errorCode（不再伪装成「完整且为空」）',
+        rA && rA.complete === false && !!rA.error && rA.errorCode === 'meta-failed',
+        { complete: rA && rA.complete, code: rA && rA.errorCode });
+
+      // 场景 B：字段结构成功但 fieldId 已失效 + 表为空（同类静默路径）
+      selectBaseForTest({ base: mkBase({ metaThrows: false, hasField: false, records: { records: [], total: 0, hasMore: false } }) });
+      invalidateTableRecords();
+      let rB = null;
+      try {
+        rB = await enumerateRefOptions(T42, F42, [], { valueFieldType: FieldType.SingleSelect }).promise;
+      } catch (e) {
+        rB = { values: [], complete: true, error: undefined, errorCode: undefined, _threw: String(e) };
+      }
+      check('F42d ★★★ 字段 ID 已失效 + 表为空 → 必须报 field-invalid（此前会被当成「表真的是空的」）',
+        rB && rB.complete === false && rB.errorCode === 'field-invalid',
+        { complete: rB && rB.complete, code: rB && rB.errorCode });
+
+      // 场景 C：表确实为空且字段正常 → 必须保持「空且完整」（不制造反向误报）
+      selectBaseForTest({ base: mkBase({ metaThrows: false, hasField: true, records: { records: [], total: 0, hasMore: false } }) });
+      invalidateTableRecords();
+      let rC = null;
+      try {
+        rC = await enumerateRefOptions(T42, F42, [], { valueFieldType: FieldType.SingleSelect }).promise;
+      } catch (e) {
+        rC = { values: [], complete: false, error: String(e), errorCode: 'threw' };
+      }
+      check('F42d ★★★ 表确实为空（字段正常）→ 保持「空且完整」，不谎报故障',
+        rC && rC.complete === true && !rC.error && rC.values.length === 0,
+        { complete: rC && rC.complete, error: rC && rC.error });
+
+      // 场景 D：字段结构失败但有记录 → 扫描应救回（有值时不做故障定性）
+      selectBaseForTest({
+        base: mkBase({
+          metaThrows: true, hasField: true,
+          records: { records: [{ recordId: 'r1', fields: { [F42]: '浙江省' } }], total: 1, hasMore: false },
+        }),
+      });
+      invalidateTableRecords();
+      let rD = null;
+      try {
+        rD = await enumerateRefOptions(T42, F42, [], { valueFieldType: FieldType.SingleSelect }).promise;
+      } catch (e) {
+        rD = { values: [], complete: false, error: String(e), errorCode: 'threw' };
+      }
+      check('F42d ★★ meta 失败但扫描能取到值 → 正常返回该值（有值即证据，不误报）',
+        rD && rD.values.length === 1 && rD.values[0] === '浙江省' && !rD.error,
+        { values: rD && rD.values });
+
+      selectBaseForTest(null);
+      invalidateTableRecords();
+    }
+
+    /* ---------- ⑤ 假空结果不得被无 TTL 缓存固化 ---------- */
+    {
+      // 表确实为空 → 可缓存
+      check('F42e ★★ 真空表（0 条/无总数）→ 允许进缓存（省掉重复扫表）',
+        shouldCacheScanResultPure({ values: [], complete: true, scanned: 0 }, 0) === true);
+      // 服务端说有 N 条却读不到 → 绝不能缓存（否则该字段永久 0 选项）
+      check('F42e ★★★ 服务端说有记录却读不到 → 禁止进缓存（否则本次会话永久 0 选项）',
+        shouldCacheScanResultPure({ values: [], complete: true, scanned: 0, total: 99 }, 0) === false,
+        { total: 99 });
+      // 扫到记录却取不到值 → 疑字段失效，禁止缓存
+      check('F42e ★★★ 扫到记录却取不到值 → 禁止进缓存（可重试恢复）',
+        shouldCacheScanResultPure({ values: [], complete: true, scanned: 5 }, 0) === false);
+      // 定性为错误（带 errorCode）→ 禁止缓存
+      check('F42e ★★★ 已定性为「读不到」的结果 → 禁止进缓存',
+        shouldCacheScanResultPure({ values: [], complete: true, scanned: 0, errorCode: 'meta-failed' }, 0) === false);
+      // 有条件 → 禁止缓存（随数据变化失效）
+      check('F42e ★★ 带条件的结果 → 禁止进缓存（极易随数据变化失效）',
+        shouldCacheScanResultPure({ values: [], complete: true, scanned: 0 }, 1) === false);
     }
   }
 

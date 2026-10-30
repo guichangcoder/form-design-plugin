@@ -858,6 +858,50 @@ export function isScanComplete(r: {
   return r.truncated !== true;
 }
 
+/**
+ * ★ 扫描结果是否可以进缓存 —— 纯函数，供回归测试真实调用。
+ *
+ * 🔴 为什么不能只看 `complete`（2026-10-30 第六轮实证缺陷）：
+ * 「扫完、没抛错、0 条记录」会被判成 `complete: true`。若把这个**假空**结果
+ * 写进 `distinctScanCache`（无 TTL、刷新才清），该字段就会在本次会话内
+ * **永久显示 0 个选项** —— 用户重试、重新展开下拉都没用，只能刷页面。
+ *
+ * 判定规则：
+ *   · 未完整 / 有 error → 不缓存（结果不可信）
+ *   · 有取值 → 缓存（值本身就是证据）
+ *   · 空取值 + 有条件 → 不缓存（"该条件下没匹配行"极易随数据变化而失效）
+ *   · 空取值 + 无条件：
+ *       - 扫到 0 条且服务端确认总数为 0（或未报总数）→ 可缓存（表确实是空）
+ *       - 扫到 0 条但服务端说有 N>0 条 → 不缓存（是读不到，不是真没有）
+ *       - 扫到 >0 条却没有值 → 不缓存（字段 ID 可能已失效，重试才有机会恢复）
+ */
+export function shouldCacheScanResult(
+  r:
+    | {
+        values: string[];
+        complete: boolean;
+        scanned: number;
+        total?: number;
+        error?: string;
+        /** ★ 空结果被定性为「读不到 / 字段失效」时不为空 → 这种情况绝不能缓存 */
+        errorCode?: string;
+      }
+    | null
+    | undefined,
+  conditionCount: number
+): boolean {
+  if (!r || r.complete !== true) return false;
+  if (typeof r.error === 'string' && r.error.length > 0) return false;
+  // ★ 即使调用方没带 error 文案，只要定性过「这不是真没有」就不缓存
+  if (typeof r.errorCode === 'string' && r.errorCode.length > 0) return false;
+  if (r.values.length > 0) return true;
+  // 以下都是「空取值」
+  if (conditionCount > 0) return false;
+  if (r.scanned > 0) return false; // 有记录却取不到值 → 疑字段失效
+  if (typeof r.total === 'number' && r.total > 0) return false; // 服务端说有，却读不到
+  return true; // 表确实为空
+}
+
 /** 已完成扫描的缓存（键含条件，避免重复全表扫描） */
 const distinctScanCache = new Map<string, Promise<DistinctScanResult>>();
 
@@ -963,8 +1007,17 @@ export function scanDistinctValues(
       total: r.total,
       error: r.error,
     };
-    // ★ 只缓存「真·完整」的结果：失败的空结果进缓存 = 该字段永远没有选项
-    if (useCache && out.complete) distinctScanCache.set(key, Promise.resolve(out));
+    // ★ 只缓存「真·完整且值得信任」的结果。
+    //
+    // 🔴 这里曾是「一次读不到 = 该字段永远没有选项」的固化点（2026-10-30 第六轮）：
+    //   扫到 0 条但没抛错时 out.complete 为 true → 假空结果被写进无 TTL 的
+    //   distinctScanCache → 刷新前无论重试多少次，都直接命中这份「空且完整」。
+    //   用户感受就是「怎么试都不行」。
+    //   现在改由纯函数 `shouldCacheScanResult` 判定：空结果只有在拿到
+    //   「表确实为空」的正面证据时才允许缓存，其余一律不缓存（下次会重扫）。
+    if (useCache && shouldCacheScanResult(out, conditions.length)) {
+      distinctScanCache.set(key, Promise.resolve(out));
+    }
     return out;
   });
 
@@ -1207,7 +1260,36 @@ export interface OptionEnumResult {
   /** 扫描模式下已扫描的「源表总记录数」（与 scanned 的「命中数」区分） */
   scannedTotal?: number;
   error?: string;
+  /**
+   * ★ 错误的**类型**（`error` 有值时才有）。
+   *
+   * 🔴 为什么必须带类型（2026-10-30 第七轮）：
+   * UI 拿到 `error` 后会走 `classifySdkError()` 把文案重新归类一遍，
+   * 而它只认 permission / not found 两类关键词 → 我们写好的中文诊断
+   * （「读不到源字段的字段结构…这不代表没有选项」）会被降级成一句
+   * 无信息量的「读取「引用选项的源数据表」失败」，
+   * 于是**辛苦算出的结论在最后一米被丢掉了**。
+   *
+   * 带类型后 UI 可直接按类型给出结论与处置，不再依赖宿主的错误文案特征。
+   */
+  errorCode?: OptionErrorCode;
 }
+
+/**
+ * 选项枚举失败的类型（供 UI 精确给出结论，见 `OptionEnumResult.errorCode`）。
+ * - `meta-failed`：读不到源字段的字段结构 → 连字段类型/选项域都没拿到
+ * - `field-invalid`：扫到了记录，但该字段取不到任何值 → 字段 ID 很可能已失效
+ * - `records-unreadable`：服务端说有 N 条，却一条也读不出来 → 权限/视图范围
+ * - `scan-failed`：扫描过程本身抛错（第 0 页就失败时 truncated 仍为 false）
+ * - `filter-ineffective` / `query-empty`：直接查询不可信，已回退扫描
+ */
+export type OptionErrorCode =
+  | 'meta-failed'
+  | 'field-invalid'
+  | 'records-unreadable'
+  | 'scan-failed'
+  | 'filter-ineffective'
+  | 'query-empty';
 
 /** 存在性探测的并发度（过大易触发限流，8 是稳妥值） */
 export const PROBE_CONCURRENCY = 8;
@@ -1592,6 +1674,96 @@ export function enumerateRefOptions(
     //   多选（4）需要把单元格拆成多个独立选项（可被引用到单选控件）。
     const valueFieldType = opts?.valueFieldType ?? mo.type;
     const engine = opts?.engine ?? 'auto';
+    /**
+     * 🔴 字段结构（getFieldMetaList）是否读取失败 —— 这个事实以前被**直接丢弃**，
+     * 于是「读不到字段结构」与「字段就是没有选项」在 UI 上完全同形。
+     * 保留它只用于「结果为空时的定性与报错」，不影响任何有值的正常路径。
+     */
+    const metaFailed = typeof mo.error === 'string' && mo.error.length > 0;
+
+    /**
+     * ★ 字段结构读**成功**了，但字段清单里没有这个 fieldId
+     *   —— 这是最硬的证据：配置指向的源字段已不存在（被删除 / 重建 / 换了表）。
+     *
+     * 🔴 为什么必须单列一条（2026-10-30 第七轮审计）：
+     * `loadFieldSelectOptions` 在「字段不存在」时返回 `{ found:false, type:undefined, 无 error }`，
+     * 与「字段存在但不是单选/多选」共用同一形态，于是被当成「正常的无选项域」继续走扫描。
+     * 扫描当然取不到值 → 空结果 → 若表恰好没记录（`scanned=0, total=0`）就判成
+     * 「complete:true，确实没有选项」→ UI 显示「已加载全部 0 个选项」。
+     * 用户看到的是「加载成功只是没有选项」，真相是**配置已经坏了**。
+     *
+     * 判据用 `type === undefined`（而不是 `found === false`）：后者还包含
+     * 「字段存在但不是单选/多选」，那种情况下选项本来就该从记录里取，不能报错。
+     */
+    const fieldMissing = !metaFailed && typeof mo.type !== 'number';
+
+    /**
+     * ★ 给「空结果」定性：**没报错 ≠ 真的有结果**。
+     *
+     * 这是本缺陷的核心（2026-10-30 第六轮复现确证）：
+     * 扫描「跑完了、没抛错、0 条记录」时会被判成 `complete: true`，
+     * 于是 UI 显示「已加载全部 0 个选项，输入关键字可搜索」——
+     * 用户看到的是「加载成功，只是没有选项」，而真实情况往往是**根本读不到**。
+     * 两者语义完全相反却共用同一句话，用户因此「怎么试都不行」。
+     *
+     * ⚠️ 但**不能反过来一律报错**，否则「该条件下确实没有匹配行」这种合法状态
+     *    会被误报成故障，同样是骗人。所以只在**拿到正面证据**时才定性为错误：
+     *      ① 字段结构读取失败 → 连源字段是什么都不知道，无权声称「没有选项」
+     *      ② 扫到了记录却取不到该字段的值 → 字段 ID 极可能已失效（删了/重建了）
+     *      ③ 服务端说有 N 条、却一条没返回 → 读不到记录（权限/视图）
+     *    其余情形（表真的是空、条件真的没匹配）保持「空且完整」——这才是真话。
+     *
+     * @returns error 有值 = 属于「读不到」，UI 必须报错；无 error = 真的没有
+     */
+    const describeEmpty = (
+      scannedRecords: number,
+      serverTotal?: number
+    ): { error?: string; complete: boolean; errorCode?: OptionErrorCode } => {
+      if (metaFailed) {
+        return {
+          error:
+            `读不到源字段的字段结构（${mo.error}）。` +
+            `这不代表「没有选项」—— 插件连源字段的类型和选项域都没拿到。`,
+          complete: false,
+          errorCode: 'meta-failed',
+        };
+      }
+      // ★ 字段已不存在：与「没有选项」是两件事，但旧行为完全同形 → 必须优先报出来。
+      //   放在条件判断**之前**：字段都没了，讨论「该条件下有没有记录」没有意义。
+      if (fieldMissing) {
+        return {
+          error:
+            `源数据表里找不到配置所指向的源字段（字段 ID ${valueFieldId} 已不存在于表 ${tableId}）。` +
+            `这通常说明该字段被删除或重建过。请进入配置模式重新选择「选项来源字段」并保存。`,
+          complete: false,
+          errorCode: 'field-invalid',
+        };
+      }
+      // 有条件时「0 个」可能完全正常（没有记录满足条件），不做故障定性
+      if (conditions.length > 0) {
+        return { complete: true };
+      }
+      if (scannedRecords > 0) {
+        return {
+          error:
+            `扫描到 ${scannedRecords} 条源表记录，但没有一条能取到该字段的值。` +
+            `通常说明配置里记录的源字段已被删除或重建（字段 ID 已失效），请重新选择源字段并保存。`,
+          complete: false,
+          errorCode: 'field-invalid',
+        };
+      }
+      if (typeof serverTotal === 'number' && serverTotal > 0) {
+        return {
+          error:
+            `服务端报告源表有 ${serverTotal} 条记录，但一条也没能读出来。` +
+            `这通常是当前账号读不到该表的记录（权限/视图范围），或该表未被登记为插件的数据源。`,
+          complete: false,
+          errorCode: 'records-unreadable',
+        };
+      }
+      // 表确实是空的（或宿主没报总数且确实 0 条）→ 如实为「空且完整」
+      return { complete: true };
+    };
 
     // 渐进全量扫描 = 最终兜底引擎（getRecordsByPage，必然可用）
     const runScan = async (): Promise<OptionEnumResult> => {
@@ -1607,18 +1779,40 @@ export function enumerateRefOptions(
       });
       inner = h;
       const r = await h.promise;
+      // ★ 有值 → 照原样返回（值本身就是证据，不需要定性）
+      if (r.values.length > 0) {
+        return {
+          values: r.values,
+          complete: r.complete,
+          truncated: r.truncated,
+          probes: 0, // 扫描模式的「探测次数」以扫描页数计；此处不计
+          scanned: r.scanned,
+          source: 'scan',
+          filterEffective: true, // 本地自证筛过，必然生效
+          serverTotal: r.total,
+          scannedTotal: r.total,
+          // ★ 把扫描失败如实上报（UI 才能提示「源表不可读」而不是「没有选项」）
+          ...(r.error ? { error: r.error, errorCode: 'scan-failed' as OptionErrorCode } : {}),
+        };
+      }
+      // ★ 空结果 → 必须定性，绝不能把「读不到」当成「真没有」
+      const verdict = describeEmpty(r.scanned, r.total);
+      const errText = r.error || verdict.error;
+      const errCode: OptionErrorCode | undefined = r.error
+        ? 'scan-failed'
+        : verdict.errorCode;
       return {
-        values: r.values,
-        complete: r.complete,
+        values: [],
+        complete: verdict.complete,
         truncated: r.truncated,
-        probes: 0, // 扫描模式的「探测次数」以扫描页数计；此处不计
+        probes: 0,
         scanned: r.scanned,
         source: 'scan',
-        filterEffective: true, // 本地自证筛过，必然生效
+        filterEffective: true,
         serverTotal: r.total,
         scannedTotal: r.total,
-        // ★ 把扫描失败如实上报（UI 才能提示「源表不可读」而不是「没有选项」）
-        ...(r.error ? { error: r.error } : {}),
+        ...(errText ? { error: errText } : {}),
+        ...(errCode ? { errorCode: errCode } : {}),
       };
     };
 

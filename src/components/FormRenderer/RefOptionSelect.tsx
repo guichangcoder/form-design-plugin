@@ -6,6 +6,7 @@ import { hasOptionRef, conditionSpecOf } from '../../utils/optionRef';
 import { stringifyCellValue, extractOptionTexts } from '../../utils/cellText';
 import { classifySdkError, ClassifiedError } from '../../utils/permError';
 import { explainRefReadFailure } from '../../utils/scopeCheck';
+import { describeOptionError, buildRefFooterText, buildRefEmptyContent, resolveFallbackOptions } from '../../utils/optionError';
 import {
   searchAllRows,
   enumerateRefOptions,
@@ -73,6 +74,8 @@ export function RefOptionSelect({
   const [refDiagnosis, setRefDiagnosis] = useState('');
   const [opened, setOpened] = useState(false);
   const openedRef = useRef(false);
+  /** ★ 源表读不到时的降级标记：true = 当前选项来自本字段的静态选项域，不是源表实时值 */
+  const [degraded, setDegraded] = useState(false);
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const handleRef = useRef<SearchHandle<FullRow> | null>(null);
   /** 当前关键字（state，用于渲染；同时用 ref 做「结果是否属于本次关键字」的比对） */
@@ -135,6 +138,7 @@ export function RefOptionSelect({
     setValues([]);
     setMeta(null);
     setScanProgress(null);
+    setDegraded(false);
     if (hasPendingCond) {
       setDone(true);
       return;
@@ -168,10 +172,39 @@ export function RefOptionSelect({
           console.warn(
             `[optionRef] 枚举引用选项未完成：field="${field.label || field.fieldName}" ` +
               `sourceTableId=${ref.tableId} sourceFieldId=${ref.fieldId} ` +
-              `complete=${res.complete} values=${res.values.length} error=${res.error}`
+              `complete=${res.complete} values=${res.values.length} code=${res.errorCode ?? '-'} error=${res.error}`
           );
           if (res.values.length === 0) {
-            const c = classifySdkError(new Error(res.error), '引用选项的源数据表');
+            /**
+             * ★ 先尝试**降级**：源表读不到，但本字段自带静态选项域且无联动条件时，
+             * 用它让用户至少能把表单填完（这才是用户真正要的结果）。
+             * 判据全部在纯函数里，且只在「语义安全」时才可能返回非空。
+             */
+            const fb = resolveFallbackOptions({
+              staticOptions: field.options,
+              conditionCount: (ref?.conditions ?? []).length,
+              valueCount: res.values.length,
+            });
+            if (fb.length > 0) {
+              setValues(fb);
+              setDegraded(true);
+              /**
+               * 不设 `error`（否则整个下拉会被错误框替换、用户反而选不了）；
+               * 降级事实由底部文案如实标注（见 `buildRefFooterText` 的 degraded 分支）。
+               */
+              setError('');
+              setErrorHelp(null);
+              return;
+            }
+            /**
+             * 🔴 不能直接 `classifySdkError(new Error(res.error))` 了事（2026-10-30 第七轮）：
+             * 它只按 permission / not found 两类关键词重新归类，凡是命中不了的
+             * 都会被降级成一句笼统的「读取「引用选项的源数据表」失败」，
+             * 把枚举层辛苦算出的精确诊断（字段结构读不到 / 字段 ID 已失效）
+             * **在最后一米丢掉**。所以先按 errorCode 给出结论，分类器只作兜底。
+             */
+            const preset = describeOptionError(res.errorCode, res.error);
+            const c = preset ?? classifySdkError(new Error(res.error), '引用选项的源数据表');
             setError(c.title);
             setErrorHelp(c);
             // 🔴 顺手把「现场」采回来，塞进错误框。
@@ -181,6 +214,12 @@ export function RefOptionSelect({
             collectRefReadContext()
               .then((ctx) => {
                 if (!alive) return;
+                // ★ 已由 errorCode 定性出精确原因时，不再用「连错 base / 没登记数据源」
+                //   那套猜测覆盖它 —— 那些结论在「字段被删」场景下是错的。
+                if (preset) {
+                  setRefDiagnosis('');
+                  return;
+                }
                 const why = explainRefReadFailure({
                   sourceTableId: ref.tableId,
                   baseToken: ctx.baseToken,
@@ -384,29 +423,39 @@ export function RefOptionSelect({
 
   const condApplied = condSpecs.length > 0;
   const enumRunning = opened && !done && !inSearch;
-  const footerText = searching
-    ? `正在按关键字翻页查询…已扫描 ${searchScanned} 条`
-    : inSearch
-      ? searchHitCount > 0
-        ? `搜索命中 ${searchHitCount} 个选项${searching ? '（仍在翻页补充…）' : ''}`
-        : searching || (searchDone === false && searchScanned === 0)
-          ? '正在搜索…'
-          : '未找到匹配的引用选项'
-      : hasPendingCond
-        ? '请先填写上级字段'
-        : enumRunning
-          ? `正在穷举选项…已扫描 ${scanProgress?.scanned ?? 0}${scanProgress?.total ? ` / 共 ${scanProgress.total}` : ''} 条`
-          : done
-            ? meta && !meta.complete
-              ? condApplied
-                ? `已按条件取到 ${values.length} 个选项（已达上限，可能不全）`
-                : `已取到 ${values.length} 个选项（已达上限，可能不全）`
-              : condApplied
-                ? `已按条件穷举全部 ${values.length} 个选项`
-                : meta?.source === 'metadata'
-                  ? `已加载全部 ${values.length} 个选项（源字段选项域）`
-                  : `已加载全部 ${values.length} 个选项，输入关键字可搜索`
-            : '正在加载选项…';
+  /**
+   * ★ 底部 / 空态文案改由纯函数生成（`utils/optionError.ts`）。
+   * 旧写法是组件内联三元，正则断言证明不了运行时产出 ——
+   * 而「已加载全部 0 个选项」这句误导正是写在那串三元里的。
+   */
+  const hasEnumError = !!error || (!!meta?.error && values.length === 0);
+  const footerText = buildRefFooterText({
+    searching,
+    inSearch,
+    searchHitCount,
+    searchDone,
+    searchScanned,
+    hasPendingCond,
+    enumRunning,
+    scanned: scanProgress?.scanned ?? 0,
+    total: scanProgress?.total,
+    done,
+    valueCount: values.length,
+    complete: meta?.complete,
+    condApplied,
+    source: meta?.source,
+    hasError: hasEnumError,
+    degraded,
+  });
+  const emptyText = buildRefEmptyContent({
+    opened,
+    searching,
+    keyword: kw,
+    hasPendingCond,
+    done,
+    condApplied,
+    hasError: hasEnumError,
+  });
 
   return (
     <Select
@@ -440,21 +489,7 @@ export function RefOptionSelect({
           setOpened(true);
         }
       }}
-      emptyContent={
-        !opened
-          ? '点击展开后将加载选项'
-          : searching
-            ? '正在搜索…'
-            : kw
-              ? '未找到匹配的引用选项'
-              : hasPendingCond
-                ? '请先填写上级字段'
-                : done
-                  ? condApplied
-                    ? '上级未选择或该条件下无选项'
-                    : '没有可用的引用选项'
-                  : '加载中…'
-      }
+      emptyContent={emptyText}
       virtualize={{ itemSize: 32 }}
       outerBottomSlot={
         opened ? (
