@@ -28,6 +28,8 @@ import { serializeConfig } from './services/configSize';
 import {
   collectBlockedTables,
   describeBlockedTables,
+  findTablesOutsideActualBase,
+  describeBaseMismatch,
   type TableAccessProbe,
 } from './utils/scopeCheck';
 import { findStaleConfiguredField, describeStaleHit } from './utils/metaStale';
@@ -193,6 +195,21 @@ export default function App() {
   // 调试内容可见性：填写态（View）永远干净（所见即发布后效果）；
   // 配置态下 dev 显示诊断条便于排错；?debug=1 强制任何态都显示。
   const showDebug = debugForced || (isDebugMode() && inConfig);
+
+  /**
+   * 🔴 展示态「故障面板」可见性 —— 与 showDebug 分开，**不看 dev/配置态**。
+   *
+   * 为什么必须独立：插件跑在飞书 iframe 里，用户**根本打不开插件的 console**
+   * （打开的是飞书顶层页面的控制台，看不到 iframe 内日志）。
+   * 而本项目的排错信息此前全写进 console + 只在 showDebug 下渲染的调试条
+   * （`isDebugMode() && inConfig`）→ **展示态出问题时，用户眼前一片空白、
+   * 反馈里也只能贴一张「0 个选项」的截图**，连续四轮排查因此都在猜。
+   *
+   * 所以：只要展示态出现「数据源读不到」这种会让功能整体不可用的故障，
+   * 就把结论**直接画在界面上**（可折叠，不长期骚扰填写者）。
+   * 纯样式问题/轻微告警仍然只留在 console，不污染发布后的画布。
+   */
+  const showFaultPanel = !inConfig && !!scopeIssue;
 
   // dashboard：宿主状态变化 → 回到对应列表（打断编辑/填写，避免界面与宿主不一致）
   useEffect(() => {
@@ -392,6 +409,45 @@ export default function App() {
         hostInfo = { hostInfoError: String((e as Error)?.message ?? e) };
       }
       console.log('[scopeCheck] 宿主环境 =', hostInfo);
+
+      /**
+       * ★ 第二步（本轮新增，最可能命中根因）：验证「读表用的 base」到底是哪一个。
+       *
+       * `getBase()` 实现是 `currentApp?.base ?? bitable.base` —— 若配置声明了
+       * baseToken 但 `selectBase()` 失败（Workspace.getBitable 抛错/无权限/
+       * 该 base 未对插件授权），就会**静默回退到宿主默认 base**。
+       * 而应用模式允许「数据源 ≠ 宿主所在多维表格」（1:N 设计），
+       * 此时我们拿默认 base 去 getTableById(源表id) 必然查不到，
+       * 宿主返回的就是一句没有 message 的低层错误（`msg: undefined code: 12`）。
+       *
+       * 这是唯一能同时解释「配置态保存时正常（那时刚 selectBase 过）
+       * / 刷新后进入 View 态就全空」的机制，必须显式验证并报出来。
+       */
+      const cfgToken = (() => {
+        try {
+          return getBaseToken() || '';
+        } catch {
+          return '';
+        }
+      })();
+      let actualBaseId = '';
+      try {
+        const metas = await getBase().getTableMetaList();
+        const actualIds = metas.map((t) => t.id);
+        const notFound = findTablesOutsideActualBase(tableIds, actualIds);
+        console.log(
+          '[scopeCheck] base 绑定校验：配置 baseToken =',
+          cfgToken ? `...${cfgToken.slice(-6)}` : '(无)',
+          '｜当前 base 可见表数 =', actualIds.length,
+          notFound.length ? `｜🔴 其中 ${notFound.length} 张查不到: ${notFound.join(', ')}` : '｜✅ 全部可见'
+        );
+        if (notFound.length > 0) {
+          setScopeIssue(describeBaseMismatch(notFound, cfgToken));
+        }
+        void actualBaseId;
+      } catch (e) {
+        console.warn('[scopeCheck] 取 base 表列表失败（可能整个 base 都读不到）:', e);
+      }
       console.log('[scopeCheck] 配置需要的表 =', tableIds);
 
       if (tableIds.length === 0) {
@@ -1060,6 +1116,47 @@ export default function App() {
             onReloadMeta={handleReloadMeta}
             baseToken={baseToken}
           />
+        )}
+
+        {/* 🔴 展示态「数据源不可读」故障面板 —— 唯一不依赖 console 的排错出口。
+            详见 showFaultPanel 的注释。默认折叠，只显示一句人话结论。 */}
+        {showFaultPanel && (
+          <div
+            data-plugin-fault-panel
+            style={{
+              margin: '8px 12px',
+              padding: '10px 12px',
+              background: '#fef2f2',
+              border: '1px solid #fca5a5',
+              borderRadius: 6,
+              fontSize: 12,
+              lineHeight: 1.7,
+              color: '#991b1b',
+            }}
+          >
+            <div style={{ fontWeight: 700 }}>⚠️ 数据源读取异常，部分选项可能无法选择</div>
+            <details style={{ marginTop: 4 }}>
+              <summary style={{ cursor: 'pointer', color: '#b91c1c' }}>
+                查看详情（截图这一段发给维护者即可定位）
+              </summary>
+              <pre
+                style={{
+                  margin: '6px 0 0',
+                  padding: '6px 8px',
+                  background: '#fff',
+                  border: '1px solid #fecaca',
+                  borderRadius: 4,
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-all',
+                  fontSize: 11,
+                  color: '#7f1d1d',
+                  fontFamily: 'monospace',
+                }}
+              >
+                {scopeIssue}
+              </pre>
+            </details>
+          </div>
         )}
 
         {/* View 态空数据诊断：开发态展示完整排查信息；发布态只给一条干净指引 */}

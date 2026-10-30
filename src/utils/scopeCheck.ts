@@ -103,3 +103,55 @@ export function describeBlockedTables(verdicts: TableAccessVerdict[]): string {
   if (list.length === 1) return list[0].action || list[0].message;
   return `有 ${list.length} 张数据表读取不到：\n` + list.map((v) => `· ${v.action || v.message}`).join('\n');
 }
+
+/**
+ * ★ base 绑定校验：配置引用的表，在当前**实际用于读取的 base** 里是否都存在。
+ *
+ * 为什么单列一条判定（2026-10-30 第四轮根因）：
+ * `appContext.getBase()` 的实现是 `currentApp?.base ?? bitable.base` ——
+ * 一旦配置声明了 baseToken 但 `selectBase()` 失败（Workspace.getBitable 抛错、
+ * 该 base 未对插件授权、或 baseToken 已失效），它会**静默回退到宿主默认 base**，
+ * 不抛错、不打日志。
+ *
+ * 而应用模式允许「数据源 ≠ 宿主所在多维表格」（1:N 设计），此时：
+ *   · 保存那一刻刚 selectBase 成功过 → 配置态一切正常（所以"第一次生效"）；
+ *   · 刷新后 View 态重新加载，若绑定失败 → 用默认 base 去查源表 id → 查不到
+ *     → 宿主返回一句没有 message 的低层错误（`msg: undefined code: 12`）。
+ *
+ * 这能**同时**解释「第一次生效、刷新后全空」，以及在配置态从未复现。
+ * 因此必须显式判定并把结论告诉用户，而不是继续猜 dataConditions 的结构。
+ *
+ * @param configuredTableIds 配置引用的全部表 id
+ * @param actualBaseTableIds 当前实际 base 里可见的全部表 id
+ * @returns 在当前 base 里查不到的表 id（空数组 = 绑定正确）
+ */
+export function findTablesOutsideActualBase(
+  configuredTableIds: string[] | null | undefined,
+  actualBaseTableIds: string[] | null | undefined
+): string[] {
+  const actual = new Set((actualBaseTableIds ?? []).filter(Boolean) as string[]);
+  // actual 为空有两种含义：base 里真没表，或整个 base 读不到。
+  // 后者由调用方在 catch 里单独处理，这里按「全都查不到」如实返回，不吞掉。
+  return ((configuredTableIds ?? []).filter(Boolean) as string[]).filter((id) => !actual.has(id));
+}
+
+/**
+ * 拼「base 绑定错位」的用户可见结论（无问题时返回空串）。
+ *
+ * 与 `describeBlockedTables` 的区别：那个讲「某张表读不到」，
+ * 这个讲「**读的是另一张多维表格**」——处置动作完全不同
+ * （前者找管理员授权，后者重新选数据源并保存）。
+ */
+export function describeBaseMismatch(
+  missingTableIds: string[],
+  baseToken?: string | null
+): string {
+  const missing = (missingTableIds ?? []).filter(Boolean);
+  if (missing.length === 0) return '';
+  const token = typeof baseToken === 'string' && baseToken ? `（配置的数据源标记 ...${baseToken.slice(-6)}）` : '（配置未标记数据源）';
+  return (
+    `当前读取的多维表格里找不到配置引用的 ${missing.length} 张数据表（${missing.join('、')}）。` +
+    `这通常说明插件没能连上配置所指定的多维表格${token}，` +
+    `而是退回了宿主默认的多维表格。请进入配置模式重新选择数据源并保存。`
+  );
+}

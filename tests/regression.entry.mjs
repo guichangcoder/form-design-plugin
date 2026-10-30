@@ -5577,6 +5577,75 @@ async function run() {
       null);
   }
 
+  // ================================================================
+  // F39 —— 「读错了 base」（2026-10-30 第四轮根因假设）
+  //
+  // 现场：用户报 `getRecordsByPage error, msg: undefined code: 12`，
+  //   配置态保存后**第一次生效**，刷新进展示态就全空。
+  //
+  // 机制：`appContext.getBase()` = `currentApp?.base ?? bitable.base`。
+  //   配置声明了 baseToken，但 View 态 `selectBase()` 失败
+  //   （Workspace.getBitable 抛错 / 未授权 / token 失效）→ **静默回退默认 base**。
+  //   应用模式允许「数据源 ≠ 宿主所在多维表格」，于是用默认 base 查源表 id 必然查不到，
+  //   宿主返回一句没有 message 的低层错误（`msg: undefined`）—— 正好对上用户看到的报错。
+  //
+  // 这一组锁住「能判定并如实告知用户」的能力：
+  //   若判定退化成恒返回空数组，界面就不再报警 → 用户又只能贴「0 个选项」截图。
+  // ================================================================
+  log('\n--- F39 base 绑定错位必须能被判定并告知用户 ---');
+  {
+    const { findTablesOutsideActualBase, describeBaseMismatch } =
+      await import('../src/utils/scopeCheck');
+
+    const configured = ['tblMain', 'tblSub', 'tblSrcA'];
+    // 正常：默认 base 里全都有
+    check('F39 ★★ 全部表都在实际 base 里 → 返回空数组（不误报）',
+      findTablesOutsideActualBase(configured, ['tblMain', 'tblSub', 'tblSrcA', 'tblOther']).length === 0,
+      null);
+    // 错位：源表在另一个 base
+    check('F39 ★★★ 源表不在实际 base → 精确指出是哪一张（真实缺陷形态）',
+      JSON.stringify(findTablesOutsideActualBase(configured, ['tblMain', 'tblSub'])) === '["tblSrcA"]',
+      { got: findTablesOutsideActualBase(configured, ['tblMain', 'tblSub']) });
+    // 整个 base 读不到（visible 为空）→ 不能吞成「没问题」
+    check('F39 ★★★ 实际 base 一张表都看不到 → 必须报告全部表，绝不静默返回空',
+      findTablesOutsideActualBase(configured, []).length === configured.length,
+      null);
+    // 脏数据不崩
+    check('F39 ★★ 输入为 null / undefined → 优雅返回空数组，不抛异常',
+      (() => {
+        try {
+          return findTablesOutsideActualBase(null, null).length === 0 &&
+                 findTablesOutsideActualBase(undefined, undefined).length === 0;
+        } catch {
+          return false;
+        }
+      })(),
+      null);
+    // 文案可读性：必须指明处置动作 + 带上数据源标记尾号，便于用户核对
+    const msg39 = describeBaseMismatch(['tblSrcA'], 'bascnAbCdEf123456');
+    check('F39 ★★★ 文案区分于「权限问题」：要求用户重新选数据源并保存',
+      msg39.includes('tblSrcA') && msg39.includes('重新选择数据源'),
+      { msg: msg39 });
+    check('F39 ★★ 文案带上配置数据源的尾号（6 位），便于和配置态核对',
+      msg39.includes('...123456'),
+      { msg: msg39 });
+    check('F39 ★ 没有缺表时 → 返回空串（调用方据此不显示故障面板）',
+      describeBaseMismatch([], 'tok') === '',
+      null);
+
+    // ---------- 结构断言（剥离注释，避免只留注释也匹配） ----------
+    const fs39 = await import('node:fs');
+    const strip39 = (src) =>
+      src.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|\s)\/\/[^\n]*/g, '$1');
+    const app39 = strip39(fs39.readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8'));
+    check('F39 ★★★ 展示态故障面板不依赖 showDebug（否则用户永远看不到）',
+      /showFaultPanel/.test(app39) && /const showFaultPanel = !inConfig && !!scopeIssue/.test(app39),
+      null);
+    check('F39 ★★★ 自检调用 findTablesOutsideActualBase 做 base 绑定校验',
+      /findTablesOutsideActualBase\s*\(/.test(app39),
+      null);
+  }
+
   const failed = results.filter((r) => !r.pass);
   log(`\n=== ${results.length - failed.length}/${results.length} 通过 ===`);
   if (failed.length) process.exit(1);
