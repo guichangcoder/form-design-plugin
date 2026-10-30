@@ -30133,12 +30133,24 @@ function scanRowsByConditionsLocal(tableId, conditions, opts) {
       console.warn(
         `[tableRecords] \u672C\u5730\u626B\u63CF\u515C\u5E95\u5931\u8D25\uFF1A\u8868=${tableId} \u9519\u8BEF=${e11?.message ?? e11}`
       );
-      return { rows, truncated, scanned, total };
+      return {
+        rows,
+        truncated,
+        scanned,
+        total,
+        error: e11?.message ?? String(e11)
+      };
     }
   })();
   return { cancel: () => {
     cancelled = true;
   }, done };
+}
+function isScanComplete(r10) {
+  if (!r10) return false;
+  if (typeof r10.error === "string" && r10.error.length > 0) return false;
+  if (r10.stoppedEarly === true) return true;
+  return r10.truncated !== true;
 }
 function scanDistinctValues(tableId, fieldId, conditions, opts) {
   const key2 = taskKey(
@@ -30190,15 +30202,24 @@ function scanDistinctValues(tableId, fieldId, conditions, opts) {
     const truncated = stoppedEarly ? false : r10.truncated;
     const out = {
       values,
-      complete: !truncated,
+      // ★ 必须用纯函数判定：扫描抛错时 truncated=false 但**绝不完整**。
+      complete: isScanComplete({ truncated, error: r10.error, stoppedEarly }),
       truncated,
       scanned: r10.scanned,
-      total: r10.total
+      total: r10.total,
+      error: r10.error
     };
     if (useCache && out.complete) distinctScanCache.set(key2, Promise.resolve(out));
     return out;
   });
   return { key: key2, cancel: h11.cancel, promise };
+}
+function shouldCacheFieldOptions(r10) {
+  if (!r10 || typeof r10 !== "object") return false;
+  if (typeof r10.error === "string" && r10.error.length > 0) return false;
+  if (r10.found === true) return true;
+  if (typeof r10.type === "number") return true;
+  return false;
 }
 function loadFieldSelectOptions(tableId, fieldId, opts) {
   const key2 = taskKey(tableId, "optval", `meta:${fieldId}`);
@@ -30231,6 +30252,13 @@ function loadFieldSelectOptions(tableId, fieldId, opts) {
       }
     })();
     fieldOptionsCache.set(key2, p11);
+    p11.then((r10) => {
+      if (!shouldCacheFieldOptions(r10) && fieldOptionsCache.get(key2) === p11) {
+        fieldOptionsCache.delete(key2);
+      }
+    }).catch(() => {
+      if (fieldOptionsCache.get(key2) === p11) fieldOptionsCache.delete(key2);
+    });
   }
   return { key: key2, promise: p11 };
 }
@@ -30471,7 +30499,9 @@ function enumerateRefOptions(tableId, valueFieldId, conditions, opts) {
         filterEffective: true,
         // 本地自证筛过，必然生效
         serverTotal: r10.total,
-        scannedTotal: r10.total
+        scannedTotal: r10.total,
+        // ★ 把扫描失败如实上报（UI 才能提示「源表不可读」而不是「没有选项」）
+        ...r10.error ? { error: r10.error } : {}
       };
     };
     if (mo3.found && mo3.options.length > 0 && conditions.length === 0) {
@@ -158695,6 +158725,188 @@ async function run() {
         "F36 \u2605\u2605 \u7ED3\u6784\uFF1A\u8868\u5F52\u5C5E\u5F3A\u6821\u9A8C\u6539\u4E3A\u8986\u76D6\u5168\u8868\u5355\uFF08collectDeclaredTableIds\uFF09",
         /collectDeclaredTableIds\s*\(/.test(cs36),
         null
+      );
+    }
+  }
+  log2("\n--- F37 \u8BFB\u53D6\u5931\u8D25\u4E0D\u5F97\u88AB\u7F13\u5B58\u6210\u300C\u7A7A\u9009\u9879\u300D ---");
+  {
+    check(
+      "F37 \u2605\u2605\u2605 \u8BFB\u53D6\u629B\u9519(error \u975E\u7A7A) \u2192 \u7EDD\u4E0D\u8FDB\u7F13\u5B58",
+      shouldCacheFieldOptions({ options: [], found: false, error: "table permission denied error" }) === false,
+      null
+    );
+    check(
+      "F37 \u2605\u2605\u2605 \u8BFB\u53D6\u629B\u9519(partial_view_api_error) \u2192 \u7EDD\u4E0D\u8FDB\u7F13\u5B58",
+      shouldCacheFieldOptions({ options: [], found: false, error: "partial_view_api_error" }) === false,
+      null
+    );
+    check(
+      "F37 \u2605\u2605 \u8BFB\u53D6\u629B\u9519(error \u4E3A\u7A7A\u4E32\u4E5F\u7B97\u6210\u529F?) \u2192 \u7A7A\u4E32\u4E0D\u89C6\u4E3A\u9519\u8BEF\uFF0C\u6309 found \u5224\u5B9A",
+      shouldCacheFieldOptions({ options: ["\u676D\u5DDE"], type: 3, found: true, error: "" }) === true,
+      null
+    );
+    check(
+      "F37 \u2605\u2605\u2605 \u5B57\u6BB5\u5B58\u5728\u4E14\u662F\u5355\u9009 \u2192 \u7F13\u5B58\uFF08\u7A33\u5B9A\u4E8B\u5B9E\uFF09",
+      shouldCacheFieldOptions({ options: ["\u676D\u5DDE", "\u5B81\u6CE2"], type: 3, found: true }) === true,
+      null
+    );
+    check(
+      "F37 \u2605\u2605 \u5B57\u6BB5\u5B58\u5728\u4F46\u9009\u9879\u57DF\u4E3A\u7A7A \u2192 \u4ECD\u7F13\u5B58\uFF08\u300C\u8BE5\u5B57\u6BB5\u786E\u5B9E\u6CA1\u914D\u9009\u9879\u300D\u662F\u7A33\u5B9A\u4E8B\u5B9E\uFF09",
+      shouldCacheFieldOptions({ options: [], type: 4, found: true }) === true,
+      null
+    );
+    check(
+      "F37 \u2605\u2605 \u5B57\u6BB5\u5B58\u5728\u4F46\u4E0D\u662F\u5355\u9009/\u591A\u9009\uFF08type \u6709\u503C\uFF09\u2192 \u7F13\u5B58\uFF08\u7A33\u5B9A\u4E8B\u5B9E\uFF09",
+      shouldCacheFieldOptions({ options: [], type: 1, found: false }) === true,
+      null
+    );
+    check(
+      "F37 \u2605\u2605\u2605 \u5B57\u6BB5\u6839\u672C\u6CA1\u627E\u5230\uFF08type \u7F3A\u5931\u3001\u65E0 error\uFF09\u2192 \u4E0D\u7F13\u5B58\uFF08meta \u53EF\u80FD\u5C1A\u672A\u5C31\u7EEA\uFF09",
+      shouldCacheFieldOptions({ options: [], found: false }) === false,
+      null
+    );
+    check(
+      "F37 \u2605 \u7A7A/\u5F02\u5E38\u5165\u53C2 \u2192 \u4E0D\u7F13\u5B58\u4E14\u4E0D\u629B\u9519",
+      shouldCacheFieldOptions(null) === false && shouldCacheFieldOptions(void 0) === false,
+      null
+    );
+    check(
+      "F37 \u2605\u2605\u2605 \u626B\u63CF\u629B\u9519(error \u975E\u7A7A) + truncated=false \u2192 \u5224\u5B9A\u4E3A**\u4E0D\u5B8C\u6574**\uFF08\u6838\u5FC3\u7F3A\u9677\uFF09",
+      isScanComplete({ truncated: false, error: "getRecordsByPage error, code: 12" }) === false,
+      null
+    );
+    check(
+      "F37 \u2605\u2605\u2605 \u82E5\u6309\u65E7\u5199\u6CD5 !truncated \u5224\u5B9A\uFF0C\u540C\u4E00\u8F93\u5165\u4F1A\u8BEF\u5224\u4E3A\u5B8C\u6574\uFF08\u53CD\u5411\u5BF9\u7167\uFF09",
+      { truncated: false, error: "code: 12" }.truncated !== true,
+      { \u8BF4\u660E: "\u65E7\u7684 complete=!truncated \u5728\u6B64\u8F93\u5165\u4E0B\u4E3A true\uFF0C\u6B63\u662F\u7F3A\u9677" }
+    );
+    check(
+      "F37 \u2605\u2605 \u626B\u63CF\u7FFB\u5230\u5E95\u4E14\u65E0\u9519 \u2192 \u5B8C\u6574",
+      isScanComplete({ truncated: false }) === true,
+      null
+    );
+    check(
+      "F37 \u2605\u2605 \u649E\u9875\u6570/\u65F6\u95F4\u4E0A\u9650 \u2192 \u4E0D\u5B8C\u6574",
+      isScanComplete({ truncated: true }) === false,
+      null
+    );
+    check(
+      "F37 \u2605\u2605\u2605 \u627E\u9F50\u5373\u505C\uFF08\u9009\u9879\u57DF\u5168\u547D\u4E2D\uFF09\u2192 \u5B8C\u6574\uFF0C\u4E14\u4F18\u5148\u4E8E truncated",
+      isScanComplete({ truncated: true, stoppedEarly: true }) === true,
+      null
+    );
+    check(
+      "F37 \u2605\u2605\u2605 \u627E\u9F50\u5373\u505C\u4F46\u540C\u65F6\u6709 error \u2192 \u4ECD\u5224\u4E0D\u5B8C\u6574\uFF08error \u662F\u786C\u5426\u51B3\uFF09",
+      isScanComplete({ truncated: false, stoppedEarly: true, error: "code: 12" }) === false,
+      null
+    );
+    check(
+      "F37 \u2605 \u7A7A\u5165\u53C2 \u2192 \u4E0D\u5B8C\u6574\uFF08\u4FDD\u5B88\uFF09",
+      isScanComplete(null) === false && isScanComplete(void 0) === false,
+      null
+    );
+    const T37 = "tblPerm37";
+    const F37FIELD = "fldCity37";
+    let failMode = true;
+    let metaCalls37 = 0;
+    const base37 = {
+      getTableById: async () => ({
+        getFieldMetaList: async () => {
+          metaCalls37 += 1;
+          if (failMode) throw new Error("table permission denied error");
+          return [{
+            id: F37FIELD,
+            name: "\u57CE\u5E02",
+            type: 3,
+            property: { options: [{ id: "o1", name: "\u676D\u5DDE" }, { id: "o2", name: "\u5B81\u6CE2" }] }
+          }];
+        },
+        getRecordsByPage: async () => {
+          if (failMode) throw Object.assign(new Error("getRecordsByPage error"), { code: 12 });
+          return { records: [], total: 0, hasMore: false };
+        }
+      }),
+      getTableMetaList: async () => [{ id: T37 }]
+    };
+    __setAppForTest({ base: base37 });
+    invalidateTableRecords();
+    const before37 = metaCalls37;
+    const r1 = await loadFieldSelectOptions(T37, F37FIELD).promise;
+    check(
+      "F37 \u2605\u2605 \u9996\u6B21\u8BFB\u5931\u8D25\uFF1A\u8FD4\u56DE\u7A7A\u5E76\u5E26 error\uFF08\u4E0D\u629B\u5F02\u5E38\uFF0C\u754C\u9762\u53EF\u964D\u7EA7\uFF09",
+      r1.found === false && typeof r1.error === "string" && r1.error.includes("permission"),
+      { error: r1.error }
+    );
+    const r22 = await loadFieldSelectOptions(T37, F37FIELD).promise;
+    check(
+      "F37 \u2605\u2605\u2605 \u5931\u8D25\u540E\u518D\u6B21\u8C03\u7528 \u2192 \u771F\u5B9E\u91CD\u53D1\u5143\u4FE1\u606F\u8BF7\u6C42\uFF08\u5931\u8D25\u672A\u88AB\u7F13\u5B58\uFF09",
+      metaCalls37 - before37 === 2,
+      { metaCalls: metaCalls37 - before37 }
+    );
+    check(
+      "F37 \u2605\u2605 \u7B2C\u4E8C\u6B21\u4ECD\u5931\u8D25\u65F6\u4F9D\u65E7\u8FD4\u56DE error\uFF08\u4E0D\u4F2A\u9020\u7A7A\u9009\u9879\uFF09",
+      r22.found === false && !!r22.error,
+      { error: r22.error }
+    );
+    failMode = false;
+    const r32 = await loadFieldSelectOptions(T37, F37FIELD).promise;
+    check(
+      "F37 \u2605\u2605\u2605 \u6743\u9650\u6062\u590D\u540E\u91CD\u8BD5 \u2192 \u7ACB\u5373\u8BFB\u5230\u771F\u5B9E\u9009\u9879\uFF08\u4E0D\u88AB\u5931\u8D25\u7F13\u5B58\u5361\u6B7B\uFF09",
+      r32.found === true && r32.options.join(",") === "\u676D\u5DDE,\u5B81\u6CE2",
+      { options: r32.options }
+    );
+    const beforeCache = metaCalls37;
+    const r42 = await loadFieldSelectOptions(T37, F37FIELD).promise;
+    check(
+      "F37 \u2605\u2605 \u6210\u529F\u7ED3\u679C\u8FDB\u7F13\u5B58 \u2192 \u76F8\u540C\u8C03\u7528\u4E0D\u518D\u91CD\u590D\u8BF7\u6C42",
+      metaCalls37 === beforeCache,
+      { metaCalls: metaCalls37 - beforeCache }
+    );
+    check(
+      "F37 \u2605 \u7F13\u5B58\u547D\u4E2D\u65F6\u8FD4\u56DE\u4E0E\u9996\u6B21\u4E00\u81F4\u7684\u5185\u5BB9",
+      r42.found === true && r42.options.join(",") === "\u676D\u5DDE,\u5B81\u6CE2",
+      { options: r42.options }
+    );
+    {
+      let failScan = true;
+      let scanRecords = 0;
+      const base37b = {
+        getTableById: async () => ({
+          getFieldMetaList: async () => {
+            if (failScan) throw new Error("partial_view_api_error");
+            return [{ id: F37FIELD, name: "\u57CE\u5E02", type: 3, property: { options: [] } }];
+          },
+          getRecordsByPage: async () => {
+            scanRecords += 1;
+            if (failScan) throw Object.assign(new Error("getRecordsByPage error"), { code: 12 });
+            return {
+              records: [{ recordId: "r1", fields: { [F37FIELD]: "\u676D\u5DDE" } }],
+              total: 1,
+              hasMore: false
+            };
+          }
+        }),
+        getTableMetaList: async () => [{ id: T37 }]
+      };
+      __setAppForTest({ base: base37b });
+      invalidateTableRecords();
+      const bad = await enumerateRefOptions(T37, F37FIELD, []).promise;
+      check(
+        "F37 \u2605\u2605\u2605 \u8868\u4E0D\u53EF\u8BFB\u65F6\u679A\u4E3E\u4E0D\u5F97\u58F0\u79F0\u300C\u5B8C\u6574\u4E14\u4E3A\u7A7A\u300D\uFF08complete \u5FC5\u987B\u4E3A false\uFF09",
+        bad.complete === false,
+        { complete: bad.complete, values: bad.values, error: bad.error }
+      );
+      check(
+        "F37 \u2605\u2605 \u8868\u4E0D\u53EF\u8BFB\u65F6\u5982\u5B9E\u5E26\u51FA error\uFF08UI \u624D\u80FD\u63D0\u793A\u300C\u6E90\u8868\u4E0D\u53EF\u8BFB\u300D\uFF09",
+        typeof bad.error === "string" && bad.error.length > 0,
+        { error: bad.error }
+      );
+      failScan = false;
+      const good = await enumerateRefOptions(T37, F37FIELD, []).promise;
+      check(
+        "F37 \u2605\u2605\u2605 \u6743\u9650\u6062\u590D\u540E\u91CD\u626B \u2192 \u8BFB\u5230\u771F\u5B9E\u53D6\u503C\uFF08\u5931\u8D25\u7A7A\u96C6\u672A\u88AB\u7F13\u5B58\u56FA\u5316\uFF09",
+        good.values.join(",") === "\u676D\u5DDE" && good.complete === true,
+        { values: good.values, complete: good.complete, scanRecords }
       );
     }
   }

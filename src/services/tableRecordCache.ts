@@ -714,7 +714,7 @@ export function scanRowsByConditionsLocal(
   }
 ): {
   cancel: () => void;
-  done: Promise<{ rows: FullRow[]; truncated: boolean; scanned: number; total?: number }>;
+  done: Promise<{ rows: FullRow[]; truncated: boolean; scanned: number; total?: number; error?: string }>;
 } {
   const maxPages = opts?.maxPages ?? LOCAL_SCAN_MAX_PAGES;
   const timeBudgetMs = opts?.timeBudgetMs;
@@ -777,7 +777,17 @@ export function scanRowsByConditionsLocal(
       console.warn(
         `[tableRecords] 本地扫描兜底失败：表=${tableId} 错误=${(e as Error)?.message ?? e}`
       );
-      return { rows, truncated, scanned, total };
+      // ★ 必须把失败如实带出去：第 0 页就抛错时 truncated 仍是 false，
+      //   若这里只 return {truncated:false}，上层会判定「complete=true + 0 个选项」
+      //   并把这个「空且完整」的结论写进 distinctScanCache（无 TTL），
+      //   于是整表不可读 = 该字段永远没有选项，刷新前都不再重试。
+      return {
+        rows,
+        truncated,
+        scanned,
+        total,
+        error: (e as Error)?.message ?? String(e),
+      };
     }
   })();
 
@@ -798,6 +808,33 @@ export interface DistinctScanResult {
   scanned: number;
   /** 服务端总数（宿主返回时才有） */
   total?: number;
+  /** 扫描失败原因（有值即「本次扫描没扫完」，结果不可当作完整空集） */
+  error?: string;
+}
+
+/**
+ * ★ 扫描结果是否「完整」—— 纯函数，供回归测试真实调用。
+ *
+ * 🔴 判定绝不能等同于 `!truncated`：
+ *   扫描第 0 页就抛错（`table permission denied error` / `code:12`）时
+ *   `truncated` 仍是 `false`，若用 `!truncated` 会得出「0 个选项，且完整」，
+ *   写进无 TTL 的 `distinctScanCache` 后就变成**该字段永远没有选项** ——
+ *   用户刷新页面之外无路可退（本项目 2026-10-30 真实缺陷）。
+ *
+ * 判定顺序：
+ *   ① 有 error → 不完整（唯一的「硬否决」，优先于一切）；
+ *   ② 找齐即停（选项域全部命中）→ 完整（不受页数/时间预算影响）；
+ *   ③ 其余看 truncated。
+ */
+export function isScanComplete(r: {
+  truncated?: boolean;
+  error?: string;
+  stoppedEarly?: boolean;
+} | null | undefined): boolean {
+  if (!r) return false;
+  if (typeof r.error === 'string' && r.error.length > 0) return false;
+  if (r.stoppedEarly === true) return true;
+  return r.truncated !== true;
 }
 
 /** 已完成扫描的缓存（键含条件，避免重复全表扫描） */
@@ -898,11 +935,14 @@ export function scanDistinctValues(
     const truncated = stoppedEarly ? false : r.truncated;
     const out: DistinctScanResult = {
       values,
-      complete: !truncated,
+      // ★ 必须用纯函数判定：扫描抛错时 truncated=false 但**绝不完整**。
+      complete: isScanComplete({ truncated, error: r.error, stoppedEarly }),
       truncated,
       scanned: r.scanned,
       total: r.total,
+      error: r.error,
     };
+    // ★ 只缓存「真·完整」的结果：失败的空结果进缓存 = 该字段永远没有选项
     if (useCache && out.complete) distinctScanCache.set(key, Promise.resolve(out));
     return out;
   });
@@ -947,8 +987,39 @@ export interface FieldOptionsResult {
 const fieldOptionsCache = new Map<string, Promise<FieldOptionsResult>>();
 
 /**
+ * ★ 失败结果是否允许进缓存 —— 纯函数，供回归测试真实调用。
+ *
+ * 🔴 只缓存「读到了真东西」的结果（`found: true`）。
+ *   - `error` 非空 = 整表/字段不可访问（`table permission denied error` /
+ *     `partial_view_api_error` / `code:12`）→ **绝不能缓存**。
+ *     否则「一次权限抖动」会被固化成「这个字段永远没有选项」，
+ *     且本插件的缓存是**进程内、无 TTL** 的 —— 用户之后点刷新/重试都拿不到，
+ *     只有整页重载才恢复，表现为「功能时好时坏、只能重开」。
+ *   - `found: false` 且无 error = 字段确实不存在 / 不是单选多选 → 这是**稳定事实**，
+ *     缓存可省掉重复的元信息请求。
+ *   - `found: true` + 空 options = 字段存在但选项域为空，同样是稳定事实。
+ *
+ * 判断顺序刻意是「先看 error」：`error` 分支同样返回 `found: false`，
+ * 若先按 `found === false → 不缓存` 写会漏掉一类，若先按 `found === false → 缓存`
+ * 则会把错误长期固化（本项目真实缺陷）。
+ */
+export function shouldCacheFieldOptions(r: FieldOptionsResult | null | undefined): boolean {
+  if (!r || typeof r !== 'object') return false;
+  // ① 读取抛错 → 临时性故障，不缓存（下次调用重新尝试）
+  if (typeof r.error === 'string' && r.error.length > 0) return false;
+  // ② 稳定事实：字段存在且是单选/多选
+  if (r.found === true) return true;
+  // ③ 稳定事实：字段存在但不是单选/多选（此时 type 一定有值）
+  if (typeof r.type === 'number') return true;
+  // ④ 字段根本没找到（type 缺失、无 error）→ 可能是 meta 尚未就绪，不缓存
+  return false;
+}
+
+/**
  * 读取源表某字段「配置的选项域」。
  * 只用 `getFieldMetaList`（1 次请求、0 次记录读取）—— 这是穷举选项的基础。
+ *
+ * ⚠️ 缓存策略见 `shouldCacheFieldOptions`：失败结果不进缓存。
  */
 export function loadFieldSelectOptions(
   tableId: string,
@@ -985,7 +1056,17 @@ export function loadFieldSelectOptions(
         return { options: [], found: false, error: err };
       }
     })();
+    // ★ 失败不进缓存：结果 resolved 后按纯函数判定是否保留，失败者立即 evict。
+    //   用 `.then` 而非直接 set，才能拿到最终结果；evict 时比对同一个 Promise 实例，
+    //   避免把并发调用方刚写入的新请求误删。
     fieldOptionsCache.set(key, p);
+    p.then((r) => {
+      if (!shouldCacheFieldOptions(r) && fieldOptionsCache.get(key) === p) {
+        fieldOptionsCache.delete(key);
+      }
+    }).catch(() => {
+      if (fieldOptionsCache.get(key) === p) fieldOptionsCache.delete(key);
+    });
   }
   return { key, promise: p };
 }
@@ -1515,6 +1596,8 @@ export function enumerateRefOptions(
         filterEffective: true, // 本地自证筛过，必然生效
         serverTotal: r.total,
         scannedTotal: r.total,
+        // ★ 把扫描失败如实上报（UI 才能提示「源表不可读」而不是「没有选项」）
+        ...(r.error ? { error: r.error } : {}),
       };
     };
 

@@ -1,0 +1,40 @@
+fix(cache): 读取失败被缓存成「空选项」—— 权限恢复后仍读不到，只能重开
+
+现场（承接 02c9ac2）：刷新进 View 态后源表整表不可读，控制台报
+  table permission denied error / partial_view_api_error / getRecordsByPage code:12
+即使之后权限恢复，选项也一直出不来 —— 用户只能整页重载。
+
+根因（两处同源，都是「失败被当成稳定事实」）：
+
+1) loadFieldSelectOptions 无条件把结果写进 fieldOptionsCache。
+   该缓存是进程内、无 TTL、刷新才清的。一次权限抖动 → 被固化成
+   「这个字段永远没有选项」，后续所有重试都直接命中这个假空结果。
+
+2) scanRowsByConditionsLocal 抛错时只 return {truncated:false}。
+   第 0 页就失败时 truncated 仍是 false → 上层按 complete = !truncated
+   判定为「完整」→ 「0 个选项且完整」被写进 distinctScanCache（无 TTL）。
+   于是「源表不可读」被表达成「该字段确实没有选项」，UI 与用户都无从分辨。
+
+修复：
+- 抽纯函数 shouldCacheFieldOptions()：只有「读到真东西」才允许缓存。
+  error 非空（临时故障）一律不缓存；found:false+有 type（字段确实不是
+  单选多选）属稳定事实，可缓存。判断顺序刻意先看 error —— 该分支同样
+  返回 found:false，顺序写反就会把错误长期固化。
+- 抽纯函数 isScanComplete()：error 是硬否决，优先于 truncated 与
+  stoppedEarly；找齐即停仍算完整。
+- scanRowsByConditionsLocal 把 error 如实带出，经 DistinctScanResult
+  一路传到 OptionEnumResult.error，UI 才能提示「源表不可读」而不是
+  「没有选项」。
+
+测试 F37（24 条，基线 630 → 654，组数 31 → 32）：
+- 两个纯函数真实调用（不是正则断言源码），覆盖 error 空串、选项域为空、
+  非单选字段、meta 未就绪等边界。
+- 端到端：mock 宿主「先拒绝读取、再放开」，断言失败不缓存（metaCalls
+  从 1 变 2）、权限恢复后立即读到真值、成功之后才允许命中缓存。
+- 端到端：表不可读时枚举必须 complete:false 且带 error，恢复后能扫出真值。
+
+反向注入（两轮，均已确认完全恢复）：
+- A 退回「无条件缓存」→ 6 条 FAIL，其中 metaCalls:1 / options:[] 直接
+  复现用户现象：失败被缓存后权限恢复也读不到。
+- B 退回 complete=!truncated → 4 条 FAIL，含
+  complete:true, values:[]（声称完整且无选项）这一最恶劣形态。

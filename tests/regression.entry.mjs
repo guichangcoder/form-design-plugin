@@ -77,6 +77,8 @@ import {
   enumerateOptionsByProbe,
   enumerateFieldValuesByColumn,
   enumerateRefOptions,
+  shouldCacheFieldOptions,
+  isScanComplete,
   MAX_PROBE_OPTIONS,
   DISTINCT_SCAN_MAX_PAGES,
 } from '../src/services/tableRecordCache';
@@ -5281,6 +5283,167 @@ async function run() {
         !/const dataConditions = mainTableId\s*\n?\s*\?/.test(cs36), null);
       check('F36 ★★ 结构：表归属强校验改为覆盖全表单（collectDeclaredTableIds）',
         /collectDeclaredTableIds\s*\(/.test(cs36), null);
+    }
+  }
+
+  // ================================================================
+  // F37 —— 「读失败被缓存成空结果」缺陷（2026-10-30，与刷新后选项消失同源）
+  //
+  // 现场：刷新后源表整表不可读（table permission denied error /
+  //       partial_view_api_error / getRecordsByPage code:12）。
+  // 危害：失败被当作「该字段没有选项」，且写进**进程内无 TTL** 的缓存 ——
+  //       用户之后重试也拿不到，只能整页重载。表现为「功能时好时坏、只能重开」。
+  //
+  // 这里**真实调用**两个纯函数，而不是正则断言源码里出现某个字样
+  // （正则在「只加注释 / 改了调用」时照样绿，本项目已踩过）。
+  // ================================================================
+  log('\n--- F37 读取失败不得被缓存成「空选项」 ---');
+  {
+    // ---------- 1) shouldCacheFieldOptions：成功才缓存，失败一律不缓存 ----------
+    check('F37 ★★★ 读取抛错(error 非空) → 绝不进缓存',
+      shouldCacheFieldOptions({ options: [], found: false, error: 'table permission denied error' }) === false,
+      null);
+    check('F37 ★★★ 读取抛错(partial_view_api_error) → 绝不进缓存',
+      shouldCacheFieldOptions({ options: [], found: false, error: 'partial_view_api_error' }) === false,
+      null);
+    check('F37 ★★ 读取抛错(error 为空串也算成功?) → 空串不视为错误，按 found 判定',
+      shouldCacheFieldOptions({ options: ['杭州'], type: 3, found: true, error: '' }) === true,
+      null);
+    check('F37 ★★★ 字段存在且是单选 → 缓存（稳定事实）',
+      shouldCacheFieldOptions({ options: ['杭州', '宁波'], type: 3, found: true }) === true,
+      null);
+    check('F37 ★★ 字段存在但选项域为空 → 仍缓存（「该字段确实没配选项」是稳定事实）',
+      shouldCacheFieldOptions({ options: [], type: 4, found: true }) === true,
+      null);
+    check('F37 ★★ 字段存在但不是单选/多选（type 有值）→ 缓存（稳定事实）',
+      shouldCacheFieldOptions({ options: [], type: 1, found: false }) === true,
+      null);
+    check('F37 ★★★ 字段根本没找到（type 缺失、无 error）→ 不缓存（meta 可能尚未就绪）',
+      shouldCacheFieldOptions({ options: [], found: false }) === false,
+      null);
+    check('F37 ★ 空/异常入参 → 不缓存且不抛错',
+      shouldCacheFieldOptions(null) === false &&
+      shouldCacheFieldOptions(undefined) === false,
+      null);
+
+    // ---------- 2) isScanComplete：扫描失败 ≠ 完整空集 ----------
+    check('F37 ★★★ 扫描抛错(error 非空) + truncated=false → 判定为**不完整**（核心缺陷）',
+      isScanComplete({ truncated: false, error: 'getRecordsByPage error, code: 12' }) === false,
+      null);
+    check('F37 ★★★ 若按旧写法 !truncated 判定，同一输入会误判为完整（反向对照）',
+      ({ truncated: false, error: 'code: 12' }).truncated !== true,
+      { 说明: '旧的 complete=!truncated 在此输入下为 true，正是缺陷' });
+    check('F37 ★★ 扫描翻到底且无错 → 完整',
+      isScanComplete({ truncated: false }) === true,
+      null);
+    check('F37 ★★ 撞页数/时间上限 → 不完整',
+      isScanComplete({ truncated: true }) === false,
+      null);
+    check('F37 ★★★ 找齐即停（选项域全命中）→ 完整，且优先于 truncated',
+      isScanComplete({ truncated: true, stoppedEarly: true }) === true,
+      null);
+    check('F37 ★★★ 找齐即停但同时有 error → 仍判不完整（error 是硬否决）',
+      isScanComplete({ truncated: false, stoppedEarly: true, error: 'code: 12' }) === false,
+      null);
+    check('F37 ★ 空入参 → 不完整（保守）',
+      isScanComplete(null) === false && isScanComplete(undefined) === false,
+      null);
+
+    // ---------- 3) 端到端：源表不可读时，重试必须能恢复（不得被缓存卡死）----------
+    const T37 = 'tblPerm37';
+    const F37FIELD = 'fldCity37';
+    let failMode = true; // true = 宿主拒绝读取
+    let metaCalls37 = 0;
+    const base37 = {
+      getTableById: async () => ({
+        getFieldMetaList: async () => {
+          metaCalls37 += 1;
+          if (failMode) throw new Error('table permission denied error');
+          return [{
+            id: F37FIELD, name: '城市', type: 3,
+            property: { options: [{ id: 'o1', name: '杭州' }, { id: 'o2', name: '宁波' }] },
+          }];
+        },
+        getRecordsByPage: async () => {
+          if (failMode) throw Object.assign(new Error('getRecordsByPage error'), { code: 12 });
+          return { records: [], total: 0, hasMore: false };
+        },
+      }),
+      getTableMetaList: async () => [{ id: T37 }],
+    };
+    selectBaseForTest({ base: base37 });
+    invalidateTableRecords();
+
+    const before37 = metaCalls37;
+    const r1 = await loadFieldSelectOptions(T37, F37FIELD).promise;
+    check('F37 ★★ 首次读失败：返回空并带 error（不抛异常，界面可降级）',
+      r1.found === false && typeof r1.error === 'string' && r1.error.includes('permission'),
+      { error: r1.error });
+
+    // 关键：失败结果不能被缓存 → 第二次必须真的再发一次请求
+    const r2 = await loadFieldSelectOptions(T37, F37FIELD).promise;
+    check('F37 ★★★ 失败后再次调用 → 真实重发元信息请求（失败未被缓存）',
+      metaCalls37 - before37 === 2,
+      { metaCalls: metaCalls37 - before37 });
+    check('F37 ★★ 第二次仍失败时依旧返回 error（不伪造空选项）',
+      r2.found === false && !!r2.error,
+      { error: r2.error });
+
+    // 权限恢复 → 必须立刻能读到（这是「刷新/重试可救命」的前提）
+    failMode = false;
+    const r3 = await loadFieldSelectOptions(T37, F37FIELD).promise;
+    check('F37 ★★★ 权限恢复后重试 → 立即读到真实选项（不被失败缓存卡死）',
+      r3.found === true && r3.options.join(',') === '杭州,宁波',
+      { options: r3.options });
+
+    // 成功之后才允许命中缓存
+    const beforeCache = metaCalls37;
+    const r4 = await loadFieldSelectOptions(T37, F37FIELD).promise;
+    check('F37 ★★ 成功结果进缓存 → 相同调用不再重复请求',
+      metaCalls37 === beforeCache,
+      { metaCalls: metaCalls37 - beforeCache });
+    check('F37 ★ 缓存命中时返回与首次一致的内容',
+      r4.found === true && r4.options.join(',') === '杭州,宁波',
+      { options: r4.options });
+
+    // ---------- 4) 端到端：枚举全链路在表不可读时不得声称「完整且为空」----------
+    {
+      let failScan = true;
+      let scanRecords = 0;
+      const base37b = {
+        getTableById: async () => ({
+          getFieldMetaList: async () => {
+            if (failScan) throw new Error('partial_view_api_error');
+            return [{ id: F37FIELD, name: '城市', type: 3, property: { options: [] } }];
+          },
+          getRecordsByPage: async () => {
+            scanRecords += 1;
+            if (failScan) throw Object.assign(new Error('getRecordsByPage error'), { code: 12 });
+            return {
+              records: [{ recordId: 'r1', fields: { [F37FIELD]: '杭州' } }],
+              total: 1, hasMore: false,
+            };
+          },
+        }),
+        getTableMetaList: async () => [{ id: T37 }],
+      };
+      selectBaseForTest({ base: base37b });
+      invalidateTableRecords();
+
+      const bad = await enumerateRefOptions(T37, F37FIELD, []).promise;
+      check('F37 ★★★ 表不可读时枚举不得声称「完整且为空」（complete 必须为 false）',
+        bad.complete === false,
+        { complete: bad.complete, values: bad.values, error: bad.error });
+      check('F37 ★★ 表不可读时如实带出 error（UI 才能提示「源表不可读」）',
+        typeof bad.error === 'string' && bad.error.length > 0,
+        { error: bad.error });
+
+      // 权限恢复 → 必须能扫出真值（证明失败空结果没被 distinctScanCache 固化）
+      failScan = false;
+      const good = await enumerateRefOptions(T37, F37FIELD, []).promise;
+      check('F37 ★★★ 权限恢复后重扫 → 读到真实取值（失败空集未被缓存固化）',
+        good.values.join(',') === '杭州' && good.complete === true,
+        { values: good.values, complete: good.complete, scanRecords });
     }
   }
 
