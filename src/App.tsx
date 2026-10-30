@@ -21,8 +21,14 @@ import {
   HostContext,
   repairDashboardConfigFromLastSave,
 } from './services/configService';
-import { getBase, getBaseToken, isWorkspaceAvailable } from './services/appContext';
+import { getBase, getBaseToken, getDashboard, isWorkspaceAvailable } from './services/appContext';
 import { getFieldMetaList } from './services/baseService';
+import { collectDeclaredTableIds } from './utils/dataConditions';
+import {
+  collectBlockedTables,
+  describeBlockedTables,
+  type TableAccessProbe,
+} from './utils/scopeCheck';
 import { findStaleConfiguredField, describeStaleHit } from './utils/metaStale';
 import { draftMountKey, resolveDashFormId } from './utils/configDraft';
 import { probeHost, probeOneLine } from './services/probe';
@@ -140,6 +146,9 @@ export default function App() {
   // dev 模式下宿主配置可能未被稳定持久化；View 态只尝试重放一次
   const repairAttempted = useRef(false);
   const [repairDiag, setRepairDiag] = useState<string>('');
+  // View 态数据源可访问性自检：结论（空串 = 没问题）
+  const scopeCheckDone = useRef(false);
+  const [scopeIssue, setScopeIssue] = useState<string>('');
   // 应用模式数据源（P0-1）：当前选中的多维表格 baseToken
   const [baseToken, setBaseToken] = useState<string>(() => getBaseToken());
   // 配置态「左预览」的实时草稿（ConfigPanel.onDraftChange 喂入）
@@ -338,6 +347,97 @@ export default function App() {
     setMetaStale(false);
     toast('已重新载入最新表结构', 'success');
   };
+
+  /**
+   * 🔴 View 态数据源可访问性自检（诊断用，2026-10-30）。
+   *
+   * 背景：「选项选不到」有两种根因 —— ① 源表没进 dataConditions（声明范围问题）、
+   * ② 当前账号对该表无权限。旧代码两者都只表现为「0 个选项」，
+   * 用户和我都无法判断该改代码还是该找管理员。
+   *
+   * 这里在配置加载完成后，对「主表 + 子表 + 选项引用源表」逐张探测
+   * meta 与 records 两条链路，把结论打到控制台 + 诊断条。
+   * 只在 dev / ?debug=1 下输出，正式环境不打扰用户。
+   */
+  useEffect(() => {
+    if (context !== 'dashboard' || inConfig || loading || !data) return;
+    if (scopeCheckDone.current) return;
+    scopeCheckDone.current = true;
+    let alive = true;
+    (async () => {
+      const tableIds = collectDeclaredTableIds(data.forms ?? []);
+      if (tableIds.length === 0) return;
+
+      // ★ 第一件事：打印**宿主侧实际持有的 dataConditions**。
+      //   这是区分两种根因的决定性证据：
+      //   - 宿主里的声明集 ⊇ 这些 tableId → 声明没问题，问题在权限/base 绑定；
+      //   - 宿主里的声明集只有主表 → 声明没生效（保存/重放链路仍有问题）。
+      //   没有这条日志，只能靠猜（本项目已在这一点上反复踩坑）。
+      try {
+        const cfg: any = await (getDashboard() as any).getConfig();
+        const hostDc: any[] = cfg?.dataConditions ?? [];
+        const hostIds = hostDc.map((d) => d?.tableId).filter(Boolean);
+        const missing = tableIds.filter((id) => !hostIds.includes(id));
+        console.log(
+          '[scopeCheck] 宿主持有 dataConditions =', hostIds,
+          '｜配置需要的表 =', tableIds,
+          missing.length ? `｜🔴 宿主缺少: ${missing.join(', ')}` : '｜✅ 声明齐全'
+        );
+        if (missing.length > 0) {
+          setScopeIssue(
+            `宿主持有的数据源声明缺少 ${missing.length} 张表（${missing.join('、')}）。` +
+              `这会导致这些表在展示态读不到 —— 请在配置态重新保存一次（会重新声明数据源）。`
+          );
+        }
+      } catch (e) {
+        console.warn('[scopeCheck] 无法读取宿主 dataConditions:', e);
+      }
+
+      const probes: TableAccessProbe[] = [];
+      for (const tableId of tableIds) {
+        if (!alive) return;
+        let metaOk = false;
+        let recordsOk = false;
+        let firstErr = '';
+        try {
+          const t = await getBase().getTableById(tableId);
+          try {
+            await t.getFieldMetaList();
+            metaOk = true;
+          } catch (e) {
+            if (!firstErr) firstErr = String((e as Error)?.message ?? e);
+          }
+          try {
+            const anyT = t as any;
+            const params = { pageSize: 1 };
+            if (typeof anyT.getRecordsByPage === 'function') await anyT.getRecordsByPage(params);
+            else await anyT.getRecords(params);
+            recordsOk = true;
+          } catch (e) {
+            if (!firstErr) firstErr = String((e as Error)?.message ?? e);
+          }
+        } catch (e) {
+          if (!firstErr) firstErr = String((e as Error)?.message ?? e);
+        }
+        probes.push({ tableId, metaOk, recordsOk, error: firstErr });
+      }
+      if (!alive) return;
+      const blocked = collectBlockedTables(probes);
+      console.log(
+        '[scopeCheck] View 态数据源可访问性：',
+        probes.map((p) => `${p.tableId}(meta:${p.metaOk ? 'ok' : 'FAIL'},rec:${p.recordsOk ? 'ok' : 'FAIL'})`).join(' | ')
+      );
+      if (blocked.length > 0) {
+        console.warn('[scopeCheck] 有数据表读取不到：', blocked);
+        setScopeIssue(describeBlockedTables(blocked));
+      } else {
+        console.log('[scopeCheck] 全部数据表均可正常读取');
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [context, inConfig, loading, data]);
 
   // View 态自动修复（dev 模式）：F5 刷新后宿主 widget 配置可能丢失，导致弹
   // 「配置数据发生变更，请重新配置」。这里用最近一次成功保存的 payload 原样重放写回宿主，
@@ -672,6 +772,11 @@ export default function App() {
           {repairDiag && (
             <div style={{ marginTop: 2, color: repairDiag.startsWith('🔁') ? '#059669' : '#4e5969' }}>
               {repairDiag}
+            </div>
+          )}
+          {scopeIssue && (
+            <div style={{ marginTop: 4, color: '#dc2626', whiteSpace: 'pre-wrap', lineHeight: 1.7 }}>
+              ⚠️ 数据源不可读：{scopeIssue}
             </div>
           )}
           <button

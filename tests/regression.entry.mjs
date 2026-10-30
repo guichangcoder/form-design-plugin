@@ -61,6 +61,7 @@ import {
 import { convertToSdkFormat } from '../src/utils/valueConverter';
 import { findStaleConfiguredField, describeStaleHit } from '../src/utils/metaStale';
 import { draftMountKey, shouldAdoptIncoming, resolveDashFormId } from '../src/utils/configDraft';
+import { judgeTableAccess, classifyAccessError, collectBlockedTables, describeBlockedTables } from '../src/utils/scopeCheck';
 import {
   loadHeadColumn,
   loadHeadRows,
@@ -5445,6 +5446,128 @@ async function run() {
         good.values.join(',') === '杭州' && good.complete === true,
         { values: good.values, complete: good.complete, scanRecords });
     }
+  }
+
+  // ================================================================
+  // F38 —— 「重放旧 payload 把 dataConditions 缩回旧版」（2026-10-30 实测根因 2）
+  //
+  // 现场：02c9ac2 已把 saveConfig 改成声明全集，但用户刷新后**依然**选不到选项。
+  // 根因：App.tsx 的 View 态自动修复会 await repairDashboardConfigFromLastSave()，
+  //       它把 localStorage 里「上一次保存那一刻」的 payload **原样重放**。
+  //       那份 payload 是修复前存的（只有主表一条）→ 重放 = 把已扩大的声明集缩回去
+  //       → 选项引用源表再次不在声明集 → 整表 permission denied → 0 个选项。
+  //
+  // 所以：重放时必须**按当前 customConfig 重新推导 dataConditions**，
+  //       而不是照抄 saved.payload.dataConditions。
+  // ================================================================
+  log('\n--- F38 重放旧 payload 不得把 dataConditions 缩回旧版 ---');
+  {
+    const { buildDataConditions, findUndeclaredTables, buildReplayPayload } =
+      await import('../src/utils/dataConditions');
+    // 构造与真实场景同形的 customConfig：主表 + 子表 + 两个选项引用源表
+    const forms38 = [{
+      id: 'form38',
+      mainTable: {
+        tableId: 'tblMain38',
+        fields: [{ fieldId: 'fldA38', optionRef: { tableId: 'tblSrcA38', fieldId: 'fldX38' } }],
+      },
+      subTables: [{
+        tableId: 'tblSub38',
+        fields: [{ fieldId: 'fldB38', optionRef: { tableId: 'tblSrcB38', fieldId: 'fldY38' } }],
+      }],
+    }];
+    const customConfig38 = { forms: forms38 };
+
+    // 「上一次保存」的旧 payload：旧版本只声明了主表
+    const stalePayload = [{ tableId: 'tblMain38', dataRange: { type: 'ALL' }, groups: [] }];
+
+    // ★ 修复后的重放逻辑：按当前 customConfig 重建
+    const rebuilt38 = buildDataConditions(forms38, 'tblMain38', 'tok38');
+    const dcIds38 = rebuilt38.map((d) => d.tableId);
+    check('F38 ★★★ 重放前按当前配置重建声明集 → 覆盖主表/子表/两个源表',
+      dcIds38.length === 4 &&
+      ['tblMain38', 'tblSub38', 'tblSrcA38', 'tblSrcB38'].every((id) => dcIds38.includes(id)),
+      { got: dcIds38 });
+
+    check('F38 ★★★ 反向对照：若沿用旧 payload（只声明主表），漏掉 3 张表',
+      findUndeclaredTables(forms38, stalePayload.map((d) => d.tableId)).length === 3,
+      { missing: findUndeclaredTables(forms38, stalePayload.map((d) => d.tableId)) });
+
+    check('F38 ★★★ 重建结果 ≠ 旧 payload（证明本次确有升级，不是空转）',
+      JSON.stringify(rebuilt38) !== JSON.stringify(stalePayload),
+      null);
+
+    // 声明集必须稳定：同一配置重建两次结果一致（重放可反复执行）
+    const rebuiltAgain38 = buildDataConditions(forms38, 'tblMain38', 'tok38');
+    check('F38 ★★ 重建是幂等的（反复重放不会漂移）',
+      JSON.stringify(rebuilt38) === JSON.stringify(rebuiltAgain38),
+      null);
+
+    // ---------- 核心：真实调用 buildReplayPayload，验证「重放时用哪份声明集」 ----------
+    // 这一步才是真正能抓住「重放旧 payload 把声明集缩回」的断言。
+    // 上一版 F38 只测了 buildDataConditions 的返回值 + 源码里出现 buildDataConditions，
+    // 反向注入（把重放改回照抄 savedDc）依然全绿 —— 典型的假绿，已修正。
+    const replay38 = buildReplayPayload(stalePayload, customConfig38, 'tok38');
+    const replayIds38 = replay38.dataConditions.map((d) => d.tableId);
+    check('F38 ★★★ 真实调用 buildReplayPayload：重放用「重建后的声明集」而非旧 payload',
+      replayIds38.length === 4 &&
+      ['tblMain38', 'tblSub38', 'tblSrcA38', 'tblSrcB38'].every((id) => replayIds38.includes(id)),
+      { got: replayIds38, reason: replay38.reason });
+    check('F38 ★★★ 并明确标记为「已升级」（便于线上用日志确认修复生效）',
+      replay38.upgraded === true && replay38.reason === 'expanded-from-stale-payload',
+      { upgraded: replay38.upgraded, reason: replay38.reason });
+
+    // 边界：当前配置推不出表 → 保留原声明集（不能变成「声明 0 张表」）
+    const replayEmpty38 = buildReplayPayload(stalePayload, { forms: [] }, 'tok38');
+    check('F38 ★★ 边界：配置里推不出表 → 保留原声明集，不制造空声明',
+      replayEmpty38.dataConditions.length === 1 &&
+      replayEmpty38.dataConditions[0].tableId === 'tblMain38' &&
+      replayEmpty38.upgraded === false,
+      { got: replayEmpty38.dataConditions.map((d) => d.tableId), reason: replayEmpty38.reason });
+
+    // 边界：声明集已等价 → 不算升级，但仍返回重建形态（补 baseToken/COUNTA）
+    const alreadyGood38 = buildDataConditions(forms38, 'tblMain38', 'tok38');
+    const replaySame38 = buildReplayPayload(alreadyGood38, customConfig38, 'tok38');
+    check('F38 ★★ 边界：声明集已等价 → 不标记升级（避免每次刷新都刷日志）',
+      replaySame38.upgraded === false && replaySame38.dataConditions.length === 4,
+      { reason: replaySame38.reason });
+
+    // 结构性保障：repair 必须走 buildReplayPayload，不能直接照抄 saved
+    const fs38 = await import('node:fs');
+    const strip38 = (src) =>
+      src.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|\s)\/\/[^\n]*/g, '$1');
+    const cs38 = strip38(fs38.readFileSync(new URL('../src/services/configService.ts', import.meta.url), 'utf8'));
+    check('F38 ★★★ 结构：repair 内部调用 buildReplayPayload（剥离注释后断言）',
+      /buildReplayPayload\s*\(/.test(cs38),
+      null);
+    check('F38 ★★★ 结构：不再把 saved 的 dataConditions 直接当重放参数',
+      !/const dataConditions = saved\?\.payload\?\.dataConditions/.test(cs38),
+      null);
+
+    // ---------- 可访问性判定：把「声明问题」与「权限问题」区分开 ----------
+    check('F38 ★★ meta+records 双失败 → 判定整表不可读（本项目实证判据）',
+      judgeTableAccess({ tableId: 't1', metaOk: false, recordsOk: false, error: 'table permission denied error' }).level === 'blocked',
+      null);
+    check('F38 ★★ 双失败且错误含 partial_view → 指向「不在当前视图数据源范围」',
+      classifyAccessError('partial_view_api_error').kind === 'partial',
+      null);
+    check('F38 ★★ 双失败且错误含 permission → 指向「无读取权限」',
+      classifyAccessError('table permission denied error').kind === 'permission',
+      null);
+    check('F38 ★★★ 仅一条链路失败 → 不断言整表不可读（避免误判加剧恐慌）',
+      judgeTableAccess({ tableId: 't2', metaOk: true, recordsOk: false, error: 'code: 12' }).message.includes('记录'),
+      null);
+    check('F38 ★ 两条链路都成功 → ok，且不产生告警文案',
+      judgeTableAccess({ tableId: 't3', metaOk: true, recordsOk: true }).level === 'ok' &&
+      describeBlockedTables(collectBlockedTables([{ tableId: 't3', metaOk: true, recordsOk: true }])) === '',
+      null);
+    check('F38 ★★ 多表汇总：只列出真正不可读的表',
+      collectBlockedTables([
+        { tableId: 'ok1', metaOk: true, recordsOk: true },
+        { tableId: 'bad1', metaOk: false, recordsOk: false, error: 'permission denied' },
+        { tableId: 'ok2', metaOk: true, recordsOk: true },
+      ]).map((v) => v.tableId).join(',') === 'bad1',
+      null);
   }
 
   const failed = results.filter((r) => !r.pass);

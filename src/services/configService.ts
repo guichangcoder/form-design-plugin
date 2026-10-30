@@ -13,7 +13,7 @@ import {
   isWorkspaceAvailable,
   selectBase,
 } from './appContext';
-import { buildDataConditions, collectDeclaredTableIds } from '../utils/dataConditions';
+import { buildDataConditions, buildReplayPayload, collectDeclaredTableIds } from '../utils/dataConditions';
 
 /** dev 模式下宿主 widget 配置可能在 F5 后丢失；用飞书 base 做一份持久化备份，
  *  刷新后即使宿主读不到配置，也能从 base 捞回并重新写回宿主。base 不受页面刷新影响。 */
@@ -687,10 +687,25 @@ export async function repairDashboardConfigFromLastSave(
   if (!isDashboardHost()) return { repaired: false, reason: 'not-dashboard' };
 
   const saved = await loadSavedPayload();
-  const dataConditions = saved?.payload?.dataConditions ?? saved?.dataConditions;
+  const savedDc = saved?.payload?.dataConditions ?? saved?.dataConditions;
   const customConfig = saved?.customConfig;
-  if (!dataConditions || !customConfig) {
+  if (!savedDc || !customConfig) {
     return { repaired: false, reason: 'no-replay-payload' };
+  }
+
+  // 🔴 关键：不能原样重放 localStorage 里的 dataConditions。
+  // 那份 payload 是「上一次保存那一刻」的快照，可能早于声明逻辑的升级；
+  // 原样重放会把「已扩大的声明集」缩回旧版 → 源表再次读不到。
+  // 详见 utils/dataConditions.ts 的 buildReplayPayload 注释。
+  const replay = buildReplayPayload(savedDc, customConfig, getBaseToken());
+  const dataConditions = replay.dataConditions;
+  const dcUpgraded = replay.upgraded;
+  if (dcUpgraded) {
+    console.log(
+      '[config] 重放前按当前配置重建 dataConditions（' + replay.reason + '）：',
+      '旧 =', (savedDc as any[]).map((d: any) => d.tableId),
+      '→ 新 =', dataConditions.map((d: any) => d.tableId)
+    );
   }
 
   // ★ 关键改动：不再先调 getConfig 判断"是否一致"。错误态下 getConfig 可能抛错/返回空，
@@ -700,7 +715,11 @@ export async function repairDashboardConfigFromLastSave(
     try {
       const success = await (getDashboard() as any).saveConfig({ dataConditions, customConfig });
       if (success !== false) {
-        return { repaired: true, reason: `replayed-attempt-${attempt}`, detail: { dataConditions } };
+        return {
+          repaired: true,
+          reason: `replayed-attempt-${attempt}${dcUpgraded ? '（声明集已升级）' : ''}`,
+          detail: { dataConditions, dcUpgraded },
+        };
       }
       lastErr = 'saveConfig returned false';
     } catch (e) {

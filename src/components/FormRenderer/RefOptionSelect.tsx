@@ -153,6 +153,25 @@ export function RefOptionSelect({
         setMeta(res);
         setValues(res.values);
         setDone(true);
+        // 🔴 枚举「跑完但失败」必须显式报出来。
+        //   enumerateRefOptions 内部把读取异常 catch 成了 { values: [], error }，
+        //   所以失败不会走 .catch 分支；若这里不处理 res.error，界面就只剩
+        //   「已取到 0 个选项」，用户与开发者都无从判断是「真的没有选项」
+        //   还是「源表根本读不到」（2026-10-30 实测踩坑）。
+        //   仅当「一个值都没取到」时才用错误态替换下拉框：
+        //   已有部分值时仍让用户能选，错误只进控制台，不遮挡可用选项。
+        if (res.error) {
+          console.warn(
+            `[optionRef] 枚举引用选项未完成：field="${field.label || field.fieldName}" ` +
+              `sourceTableId=${ref.tableId} sourceFieldId=${ref.fieldId} ` +
+              `complete=${res.complete} values=${res.values.length} error=${res.error}`
+          );
+          if (res.values.length === 0) {
+            const c = classifySdkError(new Error(res.error), '引用选项的源数据表');
+            setError(c.title);
+            setErrorHelp(c);
+          }
+        }
       })
       .catch((e) => {
         if (!alive) return;

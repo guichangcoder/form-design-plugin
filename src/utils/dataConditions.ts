@@ -126,3 +126,56 @@ export function findUndeclaredTables(
   const declared = new Set(declaredTableIds);
   return collectDeclaredTableIds(forms).filter((id) => !declared.has(id));
 }
+
+/**
+ * ★ 构造「重放用的 payload」—— 纯函数，供回归测试真实调用。
+ *
+ * 🔴 为什么重放不能照抄 localStorage 里存下的 `dataConditions`：
+ *
+ * 那份 payload 是「上一次保存那一刻」的快照，可能早于声明逻辑的升级。
+ * 例如旧版本只声明主表一条，若原样重放，等于把「已扩大的声明集」又缩回去 →
+ * 选项引用源表再次不在声明集里 → 刷新后依然整表不可读
+ * （2026-10-30 实测：`02c9ac2` 修好了 saveConfig，但 App 的 View 态自动修复
+ *   每次加载都重放旧 payload，把修复覆盖掉，用户端表现完全没变）。
+ *
+ * 正解：声明集一律**按当前 customConfig 重新推导**，只把 customConfig 当数据用。
+ * 这样重放天然带上最新的声明逻辑，与真实 saveConfig 的产出一致。
+ *
+ * 边界：若当前配置里一张表都推不出来（空配置/异常形态），退回保存时的声明集，
+ * 避免把 payload 变成空声明导致宿主报「配置数据发生变更」。
+ */
+export function buildReplayPayload(
+  savedDataConditions: DataConditionEntry[] | null | undefined,
+  customConfig: unknown,
+  baseToken?: string | null
+): { dataConditions: DataConditionEntry[]; upgraded: boolean; reason: string } {
+  const saved = Array.isArray(savedDataConditions) ? savedDataConditions : [];
+  const cfg = customConfig as { forms?: (TableRefLike | null | undefined)[] } | null | undefined;
+  const forms = Array.isArray(cfg?.forms) ? cfg!.forms! : [];
+
+  const mainTableId = forms.find((f) => f?.mainTable?.tableId)?.mainTable?.tableId;
+  const rebuilt = buildDataConditions(forms, mainTableId, baseToken);
+
+  if (rebuilt.length === 0) {
+    // 推不出来 → 保留原声明集（不能让 payload 变成「声明 0 张表」）
+    return {
+      dataConditions: saved,
+      upgraded: false,
+      reason: saved.length > 0 ? 'keep-saved-empty-config' : 'no-tables',
+    };
+  }
+
+  const savedIds = saved.map((d) => d?.tableId).filter(Boolean);
+  const newIds = rebuilt.map((d) => d.tableId);
+  const sameSet =
+    savedIds.length === newIds.length && newIds.every((id) => savedIds.includes(id));
+  if (sameSet) {
+    // 声明集等价 → 仍用重建结果（补上 baseToken/COUNTA 等最新形态），但不算升级
+    return { dataConditions: rebuilt, upgraded: false, reason: 'same-set' };
+  }
+  return {
+    dataConditions: rebuilt,
+    upgraded: true,
+    reason: savedIds.length === 0 ? 'rebuilt-from-empty' : 'expanded-from-stale-payload',
+  };
+}
