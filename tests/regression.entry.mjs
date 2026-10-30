@@ -5646,6 +5646,111 @@ async function run() {
       null);
   }
 
+  // ================================================================
+  // F40 —— 「源表读不到」的三种根因必须被区分开（2026-10-30 第五轮）
+  //
+  // 现场：用户反复只报一句 `getRecordsByPage error, msg: undefined code: 12`。
+  //   该错误跨 iframe 时被宿主降级：没有 message、code 也不是 SDK 的
+  //   （SDK 算出来应是 10214999，模板是 `${msg} ${detail}`）。
+  //   继续靠猜已四轮无效，所以改为**在报错那一刻采集现场并直接给结论**。
+  //
+  // 三种根因处置方式完全不同，绝不能混为一句「读取失败」：
+  //   ① 源表不在当前 base → 插件连错了多维表格 → 重新选数据源保存
+  //   ② 源表在 base 里但不在 dataConditions → 宿主不加载 → 重新保存让插件登记
+  //   ③ 两者都在仍读不到 → 账号权限/视图范围 → 找管理员
+  // ================================================================
+  log('\n--- F40 源表读不到必须区分根因（连错表 / 未登记 / 无权限）---');
+  {
+    const { explainRefReadFailure } = await import('../src/utils/scopeCheck');
+    const SRC = 'tblSrcRef';
+
+    // ① 连错多维表格：base 里根本没有这张源表
+    const m1 = explainRefReadFailure({
+      sourceTableId: SRC,
+      baseToken: 'bascnZZZ999888',
+      visibleTableIds: ['tblMainOnly', 'tblOther'],
+      hostDeclaredIds: ['tblMainOnly'],
+    });
+    check('F40 ★★★ 源表不在当前 base → 判为「连错多维表格」，要求重新选数据源',
+      m1.includes('没有这张源表') && m1.includes('重新选择数据源'),
+      { msg: m1 });
+    check('F40 ★★ 该结论带上数据源标记尾号，便于与配置态核对',
+      m1.includes('...999888'),
+      { msg: m1 });
+    check('F40 ★★★ 且**不得**说成权限问题（避免把用户引向找管理员）',
+      !m1.includes('权限'),
+      { msg: m1 });
+
+    // ② 未登记数据源：表在 base 里，但宿主 dataConditions 不含它
+    const m2 = explainRefReadFailure({
+      sourceTableId: SRC,
+      baseToken: 'bascnZZZ999888',
+      visibleTableIds: ['tblMainOnly', SRC],
+      hostDeclaredIds: ['tblMainOnly'],
+    });
+    check('F40 ★★★ 表在 base 但未登记为数据源 → 判为「未登记」，要求重新保存',
+      m2.includes('没有被登记为插件的数据源') && m2.includes('重新保存'),
+      { msg: m2 });
+    check('F40 ★★ 如实报出宿主实际持有的表数（1 张），便于对照',
+      m2.includes('宿主持有 1 张表'),
+      { msg: m2 });
+    check('F40 ★★★ 未登记 ≠ 连错表：不得出现「没有这张源表」',
+      !m2.includes('没有这张源表'),
+      { msg: m2 });
+
+    // ③ 都存在仍读不到 → 权限/视图
+    const m3 = explainRefReadFailure({
+      sourceTableId: SRC,
+      baseToken: 'bascnZZZ999888',
+      visibleTableIds: ['tblMainOnly', SRC],
+      hostDeclaredIds: ['tblMainOnly', SRC],
+    });
+    check('F40 ★★★ 表在且已登记仍失败 → 判为权限/视图范围，指向找管理员',
+      m3.includes('权限') && m3.includes('管理员'),
+      { msg: m3 });
+    check('F40 ★★ 该分支明确「已登记为数据源」，排除前两种根因',
+      m3.includes('已登记为数据源'),
+      { msg: m3 });
+
+    // ④ 连 base 表清单都拿不到
+    const m4 = explainRefReadFailure({
+      sourceTableId: SRC,
+      baseToken: '',
+      visibleTableIds: null,
+      hostDeclaredIds: null,
+    });
+    check('F40 ★★★ 拿不到 base 表清单 → 判为「整个 base 不可达」，不说成权限',
+      m4.includes('无法读取当前多维表格的数据表清单') && !m4.includes('管理员'),
+      { msg: m4 });
+
+    // 边界：无源表 id → 空串（调用方据此不渲染）
+    check('F40 ★★ 源表 id 为空 → 返回空串，不渲染误导性结论',
+      explainRefReadFailure({ sourceTableId: '', visibleTableIds: [], hostDeclaredIds: [] }) === '',
+      null);
+
+    // 三种根因必须互不相同（否则等于没区分）
+    check('F40 ★★★ 四种结论文本互不相同（真的区分开了，不是同一句话换皮）',
+      new Set([m1, m2, m3, m4]).size === 4,
+      null);
+
+    // ---------- 结构断言（剥离注释） ----------
+    const fs40 = await import('node:fs');
+    const strip40 = (src) =>
+      src.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|\s)\/\/[^\n]*/g, '$1');
+    const r40 = strip40(
+      fs40.readFileSync(new URL('../src/components/FormRenderer/RefOptionSelect.tsx', import.meta.url), 'utf8')
+    );
+    check('F40 ★★★ 错误框里真实调用了 explainRefReadFailure（结论必须画给用户看）',
+      /explainRefReadFailure\s*\(/.test(r40),
+      null);
+    check('F40 ★★★ 现场采集被真实调用（且不吞掉主流程异常）',
+      /collectRefReadContext\s*\(\s*\)/.test(r40),
+      null);
+    check('F40 ★★ 结论渲染进 DOM（refDiagnosis 有实际使用处，不是只 setState）',
+      /setRefDiagnosis\s*\(/.test(r40) && /\{refDiagnosis\s*&&/.test(r40),
+      null);
+  }
+
   const failed = results.filter((r) => !r.pass);
   log(`\n=== ${results.length - failed.length}/${results.length} 通过 ===`);
   if (failed.length) process.exit(1);

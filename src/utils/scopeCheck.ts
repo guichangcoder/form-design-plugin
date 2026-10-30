@@ -155,3 +155,56 @@ export function describeBaseMismatch(
     `而是退回了宿主默认的多维表格。请进入配置模式重新选择数据源并保存。`
   );
 }
+
+/**
+ * ★ 解释「引用选项源表读不到」的确切原因（纯函数，可被测试真实调用）。
+ *
+ * 🔴 为什么必须抽出来（2026-10-30 第五轮）：
+ * 用户连续多轮只能贴一句 `getRecordsByPage error, msg: undefined code: 12`。
+ * 这个错误信息在跨 iframe 边界时**已被宿主降级**（没有 message、code 也不是 SDK 的），
+ * 靠它无法区分三种完全不同的根因，于是每一轮都在猜。
+ *
+ * 而用户唯一会截图的地方就是 RefOptionSelect 的错误框 ——
+ * 所以必须**把结论直接算好塞进那个框**，让一次截图就带回决定性证据。
+ *
+ * 四种根因，处置方式完全不同：
+ *   ① 连不上配置指定的多维表格（base 绑定错位）→ 重新选数据源保存
+ *   ② 表在 base 里，但没被声明为插件数据源（dataConditions 未写入宿主）
+ *      → 宿主只加载「声明过的数据源」（partial view），未声明的表读记录必失败
+ *   ③ 表已声明也读不到 → 当前账号权限 / 视图范围限制 → 找管理员
+ *   ④ 连 base 的表清单都拿不到 → 整个 base 不可达
+ *
+ * @param visibleTableIds 当前实际 base 里可见的表 id（null = 探测本身失败）
+ * @param hostDeclaredIds 宿主持有的 dataConditions 声明表 id（null = 拿不到）
+ * @returns 用户可读且足以定位的一句结论；空串 = 不适用（无异常）
+ */
+export function explainRefReadFailure(input: {
+  sourceTableId: string;
+  baseToken?: string | null;
+  visibleTableIds?: string[] | null;
+  hostDeclaredIds?: string[] | null;
+}): string {
+  const src = String(input?.sourceTableId ?? '').trim();
+  if (!src) return '';
+  const token =
+    typeof input.baseToken === 'string' && input.baseToken
+      ? `...${input.baseToken.slice(-6)}`
+      : '(未标记)';
+  const visible = Array.isArray(input.visibleTableIds) ? input.visibleTableIds : null;
+  const declared = Array.isArray(input.hostDeclaredIds) ? input.hostDeclaredIds : null;
+
+  // ④ base 表清单都拿不到 → 整个 base 不可达
+  if (visible === null) {
+    return `无法读取当前多维表格的数据表清单（数据源标记 ${token}）。插件可能没有连上任何多维表格，请刷新页面重试；若持续失败，请重新进入配置模式选择数据源并保存。`;
+  }
+  // ① base 绑定错位：源表根本不在这张多维表格里
+  if (!visible.includes(src)) {
+    return `当前连接的多维表格里没有这张源表（源表 ${src}，数据源标记 ${token}）。插件没有连上配置时所选的多维表格，而是用了宿主默认的多维表格 —— 请进入配置模式重新选择数据源并保存一次。`;
+  }
+  // ② 表在 base 里但未声明为数据源 → 宿主 partial view 不加载它
+  if (declared !== null && !declared.includes(src)) {
+    return `源表 ${src} 存在于当前多维表格，但没有被登记为插件的数据源（宿主持有 ${declared.length} 张表，不含该表）。应用模式只会加载登记过的数据源表，因此读不到它的记录 —— 请进入配置模式重新保存一次，让插件重新登记数据源。`;
+  }
+  // ③ 表存在、也已声明，仍读不到 → 权限或视图范围
+  return `源表 ${src} 已存在于当前多维表格${declared !== null ? '，且已登记为数据源' : ''}，但读取记录仍被拒绝。这通常是当前账号对这张表的查看权限不足，或该表不在你所见的视图范围内 —— 请让多维表格管理员为这张表开放「可阅读」权限。`;
+}

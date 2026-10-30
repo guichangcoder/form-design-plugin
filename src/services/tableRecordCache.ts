@@ -13,7 +13,7 @@
  * 飞书服务端只会返回该用户在该多维表格里有权限看到的记录 —— 即「只加载用户权限内的数据」，
  * 与多维表格自身的权限体系完全一致；插件层不做也不应做提权。
  */
-import { getBase } from './appContext';
+import { getBase, getBaseToken, getDashboard } from './appContext';
 import { stringifyCellValue, extractOptionTexts } from '../utils/cellText';
 
 /** 分页大小：飞书 SDK 单次上限就是 200，传更大值非法 */
@@ -1688,6 +1688,59 @@ export function enumerateRefOptions(
     },
     promise,
   };
+}
+
+/* ---------------- 源表读取失败的现场诊断（给错误框直接用） ---------------- */
+
+/**
+ * ★ 读取「源表读不到」时的一次性现场信息，供错误框展示。
+ *
+ * 🔴 为什么需要它（2026-10-30 第五轮）：
+ * 用户能截给我的唯一画面就是 RefOptionSelect 的错误框。而
+ * `getRecordsByPage error, msg: undefined code: 12` 在跨 iframe 时被宿主降级，
+ * 既无 message 也没真 code，无法区分根因。所以在**报错的那一刻**顺手采集：
+ *   ① 当前实际 base 里有哪些表（判断是不是连错了多维表格）
+ *   ② 宿主持有的 dataConditions 声明表（判断是不是没登记数据源）
+ * 这两条足以把「重启保存/改代码/找管理员」三种处置彻底分开。
+ *
+ * 全程 try/catch，任何一步失败都不影响主流程（诊断绝不能反过来把功能搞挂）。
+ */
+export interface RefReadContext {
+  baseToken: string;
+  /** 当前实际 base 可见的表 id；null = 探测失败 */
+  visibleTableIds: string[] | null;
+  /** 宿主持有的 dataConditions 声明表 id；null = 拿不到 */
+  hostDeclaredIds: string[] | null;
+  /** 便于排查：宿主持有的声明原始条目 */
+  hostDeclaredRaw?: unknown;
+}
+
+export async function collectRefReadContext(): Promise<RefReadContext> {
+  const ctx: RefReadContext = {
+    baseToken: '',
+    visibleTableIds: null,
+    hostDeclaredIds: null,
+  };
+  try {
+    ctx.baseToken = getBaseToken() || '';
+  } catch {
+    /* ignore */
+  }
+  try {
+    const metas = await getBase().getTableMetaList();
+    ctx.visibleTableIds = (metas ?? []).map((t: any) => t.id).filter(Boolean);
+  } catch {
+    ctx.visibleTableIds = null;
+  }
+  try {
+    const cfg: any = await (getDashboard() as any).getConfig();
+    const dc: any[] = Array.isArray(cfg?.dataConditions) ? cfg.dataConditions : [];
+    ctx.hostDeclaredRaw = dc.map((d: any) => (d && typeof d === 'object' ? { tableId: d.tableId } : d));
+    ctx.hostDeclaredIds = dc.map((d: any) => d?.tableId).filter(Boolean);
+  } catch {
+    ctx.hostDeclaredIds = null;
+  }
+  return ctx;
 }
 
 /* ---------------- 逐页搜索（用户输入关键字时才启动） ---------------- */

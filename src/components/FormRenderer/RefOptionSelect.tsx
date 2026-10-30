@@ -5,9 +5,11 @@ import { FieldConfig, FormValues } from '../../types';
 import { hasOptionRef, conditionSpecOf } from '../../utils/optionRef';
 import { stringifyCellValue, extractOptionTexts } from '../../utils/cellText';
 import { classifySdkError, ClassifiedError } from '../../utils/permError';
+import { explainRefReadFailure } from '../../utils/scopeCheck';
 import {
   searchAllRows,
   enumerateRefOptions,
+  collectRefReadContext,
   OptionEnumResult,
   SearchHandle,
   FullRow,
@@ -67,6 +69,8 @@ export function RefOptionSelect({
   const [searchScanned, setSearchScanned] = useState(0);
   const [error, setError] = useState('');
   const [errorHelp, setErrorHelp] = useState<ClassifiedError | null>(null);
+  /** 源表读取失败的现场结论（只在真失败时才有；用于让用户一截图就带出证据） */
+  const [refDiagnosis, setRefDiagnosis] = useState('');
   const [opened, setOpened] = useState(false);
   const openedRef = useRef(false);
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -170,6 +174,25 @@ export function RefOptionSelect({
             const c = classifySdkError(new Error(res.error), '引用选项的源数据表');
             setError(c.title);
             setErrorHelp(c);
+            // 🔴 顺手把「现场」采回来，塞进错误框。
+            //   用户能截给我的只有这个框，而 getRecordsByPage 的错误在跨 iframe 时
+            //   已被宿主降级成一句无意义文字，不看现场就只能继续猜。
+            //   采集失败不影响任何功能（内部全程 try/catch）。
+            collectRefReadContext()
+              .then((ctx) => {
+                if (!alive) return;
+                const why = explainRefReadFailure({
+                  sourceTableId: ref.tableId,
+                  baseToken: ctx.baseToken,
+                  visibleTableIds: ctx.visibleTableIds,
+                  hostDeclaredIds: ctx.hostDeclaredIds,
+                });
+                setRefDiagnosis(why);
+                console.warn('[optionRef] 源表读取失败现场 =', ctx, '\n结论 =', why);
+              })
+              .catch(() => {
+                /* 诊断失败不影响主流程 */
+              });
           }
         }
       })
@@ -339,6 +362,21 @@ export function RefOptionSelect({
       >
         <div>⚠️ {error}</div>
         {errorHelp?.action && <div style={{ marginTop: 2 }}>{errorHelp.action}</div>}
+        {/* ★ 现场结论：区分「连错多维表格」/「没登记数据源」/「没权限」三种根因。
+            这是用户唯一能截图给我的地方，所以必须画在这里。 */}
+        {refDiagnosis && (
+          <div
+            data-ref-diagnosis
+            style={{
+              marginTop: 6,
+              paddingTop: 6,
+              borderTop: '1px dashed #fdba74',
+              fontWeight: 600,
+            }}
+          >
+            {refDiagnosis}
+          </div>
+        )}
       </div>
     );
   }
