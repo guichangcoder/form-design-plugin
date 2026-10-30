@@ -1,0 +1,4 @@
+chore: 停止跟踪 esbuild 副产物与本地临时提交信息文件
+
+tests/regression.bundle.mjs 每次跑测试都会重新生成，入库只会制造无意义 diff；
+.gitmsg.tmp 是我本地写提交信息用的临时文件，误入库了。两者加进 .gitignore。

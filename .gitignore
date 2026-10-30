@@ -23,3 +23,9 @@ output/
 
 # Word/WPS 临时锁文件
 ~$*.docx
+
+# esbuild 打包副产物（每次跑测试都会重生成）
+tests/regression.bundle.mjs
+
+# 本地临时提交信息文件
+.gitmsg.tmp
