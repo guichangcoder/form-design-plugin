@@ -13,6 +13,7 @@ import {
   isWorkspaceAvailable,
   selectBase,
 } from './appContext';
+import { buildDataConditions, collectDeclaredTableIds } from '../utils/dataConditions';
 
 /** dev 模式下宿主 widget 配置可能在 F5 后丢失；用飞书 base 做一份持久化备份，
  *  刷新后即使宿主读不到配置，也能从 base 捞回并重新写回宿主。base 不受页面刷新影响。 */
@@ -422,46 +423,56 @@ export async function saveConfig(data: PluginData): Promise<SaveResult> {
       const firstForm = data?.forms?.find((f) => f?.mainTable?.tableId);
       const mainTableId = firstForm?.mainTable?.tableId;
 
-      // ★ 跨 Base 强校验：主表与所有子表都必须存在于当前绑定的 base 内。
+      // ★ 跨 Base 强校验：配置中引用的**所有**表都必须存在于当前绑定的 base 内。
       //   配置 UI 的表列表本来就来自绑定 base 的实例，这里是保存前的最后防线。
-      if (baseToken && mainTableId) {
-        const subIds = (firstForm?.subTables ?? [])
-          .map((s) => s?.tableId)
-          .filter((id): id is string => !!id);
+      //   ⚠️ 必须覆盖全部表单 —— dataConditions 现在声明的是全表单引用集，
+      //   若校验只看第一份表单，多表单场景会把 base 里不存在的表也声明出去，
+      //   宿主侧表现可能是「配置数据发生变更」或直接拒绝保存。
+      if (baseToken) {
+        const allIds = collectDeclaredTableIds(data?.forms ?? []);
         // ★ 选项引用的源表同样必须在本 base 内：插件以「打开者」的身份读源表记录，
         //   跨 base 或不属于本多维表格的源表在发布后必然读不到（选项为空/报错）。
-        const refIds = [...(firstForm?.mainTable?.fields ?? []), ...(firstForm?.subTables ?? []).flatMap((s: any) => s?.fields ?? [])]
-          .map((f: any) => f?.optionRef?.tableId)
-          .filter((id): id is string => !!id);
-        try {
-          const metas = await getBase().getTableMetaList();
-          const inBase = new Set(metas.map((t) => t.id));
-          const outsiders = [...new Set([mainTableId, ...subIds, ...refIds])].filter(
-            (id) => !inBase.has(id)
-          );
-          if (outsiders.length > 0) {
-            throw new Error(
-              `以下数据表不属于已选择的多维表格（${outsiders.join('、')}），请重新选择数据源后配置`
-            );
+        if (allIds.length > 0) {
+          try {
+            const metas = await getBase().getTableMetaList();
+            const inBase = new Set(metas.map((t) => t.id));
+            const outsiders = allIds.filter((id) => !inBase.has(id));
+            if (outsiders.length > 0) {
+              throw new Error(
+                `以下数据表不属于已选择的多维表格（${outsiders.join('、')}），请重新选择数据源后配置`
+              );
+            }
+          } catch (ve) {
+            if (ve instanceof Error && ve.message.includes('不属于已选择的多维表格')) throw ve;
+            console.warn('[config] 表归属校验时 base 不可达，跳过校验:', ve);
           }
-        } catch (ve) {
-          if (ve instanceof Error && ve.message.includes('不属于已选择的多维表格')) throw ve;
-          console.warn('[config] 表归属校验时 base 不可达，跳过校验:', ve);
         }
       }
 
-      // ★ dataConditions：仅一组条件（官方当前版本限制），声明主表 + baseToken。
-      const dataConditions = mainTableId
-        ? [
-            {
-              tableId: mainTableId,
-              ...(baseToken ? { baseToken } : {}),
-              dataRange: { type: 'ALL' },
-              groups: [],
-              series: 'COUNTA',
-            },
-          ]
-        : [];
+      // ★ dataConditions = 「主表 + 子表 + 选项引用源表」完整声明集。
+      //
+      // 🔴 只声明主表会让 View 态读不到其他表（2026-10-30 线上缺陷）：
+      //   选项引用的**源表**既不是主表也不是子表 → 不在声明集里 → 刷新进 View 态后
+      //   整表不可访问（meta 与 records 两条链路同时报 permission denied /
+      //   partial_view_api_error / code:12）→ 表现为「第一次保存后选项生效，
+      //   刷新后配置还在但选不到任何选项」。
+      //   实测记录（见 git b33053f 注释）早已给出同一结论：
+      //   「宿主 View 态校验 customConfig 引用的每张表都必须在 dataConditions 里 …
+      //     校验的是声明集，不是字符串扫描」「只传 1 个主表 → 带子表必失败」。
+      //   统计语义（COUNTA）只挂在主表上，其余表仅作数据源声明 —— 由纯函数统一构造，
+      //   避免这里再出现「漏掉某一类引用」的同类缺陷。
+      const dataConditions = buildDataConditions(
+        data?.forms ?? [],
+        mainTableId,
+        baseToken
+      );
+      const declaredTableIds = dataConditions.map((d) => d.tableId);
+      const refSourceIds = declaredTableIds.filter(
+        (id) => id !== mainTableId && !(firstForm?.subTables ?? []).some((s) => s?.tableId === id)
+      );
+      if (refSourceIds.length > 0) {
+        console.log('[config] dataConditions 额外声明选项引用源表:', refSourceIds);
+      }
 
       let saveState = 'unknown';
       try {

@@ -151928,6 +151928,60 @@ var init_configEntry = __esm({
   }
 });
 
+// src/utils/dataConditions.ts
+var dataConditions_exports = {};
+__export(dataConditions_exports, {
+  buildDataConditions: () => buildDataConditions,
+  collectDeclaredTableIds: () => collectDeclaredTableIds,
+  findUndeclaredTables: () => findUndeclaredTables
+});
+function collectDeclaredTableIds(forms) {
+  const out = [];
+  const seen = /* @__PURE__ */ new Set();
+  const push = (id) => {
+    const v11 = typeof id === "string" ? id.trim() : "";
+    if (!v11 || seen.has(v11)) return;
+    seen.add(v11);
+    out.push(v11);
+  };
+  for (const form of forms ?? []) {
+    if (!form) continue;
+    const main = form.mainTable;
+    push(main?.tableId);
+    for (const f12 of main?.fields ?? []) push(f12?.optionRef?.tableId);
+    for (const sub of form.subTables ?? []) {
+      push(sub?.tableId);
+      for (const f12 of sub?.fields ?? []) push(f12?.optionRef?.tableId);
+    }
+  }
+  return out;
+}
+function buildDataConditions(forms, primaryTableId, baseToken) {
+  const ids = collectDeclaredTableIds(forms);
+  if (ids.length === 0) return [];
+  const primary = primaryTableId && ids.includes(primaryTableId) ? primaryTableId : ids[0];
+  const tok = typeof baseToken === "string" && baseToken ? baseToken : void 0;
+  return ids.map((tableId) => {
+    const entry = {
+      tableId,
+      ...tok ? { baseToken: tok } : {},
+      dataRange: { type: "ALL" },
+      groups: []
+    };
+    if (tableId === primary) entry.series = "COUNTA";
+    return entry;
+  });
+}
+function findUndeclaredTables(forms, declaredTableIds) {
+  const declared = new Set(declaredTableIds);
+  return collectDeclaredTableIds(forms).filter((id) => !declared.has(id));
+}
+var init_dataConditions = __esm({
+  "src/utils/dataConditions.ts"() {
+    "use strict";
+  }
+});
+
 // tests/regression.entry.mjs
 init_dist();
 
@@ -152616,9 +152670,10 @@ function serializeConfig(data) {
       },
       subTables: (form.subTables ?? []).map((s) => ({
         // ★ 子表 tableId 必须保留：宿主 View 态校验「customConfig 引用的每张表
-        //   都必须在 dataConditions 里」，saveConfig 会把子表一并声明进
-        //   dataConditions，两边对齐才能通过（实测剥离子表 tableId 反而仍报
-        //   「配置数据发生变更」→ 校验对象是「声明的数据源集合」，不是字符串扫描）。
+        //   都必须在 dataConditions 里」→ saveConfig 用 utils/dataConditions.ts 的
+        //   buildDataConditions 声明**全部**被引用的表（主表 + 子表 + 选项引用源表），
+        //   两边对齐才能通过（实测剥离子表 tableId 反而仍报「配置数据发生变更」
+        //   → 校验对象是「声明的数据源集合」，不是字符串扫描）。
         tableId: s.tableId,
         linkFieldId: s.linkFieldId,
         // 区块名称同样保留（用户手填，无法重取）
@@ -158483,6 +158538,162 @@ async function run() {
       check(
         "F35 \u2605\u2605 \u771F\u5B9E\u8C03\u7528\uFF1A\u672A\u914D optionRef \u2192 null\uFF08\u4E0D\u628A\u666E\u901A\u5B57\u6BB5\u8BEF\u5224\u6210\u5F15\u7528\u63A7\u4EF6\uFF09",
         resolveRefSelectVariant2({ fieldId: "x35", fieldType: j5.SingleSelect }) === null,
+        null
+      );
+    }
+  }
+  {
+    const { buildDataConditions: buildDataConditions2, collectDeclaredTableIds: collectDeclaredTableIds2, findUndeclaredTables: findUndeclaredTables2 } = await Promise.resolve().then(() => (init_dataConditions(), dataConditions_exports));
+    const MAIN36 = "tblMain36";
+    const SUB36 = "tblSub36";
+    const SRC_A = "tblSrcA36";
+    const SRC_B = "tblSrcB36";
+    const TOK36 = "bascnF36";
+    const forms36 = [{
+      mainTable: {
+        tableId: MAIN36,
+        fields: [
+          { optionRef: { tableId: SRC_A, fieldId: "fa" } },
+          { optionRef: { tableId: SRC_A, fieldId: "fb" } },
+          // 同表不同字段 → 去重
+          {}
+          // 普通字段
+        ]
+      },
+      subTables: [{
+        tableId: SUB36,
+        fields: [{ optionRef: { tableId: SRC_B, fieldId: "fc" } }]
+      }]
+    }];
+    {
+      const ids = collectDeclaredTableIds2(forms36);
+      check(
+        "F36 \u2605\u2605\u2605 \u58F0\u660E\u96C6\u5305\u542B\u4E3B\u8868",
+        ids.includes(MAIN36),
+        { ids }
+      );
+      check(
+        "F36 \u2605\u2605\u2605 \u58F0\u660E\u96C6\u5305\u542B\u5B50\u8868",
+        ids.includes(SUB36),
+        { ids }
+      );
+      check(
+        "F36 \u2605\u2605\u2605 \u58F0\u660E\u96C6\u5305\u542B\u300C\u4E3B\u8868\u5B57\u6BB5\u5F15\u7528\u7684\u6E90\u8868\u300D\uFF08\u672C\u6B21\u7F3A\u9677\u6F0F\u6389\u7684\u5C31\u662F\u8FD9\u7C7B\uFF09",
+        ids.includes(SRC_A),
+        { ids }
+      );
+      check(
+        "F36 \u2605\u2605 \u58F0\u660E\u96C6\u5305\u542B\u300C\u5B50\u8868\u5B57\u6BB5\u5F15\u7528\u7684\u6E90\u8868\u300D",
+        ids.includes(SRC_B),
+        { ids }
+      );
+      check(
+        "F36 \u2605\u2605 \u58F0\u660E\u96C6\u53BB\u91CD\uFF08\u540C\u8868\u88AB\u591A\u4E2A\u5B57\u6BB5\u5F15\u7528\u53EA\u58F0\u660E\u4E00\u6B21\uFF09",
+        ids.filter((x11) => x11 === SRC_A).length === 1 && ids.length === 4,
+        { ids }
+      );
+      check(
+        "F36 \u2605 \u58F0\u660E\u96C6\u4FDD\u5E8F\uFF08\u4E3B\u8868\u5728\u524D\uFF0C\u4FBF\u4E8E\u8BFB\u65E5\u5FD7\uFF09",
+        ids[0] === MAIN36,
+        { ids }
+      );
+    }
+    {
+      const dc2 = buildDataConditions2(forms36, MAIN36, TOK36);
+      check(
+        "F36 \u2605\u2605\u2605 dataConditions \u6761\u76EE\u6570 = \u58F0\u660E\u8868\u6570\uFF08\u4E0D\u591A\u4E0D\u5C11\uFF09",
+        dc2.length === 4,
+        { got: dc2.map((d12) => d12.tableId) }
+      );
+      check(
+        'F36 \u2605\u2605\u2605 \u6BCF\u6761\u90FD\u5E26 dataRange:{type:"ALL"} \u4E0E groups:[]\uFF08\u5BBF\u4E3B\u683C\u5F0F\u8981\u6C42\uFF0C\u7F3A\u4E86\u4F1A\u88AB\u8FC7\u6EE4\uFF09',
+        dc2.every((d12) => d12.dataRange?.type === "ALL" && Array.isArray(d12.groups)),
+        null
+      );
+      check(
+        "F36 \u2605\u2605 \u6BCF\u6761\u90FD\u5E26 baseToken\uFF08\u975E\u7A7A\u65F6\u5FC5\u987B\u5E26\uFF0C\u5426\u5219\u5BBF\u4E3B\u62D2\u7EDD\u58F0\u660E\uFF09",
+        dc2.every((d12) => d12.baseToken === TOK36),
+        null
+      );
+      check(
+        "F36 \u2605\u2605 \u7EDF\u8BA1\u8BED\u4E49 COUNTA \u53EA\u6302\u5728\u4E3B\u8868\uFF08\u5176\u4F59\u8868\u4EC5\u4F5C\u6570\u636E\u6E90\u58F0\u660E\uFF09",
+        dc2.filter((d12) => d12.series === "COUNTA").length === 1 && dc2.find((d12) => d12.series === "COUNTA")?.tableId === MAIN36,
+        { withSeries: dc2.filter((d12) => d12.series).map((d12) => d12.tableId) }
+      );
+      check(
+        "F36 \u2605 \u65E0 baseToken \u65F6\u4E0D\u4F2A\u9020\u8BE5\u5B57\u6BB5\uFF08\u65E7\u914D\u7F6E\u517C\u5BB9\uFF09",
+        buildDataConditions2(forms36, MAIN36, void 0).every((d12) => d12.baseToken === void 0),
+        null
+      );
+    }
+    {
+      const ids = collectDeclaredTableIds2(forms36);
+      const legacyDeclared = [MAIN36];
+      const missing = findUndeclaredTables2(forms36, legacyDeclared);
+      check(
+        "F36 \u2605\u2605\u2605 \u53CD\u5411\u5BF9\u7167\uFF1A\u65E7\u5B9E\u73B0\uFF08\u53EA\u58F0\u660E\u4E3B\u8868\uFF09\u88AB\u8BC6\u522B\u51FA 3 \u5F20\u6F0F\u58F0\u660E\u7684\u8868",
+        missing.length === 3 && missing.includes(SUB36) && missing.includes(SRC_A) && missing.includes(SRC_B),
+        { missing }
+      );
+      check(
+        "F36 \u2605\u2605\u2605 \u53CD\u5411\u5BF9\u7167\uFF1A\u6F0F\u58F0\u660E\u96C6\u5408\u91CC\u5FC5\u987B\u542B\u300C\u9009\u9879\u5F15\u7528\u6E90\u8868\u300D\uFF08\u5426\u5219\u672C\u6B21\u7F3A\u9677\u4F1A\u91CD\u73B0\uFF09",
+        missing.includes(SRC_A),
+        { missing }
+      );
+      check(
+        "F36 \u2605\u2605 \u6B63\u5411\u5BF9\u7167\uFF1A\u7528\u65B0\u5B9E\u73B0\u6784\u9020\u7684\u58F0\u660E\u96C6\uFF0C\u6F0F\u58F0\u660E\u4E3A\u7A7A\uFF08\u4E0D\u591A\u4E5F\u4E0D\u5C11\uFF09",
+        findUndeclaredTables2(forms36, ids).length === 0,
+        null
+      );
+    }
+    {
+      check(
+        "F36 \u7A7A\u8868\u5355\u5217\u8868 \u2192 \u7A7A\u58F0\u660E\u96C6\uFF08\u4E0D\u4F2A\u9020\u8868\uFF09",
+        buildDataConditions2([], MAIN36, TOK36).length === 0 && buildDataConditions2(null, MAIN36, TOK36).length === 0,
+        null
+      );
+      const plain = [{ mainTable: { tableId: "tblOnly36", fields: [{}] }, subTables: [] }];
+      const dcPlain = buildDataConditions2(plain, "tblOnly36", TOK36);
+      check(
+        "F36 \u2605 \u7EAF\u4E3B\u8868\u914D\u7F6E \u2192 \u4ECD\u53EA\u58F0\u660E 1 \u6761\uFF08\u4FEE\u590D\u4E0D\u5F71\u54CD\u7B80\u5355\u573A\u666F\uFF09",
+        dcPlain.length === 1 && dcPlain[0].tableId === "tblOnly36" && dcPlain[0].series === "COUNTA",
+        null
+      );
+      const multi = [
+        { mainTable: { tableId: "tblM1", fields: [{ optionRef: { tableId: "tblS1" } }] }, subTables: [] },
+        { mainTable: { tableId: "tblM2", fields: [{ optionRef: { tableId: "tblS2" } }] }, subTables: [] }
+      ];
+      const dcMulti = buildDataConditions2(multi, "tblM1", TOK36);
+      check(
+        "F36 \u2605\u2605 \u591A\u8868\u5355\uFF1A\u5408\u5E76\u58F0\u660E\u5168\u90E8\u8868\u5355\u5F15\u7528\u7684\u8868\uFF08\u542B\u5404\u81EA\u7684\u6E90\u8868\uFF09",
+        dcMulti.length === 4 && ["tblM1", "tblS1", "tblM2", "tblS2"].every((id) => dcMulti.some((d12) => d12.tableId === id)),
+        { got: dcMulti.map((d12) => d12.tableId) }
+      );
+      const dcWrong = buildDataConditions2(forms36, "tblNotExist", TOK36);
+      check(
+        "F36 \u2605 \u4E3B\u8868 id \u4F20\u9519\u65F6\u9000\u5316\u4E3A\u58F0\u660E\u96C6\u9996\u4E2A\u5F53 COUNTA \u4E3B\u4F53\uFF08\u4E0D\u4E22\u8868\u3001\u4E0D\u5D29\uFF09",
+        dcWrong.length === 4 && dcWrong.filter((d12) => d12.series === "COUNTA").length === 1,
+        { withSeries: dcWrong.filter((d12) => d12.series).map((d12) => d12.tableId) }
+      );
+    }
+    {
+      const fs36 = await import("node:fs");
+      const strip36 = (src) => src.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/(^|\s)\/\/[^\n]*/g, "$1");
+      const read36 = (rel) => strip36(fs36.readFileSync(new URL(rel, import.meta.url), "utf8"));
+      const cs36 = read36("../src/services/configService.ts");
+      check(
+        "F36 \u2605\u2605\u2605 \u7ED3\u6784\uFF1AsaveConfig \u7528 buildDataConditions \u6784\u9020\u58F0\u660E\u96C6\uFF08\u5265\u79BB\u6CE8\u91CA\u540E\u65AD\u8A00\uFF09",
+        /buildDataConditions\s*\(/.test(cs36),
+        null
+      );
+      check(
+        "F36 \u2605\u2605 \u7ED3\u6784\uFF1A\u4E0D\u518D\u5B58\u5728\u300C\u53EA\u628A mainTableId \u585E\u8FDB dataConditions\u300D\u7684\u65E7\u5199\u6CD5",
+        !/const dataConditions = mainTableId\s*\n?\s*\?/.test(cs36),
+        null
+      );
+      check(
+        "F36 \u2605\u2605 \u7ED3\u6784\uFF1A\u8868\u5F52\u5C5E\u5F3A\u6821\u9A8C\u6539\u4E3A\u8986\u76D6\u5168\u8868\u5355\uFF08collectDeclaredTableIds\uFF09",
+        /collectDeclaredTableIds\s*\(/.test(cs36),
         null
       );
     }

@@ -5140,6 +5140,150 @@ async function run() {
     }
   }
 
+  // ================= F36：dataConditions 必须声明全部被引用的表 =================
+  // 🔴 缺陷复盘（2026-10-30 线上）：
+  //   「条件引用选项保存后第一次生效，刷新后配置还在但选不到选项」，控制台报
+  //     [tableRecords] 读取字段选项域失败：表=tblcUCBkIHqTtvet 错误=table permission denied error
+  //     Error: partial_view_api_error
+  //     [tableRecords] 本地扫描兜底失败：表=... 错误=getRecordsByPage error, code: 12
+  //
+  //   根因：saveConfig 的 dataConditions 只声明了主表一条。
+  //   应用插件在 View 态能访问的数据表 = dataConditions 声明的集合。
+  //   **选项引用的源表**既不是主表也不是子表 → 不在声明集 → View 态整表读不到
+  //   （meta 与 records 两条独立链路同时失败，正好对上上面两条报错）。
+  //   配置态保存的那一刻插件仍在配置上下文里 → 「第一次生效」；刷新进 View 态 → 失效。
+  //
+  //   项目自己的实测记录（git b33053f 注释）早就给出同一结论：
+  //     「宿主 View 态校验 customConfig 引用的每张表都必须在 dataConditions 里…
+  //       校验的是声明集，不是字符串扫描」「只传 1 个主表 → 带子表必失败」。
+  //   迁移到 Workspace/baseToken 时退化成「只声明主表」，于是在选项引用源表上又踩一次。
+  //
+  // ★ 必须真实调用 buildDataConditions，不能只正则断言「代码里出现了 optionRef 的 tableId」：
+  //   这类「漏掉某一类引用」的缺陷，正则断言永远抓不到（它只能证明字样存在）。
+  {
+    const { buildDataConditions, collectDeclaredTableIds, findUndeclaredTables } =
+      await import('../src/utils/dataConditions.ts');
+
+    const MAIN36 = 'tblMain36';
+    const SUB36 = 'tblSub36';
+    const SRC_A = 'tblSrcA36'; // 主表字段引用的源表
+    const SRC_B = 'tblSrcB36'; // 子表字段引用的源表
+    const TOK36 = 'bascnF36';
+
+    // 典型配置：主表 1 个引用字段 + 1 张子表（其字段也引用了另一张源表）
+    const forms36 = [{
+      mainTable: {
+        tableId: MAIN36,
+        fields: [
+          { optionRef: { tableId: SRC_A, fieldId: 'fa' } },
+          { optionRef: { tableId: SRC_A, fieldId: 'fb' } }, // 同表不同字段 → 去重
+          {}, // 普通字段
+        ],
+      },
+      subTables: [{
+        tableId: SUB36,
+        fields: [{ optionRef: { tableId: SRC_B, fieldId: 'fc' } }],
+      }],
+    }];
+
+    // ---------- 1) 声明集必须覆盖三类引用 ----------
+    {
+      const ids = collectDeclaredTableIds(forms36);
+      check('F36 ★★★ 声明集包含主表',
+        ids.includes(MAIN36), { ids });
+      check('F36 ★★★ 声明集包含子表',
+        ids.includes(SUB36), { ids });
+      check('F36 ★★★ 声明集包含「主表字段引用的源表」（本次缺陷漏掉的就是这类）',
+        ids.includes(SRC_A), { ids });
+      check('F36 ★★ 声明集包含「子表字段引用的源表」',
+        ids.includes(SRC_B), { ids });
+      check('F36 ★★ 声明集去重（同表被多个字段引用只声明一次）',
+        ids.filter((x) => x === SRC_A).length === 1 && ids.length === 4, { ids });
+      check('F36 ★ 声明集保序（主表在前，便于读日志）',
+        ids[0] === MAIN36, { ids });
+    }
+
+    // ---------- 2) dataConditions 结构正确 ----------
+    {
+      const dc = buildDataConditions(forms36, MAIN36, TOK36);
+      check('F36 ★★★ dataConditions 条目数 = 声明表数（不多不少）',
+        dc.length === 4, { got: dc.map((d) => d.tableId) });
+      check('F36 ★★★ 每条都带 dataRange:{type:"ALL"} 与 groups:[]（宿主格式要求，缺了会被过滤）',
+        dc.every((d) => d.dataRange?.type === 'ALL' && Array.isArray(d.groups)), null);
+      check('F36 ★★ 每条都带 baseToken（非空时必须带，否则宿主拒绝声明）',
+        dc.every((d) => d.baseToken === TOK36), null);
+      check('F36 ★★ 统计语义 COUNTA 只挂在主表（其余表仅作数据源声明）',
+        dc.filter((d) => d.series === 'COUNTA').length === 1 &&
+        dc.find((d) => d.series === 'COUNTA')?.tableId === MAIN36,
+        { withSeries: dc.filter((d) => d.series).map((d) => d.tableId) });
+      check('F36 ★ 无 baseToken 时不伪造该字段（旧配置兼容）',
+        buildDataConditions(forms36, MAIN36, undefined).every((d) => d.baseToken === undefined), null);
+    }
+
+    // ---------- 3) 反向对照：旧实现（只声明主表）必须被判为「漏声明」 ----------
+    // 这一步是「证明断言不是恒真」的关键：用旧行为当输入，必须识别出缺失。
+    {
+      const ids = collectDeclaredTableIds(forms36);
+      const legacyDeclared = [MAIN36]; // 旧 saveConfig 的实际产物
+      const missing = findUndeclaredTables(forms36, legacyDeclared);
+      check('F36 ★★★ 反向对照：旧实现（只声明主表）被识别出 3 张漏声明的表',
+        missing.length === 3 &&
+        missing.includes(SUB36) && missing.includes(SRC_A) && missing.includes(SRC_B),
+        { missing });
+      check('F36 ★★★ 反向对照：漏声明集合里必须含「选项引用源表」（否则本次缺陷会重现）',
+        missing.includes(SRC_A), { missing });
+      check('F36 ★★ 正向对照：用新实现构造的声明集，漏声明为空（不多也不少）',
+        findUndeclaredTables(forms36, ids).length === 0, null);
+    }
+
+    // ---------- 4) 边界 ----------
+    {
+      check('F36 空表单列表 → 空声明集（不伪造表）',
+        buildDataConditions([], MAIN36, TOK36).length === 0 &&
+        buildDataConditions(null, MAIN36, TOK36).length === 0, null);
+
+      // 纯主表、无引用、无子表 → 只声明 1 条，行为与修复前一致（不引入回归）
+      const plain = [{ mainTable: { tableId: 'tblOnly36', fields: [{}] }, subTables: [] }];
+      const dcPlain = buildDataConditions(plain, 'tblOnly36', TOK36);
+      check('F36 ★ 纯主表配置 → 仍只声明 1 条（修复不影响简单场景）',
+        dcPlain.length === 1 && dcPlain[0].tableId === 'tblOnly36' &&
+        dcPlain[0].series === 'COUNTA', null);
+
+      // 多表单：所有表单的引用都要合并声明（不同表单可能引不同的源表）
+      const multi = [
+        { mainTable: { tableId: 'tblM1', fields: [{ optionRef: { tableId: 'tblS1' } }] }, subTables: [] },
+        { mainTable: { tableId: 'tblM2', fields: [{ optionRef: { tableId: 'tblS2' } }] }, subTables: [] },
+      ];
+      const dcMulti = buildDataConditions(multi, 'tblM1', TOK36);
+      check('F36 ★★ 多表单：合并声明全部表单引用的表（含各自的源表）',
+        dcMulti.length === 4 &&
+        ['tblM1', 'tblS1', 'tblM2', 'tblS2'].every((id) => dcMulti.some((d) => d.tableId === id)),
+        { got: dcMulti.map((d) => d.tableId) });
+
+      // 主表 id 不在声明集里（调用方传错）→ 退化为声明集首个当统计主体，不丢表
+      const dcWrong = buildDataConditions(forms36, 'tblNotExist', TOK36);
+      check('F36 ★ 主表 id 传错时退化为声明集首个当 COUNTA 主体（不丢表、不崩）',
+        dcWrong.length === 4 && dcWrong.filter((d) => d.series === 'COUNTA').length === 1,
+        { withSeries: dcWrong.filter((d) => d.series).map((d) => d.tableId) });
+    }
+
+    // ---------- 5) 结构性保障：saveConfig 必须走纯函数，不得再手写单表数组 ----------
+    {
+      const fs36 = await import('node:fs');
+      const strip36 = (src) =>
+        src.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|\s)\/\/[^\n]*/g, '$1');
+      const read36 = (rel) => strip36(fs36.readFileSync(new URL(rel, import.meta.url), 'utf8'));
+
+      const cs36 = read36('../src/services/configService.ts');
+      check('F36 ★★★ 结构：saveConfig 用 buildDataConditions 构造声明集（剥离注释后断言）',
+        /buildDataConditions\s*\(/.test(cs36), null);
+      check('F36 ★★ 结构：不再存在「只把 mainTableId 塞进 dataConditions」的旧写法',
+        !/const dataConditions = mainTableId\s*\n?\s*\?/.test(cs36), null);
+      check('F36 ★★ 结构：表归属强校验改为覆盖全表单（collectDeclaredTableIds）',
+        /collectDeclaredTableIds\s*\(/.test(cs36), null);
+    }
+  }
+
   const failed = results.filter((r) => !r.pass);
   log(`\n=== ${results.length - failed.length}/${results.length} 通过 ===`);
   if (failed.length) process.exit(1);
