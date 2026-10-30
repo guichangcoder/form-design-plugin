@@ -1,0 +1,41 @@
+fix(config): dataConditions 结构改回 b33053f 实测形态（去掉 groups/series）+ 展示态自愈
+
+用户实测第四轮仍失败，报错：
+  ⚠️ 读取「引用选项的源数据表」失败
+  getRecordsByPage error, msg: undefined code: 12
+
+关键证据（翻 SDK 源码确认）：
+1) `getRecordsByPage error` 这句文案确实由 SDK 的 GetRecordsByPageUnknownError
+   产生，但它应有的 code 是 10200000 + 14*1000 + 999 = 10214999。
+   用户看到的是 **code: 12**，且 msg 为 undefined —— 说明错误对象在宿主侧
+   被降级/替换了，message 丢失、只剩一个数字码。
+2) `code: 12` 在整个 SDK 里搜不到任何对应枚举，确认由宿主产生。
+   `partial_view_api_error` 同样不在 SDK 内。
+3) `msg: undefined` 是「宿主不认这个 payload」的典型特征，
+   而不是「这张表没权限」（权限拒绝会带 table permission denied error 文案）。
+
+结论：02c9ac2 我构造 dataConditions 时加了 `groups: []` 和 `series: 'COUNTA'`，
+而 b33053f 那次**实测跑通**的形态是极简的 `{ tableId, dataRange: { type: 'ALL' } }`。
+多出的字段很可能让宿主整体丢弃这份声明，于是"声明了等于没声明" ——
+这正好解释了为什么前面三轮改声明集全都无效。
+
+修复：
+- buildDataConditions 改回极简形态：只保留 tableId + dataRange（+ 必要的 baseToken）。
+  并写明「类型允许 ≠ 宿主接受」，将来要加 series 必须先真机验证。
+- 对应修正 F36 里那 4 条把多余字段当成"必需"的断言，改为
+  「不得带 groups/series」+「每个条目 key 只能是 tableId/dataRange/baseToken」。
+  反向注入验证：把多余字段加回去 → 精确 2 条 FAIL，断言有效。
+
+新增展示态自愈（解决"用户不知道要回配置态重存"）：
+- 自检发现宿主 dataConditions 缺少需要的表时，**自动**按当前配置重新声明并写回，
+  而不是只在界面提示。写入后等 800ms 让宿主消化，再做可访问性探测
+  （避免「写完立刻读」读到旧权限快照而误报）。
+- 自动补声明只执行一次，防止与"保存→重载→再检查"形成循环。
+
+诊断增强（上一版自检写成 context==='dashboard' 才跑，用户复测时完全没日志）：
+- 改为**无条件执行**，并打印宿主环境全貌：resolvedContext / dashboardState /
+  hasSaveConfig / workspaceAvailable / appCtx。
+- 逐表打印各调用方式结果（plain / stringValue / withViewId / legacy），
+  用于区分「整表读不到」与「某种调用方式不支持」。
+
+测试：671/671 通过（33 组）。

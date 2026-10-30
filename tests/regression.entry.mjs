@@ -5212,13 +5212,22 @@ async function run() {
       check('F36 ★★★ dataConditions 条目数 = 声明表数（不多不少）',
         dc.length === 4, { got: dc.map((d) => d.tableId) });
       check('F36 ★★★ 每条都带 dataRange:{type:"ALL"} 与 groups:[]（宿主格式要求，缺了会被过滤）',
-        dc.every((d) => d.dataRange?.type === 'ALL' && Array.isArray(d.groups)), null);
+        dc.every((d) => d.dataRange?.type === 'ALL'), null);
       check('F36 ★★ 每条都带 baseToken（非空时必须带，否则宿主拒绝声明）',
         dc.every((d) => d.baseToken === TOK36), null);
-      check('F36 ★★ 统计语义 COUNTA 只挂在主表（其余表仅作数据源声明）',
-        dc.filter((d) => d.series === 'COUNTA').length === 1 &&
-        dc.find((d) => d.series === 'COUNTA')?.tableId === MAIN36,
-        { withSeries: dc.filter((d) => d.series).map((d) => d.tableId) });
+      // 🔴 2026-10-30 修正：实测通过的形态（b33053f）是极简的
+      //   { tableId, dataRange:{type:'ALL'} }，**不带** groups / series。
+      //   加了这些多余字段后三轮修复全部无效（宿主报 msg:undefined code:12），
+      //   故断言改为「不得出现多余字段」。
+      check('F36 ★★★ 不得带 groups / series 等多余字段（b33053f 实测形态，多了宿主会整体拒绝）',
+        dc.every((d) => d.groups === undefined && d.series === undefined),
+        { sample: dc[0] });
+      check('F36 ★★ 每条只含 tableId + dataRange（+baseToken），不多不少',
+        dc.every((d) => {
+          const keys = Object.keys(d).sort().join(',');
+          return keys === 'baseToken,dataRange,tableId' || keys === 'dataRange,tableId';
+        }),
+        { sampleKeys: Object.keys(dc[0] ?? {}).sort() });
       check('F36 ★ 无 baseToken 时不伪造该字段（旧配置兼容）',
         buildDataConditions(forms36, MAIN36, undefined).every((d) => d.baseToken === undefined), null);
     }
@@ -5249,8 +5258,7 @@ async function run() {
       const plain = [{ mainTable: { tableId: 'tblOnly36', fields: [{}] }, subTables: [] }];
       const dcPlain = buildDataConditions(plain, 'tblOnly36', TOK36);
       check('F36 ★ 纯主表配置 → 仍只声明 1 条（修复不影响简单场景）',
-        dcPlain.length === 1 && dcPlain[0].tableId === 'tblOnly36' &&
-        dcPlain[0].series === 'COUNTA', null);
+        dcPlain.length === 1 && dcPlain[0].tableId === 'tblOnly36', null);
 
       // 多表单：所有表单的引用都要合并声明（不同表单可能引不同的源表）
       const multi = [
@@ -5263,11 +5271,10 @@ async function run() {
         ['tblM1', 'tblS1', 'tblM2', 'tblS2'].every((id) => dcMulti.some((d) => d.tableId === id)),
         { got: dcMulti.map((d) => d.tableId) });
 
-      // 主表 id 不在声明集里（调用方传错）→ 退化为声明集首个当统计主体，不丢表
+      // 主表 id 不在声明集里（调用方传错）→ 不丢表、不崩
       const dcWrong = buildDataConditions(forms36, 'tblNotExist', TOK36);
-      check('F36 ★ 主表 id 传错时退化为声明集首个当 COUNTA 主体（不丢表、不崩）',
-        dcWrong.length === 4 && dcWrong.filter((d) => d.series === 'COUNTA').length === 1,
-        { withSeries: dcWrong.filter((d) => d.series).map((d) => d.tableId) });
+      check('F36 ★ 主表 id 传错时仍声明全部表（不丢表、不崩）',
+        dcWrong.length === 4, { got: dcWrong.map((d) => d.tableId) });
     }
 
     // ---------- 5) 结构性保障：saveConfig 必须走纯函数，不得再手写单表数组 ----------

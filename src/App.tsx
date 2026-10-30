@@ -21,9 +21,10 @@ import {
   HostContext,
   repairDashboardConfigFromLastSave,
 } from './services/configService';
-import { getBase, getBaseToken, getDashboard, isWorkspaceAvailable } from './services/appContext';
+import { getBase, getBaseToken, getDashboard, isWorkspaceAvailable, diagnoseAppContext } from './services/appContext';
 import { getFieldMetaList } from './services/baseService';
-import { collectDeclaredTableIds } from './utils/dataConditions';
+import { collectDeclaredTableIds, buildDataConditions } from './utils/dataConditions';
+import { serializeConfig } from './services/configSize';
 import {
   collectBlockedTables,
   describeBlockedTables,
@@ -148,6 +149,8 @@ export default function App() {
   const [repairDiag, setRepairDiag] = useState<string>('');
   // View 态数据源可访问性自检：结论（空串 = 没问题）
   const scopeCheckDone = useRef(false);
+  /** 自动补声明只做一次，避免与「保存 → 重载 → 再检查」形成循环 */
+  const autoDeclareDone = useRef(false);
   const [scopeIssue, setScopeIssue] = useState<string>('');
   // 应用模式数据源（P0-1）：当前选中的多维表格 baseToken
   const [baseToken, setBaseToken] = useState<string>(() => getBaseToken());
@@ -360,19 +363,46 @@ export default function App() {
    * 只在 dev / ?debug=1 下输出，正式环境不打扰用户。
    */
   useEffect(() => {
-    if (context !== 'dashboard' || inConfig || loading || !data) return;
+    if (inConfig || loading || !data) return;
     if (scopeCheckDone.current) return;
     scopeCheckDone.current = true;
     let alive = true;
     (async () => {
       const tableIds = collectDeclaredTableIds(data.forms ?? []);
-      if (tableIds.length === 0) return;
 
-      // ★ 第一件事：打印**宿主侧实际持有的 dataConditions**。
+      // ★ 第一步：先把**宿主环境真相**打出来。
+      //   上一版自检写成 `context === 'dashboard'` 才执行，结果用户复测时
+      //   完全看不到任何 [scopeCheck] 日志 —— 说明宿主被判成了 bridge，
+      //   而 saveConfig 里的 `if (isDashboardHost())` 是唯一写 dataConditions 的分支，
+      //   若该判定为 false，声明集压根没写进宿主（这能同时解释前面几轮修复全部无效）。
+      //   所以这里改为**无条件执行**，并把判定依据全部打印出来。
+      let hostInfo: Record<string, unknown> = {};
+      try {
+        const d = dashboard as any;
+        hostInfo = {
+          resolvedContext: getHostContext(),
+          isDashboardHost: diagnoseHost().isDashboardHost ?? undefined,
+          dashboardState: d?.state,
+          hasSaveConfig: typeof d?.saveConfig === 'function',
+          hasGetConfig: typeof d?.getConfig === 'function',
+          workspaceAvailable: isWorkspaceAvailable(),
+          appCtx: diagnoseAppContext(),
+        };
+      } catch (e) {
+        hostInfo = { hostInfoError: String((e as Error)?.message ?? e) };
+      }
+      console.log('[scopeCheck] 宿主环境 =', hostInfo);
+      console.log('[scopeCheck] 配置需要的表 =', tableIds);
+
+      if (tableIds.length === 0) {
+        console.warn('[scopeCheck] 配置里没有任何表，跳过可访问性探测');
+        return;
+      }
+
+      // ★ 第二步：打印**宿主侧实际持有的 dataConditions**。
       //   这是区分两种根因的决定性证据：
       //   - 宿主里的声明集 ⊇ 这些 tableId → 声明没问题，问题在权限/base 绑定；
       //   - 宿主里的声明集只有主表 → 声明没生效（保存/重放链路仍有问题）。
-      //   没有这条日志，只能靠猜（本项目已在这一点上反复踩坑）。
       try {
         const cfg: any = await (getDashboard() as any).getConfig();
         const hostDc: any[] = cfg?.dataConditions ?? [];
@@ -380,14 +410,36 @@ export default function App() {
         const missing = tableIds.filter((id) => !hostIds.includes(id));
         console.log(
           '[scopeCheck] 宿主持有 dataConditions =', hostIds,
-          '｜配置需要的表 =', tableIds,
           missing.length ? `｜🔴 宿主缺少: ${missing.join(', ')}` : '｜✅ 声明齐全'
         );
-        if (missing.length > 0) {
-          setScopeIssue(
-            `宿主持有的数据源声明缺少 ${missing.length} 张表（${missing.join('、')}）。` +
-              `这会导致这些表在展示态读不到 —— 请在配置态重新保存一次（会重新声明数据源）。`
-          );
+        if (missing.length > 0 && !autoDeclareDone.current) {
+          autoDeclareDone.current = true;
+          // ★ 自动修正：宿主里的声明集不完整时，用当前配置重新声明并写回。
+          //   这是「展示态自愈」——不要求用户回到配置态重新保存（那样体验很差，
+          //   而且用户根本不知道该这么做）。与 repiarDashboardConfigFromLastSave
+          //   的区别：这里重新推导声明集，而不是重放旧快照。
+          console.warn('[scopeCheck] 声明集不完整，尝试自动补声明…');
+          try {
+            const rebuilt = buildDataConditions(
+              data.forms ?? [],
+              data.forms?.find((f) => f?.mainTable?.tableId)?.mainTable?.tableId,
+              getBaseToken()
+            );
+            const thin = serializeConfig(data);
+            await (getDashboard() as any).saveConfig({ dataConditions: rebuilt, customConfig: thin });
+            console.log('[scopeCheck] 已按当前配置重新声明 dataConditions =', rebuilt.map((d) => d.tableId));
+            setScopeIssue('');
+            // ★ 等宿主消化这次声明写入，再做可访问性探测。
+            //   否则紧接着探测读到的还是「写入前」的权限快照，会把刚修好的
+            //   状态误报成不可读（本项目已多次栽在「写完立刻读」上）。
+            await new Promise((r) => setTimeout(r, 800));
+          } catch (se) {
+            console.warn('[scopeCheck] 自动补声明失败:', se);
+            setScopeIssue(
+              `宿主持有的数据源声明缺少 ${missing.length} 张表（${missing.join('、')}），` +
+                `且自动补声明失败。请在配置态重新保存一次。`
+            );
+          }
         }
       } catch (e) {
         console.warn('[scopeCheck] 无法读取宿主 dataConditions:', e);
@@ -399,26 +451,59 @@ export default function App() {
         let metaOk = false;
         let recordsOk = false;
         let firstErr = '';
+        // ★ 多方法对照：同一个表用不同调用方式各试一遍。
+        //   报错 `getRecordsByPage error, msg: undefined code: 12` 的 msg 是 undefined
+        //   —— 不像「权限拒绝」（那通常有明确文案），更像某个参数/能力不被支持。
+        //   所以必须区分「这个表整个读不到」还是「只是某种调用方式不支持」。
+        const detail: Record<string, string> = {};
         try {
           const t = await getBase().getTableById(tableId);
           try {
             await t.getFieldMetaList();
             metaOk = true;
+            detail.meta = 'ok';
           } catch (e) {
-            if (!firstErr) firstErr = String((e as Error)?.message ?? e);
+            detail.meta = String((e as Error)?.message ?? e);
+            if (!firstErr) firstErr = detail.meta;
           }
+          const anyT = t as any;
+          // ① 无条件、pageSize=1（最小请求）
           try {
-            const anyT = t as any;
-            const params = { pageSize: 1 };
-            if (typeof anyT.getRecordsByPage === 'function') await anyT.getRecordsByPage(params);
-            else await anyT.getRecords(params);
+            const r = typeof anyT.getRecordsByPage === 'function'
+              ? await anyT.getRecordsByPage({ pageSize: 1 })
+              : await anyT.getRecords({ pageSize: 1 });
             recordsOk = true;
+            detail.plain = `ok(${(r as any)?.records?.length ?? 0}条)`;
           } catch (e) {
-            if (!firstErr) firstErr = String((e as Error)?.message ?? e);
+            detail.plain = String((e as Error)?.message ?? e);
+            if (!firstErr) firstErr = detail.plain;
+          }
+          // ② 带 stringValue（部分宿主只支持这种）
+          try {
+            await anyT.getRecordsByPage({ pageSize: 1, stringValue: true });
+            detail.stringValue = 'ok';
+          } catch (e) {
+            detail.stringValue = String((e as Error)?.message ?? e);
+          }
+          // ③ 带 viewId（显式传 undefined，验证是否与参数相关）
+          try {
+            await anyT.getRecordsByPage({ pageSize: 1, viewId: undefined });
+            detail.withViewId = 'ok';
+          } catch (e) {
+            detail.withViewId = String((e as Error)?.message ?? e);
+          }
+          // ④ 旧接口 getRecords
+          try {
+            await anyT.getRecords({ pageSize: 1 });
+            detail.legacy = 'ok';
+          } catch (e) {
+            detail.legacy = String((e as Error)?.message ?? e);
           }
         } catch (e) {
-          if (!firstErr) firstErr = String((e as Error)?.message ?? e);
+          firstErr = String((e as Error)?.message ?? e);
+          detail.getTableById = firstErr;
         }
+        console.log(`[scopeCheck] 表 ${tableId} 各调用方式结果 =`, detail);
         probes.push({ tableId, metaOk, recordsOk, error: firstErr });
       }
       if (!alive) return;

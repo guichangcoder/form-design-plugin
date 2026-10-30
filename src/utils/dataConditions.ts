@@ -72,25 +72,36 @@ export function collectDeclaredTableIds(
   return out;
 }
 
-/** dataConditions 单条目（与 SDK IDataCondition 对齐的最小形态） */
+/** dataConditions 单条目（与 SDK IDataCondition 对齐） */
 export interface DataConditionEntry {
   tableId: string;
   baseToken?: string;
   dataRange: { type: 'ALL' };
-  groups: unknown[];
+  groups?: unknown[];
   series?: 'COUNTA';
 }
 
 /**
  * 构造完整的 `dataConditions` 声明集。
  *
- * - 主表：带 `series: 'COUNTA'`（保留原统计语义，与历史单条声明一致）；
- * - 其余表（子表 / 选项引用源表）：**仅作数据源声明**，不带 series
- *   （它们不参与图表聚合，带 series 反而可能被宿主当成一张要聚合的表）。
+ * 🔴 2026-10-30 修正：**结构必须与 `b33053f` 实测可用的形态一致**，即
+ *   `{ tableId, dataRange: { type: 'ALL' } }`，不要额外塞 `groups` / `series`。
+ *
+ * 背景：`b33053f` 注释明确记着那次是**实测跑通**的（多表声明可用）；
+ * 而 02c9ac2 我给它加了 `groups: []` 与 `series: 'COUNTA'`，结果三轮修复
+ * 全部无效、宿主仍报 `getRecordsByPage error, msg: undefined code: 12`
+ * ——`msg` 为 undefined 说明错误对象在宿主侧被降级，这是「宿主不认这个
+ * payload」的特征，而不是「表没权限」。多出的字段很可能让整个声明被丢弃。
+ *
+ * 所以这里只保留两个必需的键：声明哪张表 + 取全表数据。
+ * `baseToken` 仅在明确传入时附加（应用模式 1:N 场景需要它来指明 base）。
+ *
+ * ⚠️ 若将来确实需要图表聚合语义（`series`），必须先在真机上验证宿主接受度，
+ *    不要凭 SDK 类型定义想当然（类型允许 ≠ 宿主接受）。
  *
  * @param forms     全部表单
- * @param primaryTableId 主表单的主表 id（优先用它当「统计主体」）
- * @param baseToken 配置所属多维表格（非空时必须带上，否则宿主拒绝声明）
+ * @param primaryTableId 主表单的主表 id（保留参数以兼容既有调用，当前不参与构造）
+ * @param baseToken 配置所属多维表格（非空时附加）
  */
 export function buildDataConditions(
   forms: (TableRefLike | null | undefined)[] | null | undefined,
@@ -99,20 +110,14 @@ export function buildDataConditions(
 ): DataConditionEntry[] {
   const ids = collectDeclaredTableIds(forms);
   if (ids.length === 0) return [];
-  // 统计主体：优先调用方指定的主表；否则取声明集首个（即第一份表单的主表）
-  const primary = (primaryTableId && ids.includes(primaryTableId)) ? primaryTableId : ids[0];
   const tok = typeof baseToken === 'string' && baseToken ? baseToken : undefined;
+  void primaryTableId;
 
-  return ids.map((tableId) => {
-    const entry: DataConditionEntry = {
-      tableId,
-      ...(tok ? { baseToken: tok } : {}),
-      dataRange: { type: 'ALL' },
-      groups: [],
-    };
-    if (tableId === primary) entry.series = 'COUNTA';
-    return entry;
-  });
+  return ids.map((tableId) => ({
+    tableId,
+    ...(tok ? { baseToken: tok } : {}),
+    dataRange: { type: 'ALL' as const },
+  }));
 }
 
 /**
