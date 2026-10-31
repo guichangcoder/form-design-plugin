@@ -115,11 +115,9 @@ export function serializeConfig(data: PluginData): any {
         fields: (form.mainTable?.fields ?? []).map(trimField),
       },
       subTables: (form.subTables ?? []).map((s) => ({
-        // ★ 子表 tableId 必须保留：宿主 View 态校验「customConfig 引用的每张表
-        //   都必须在 dataConditions 里」→ saveConfig 用 utils/dataConditions.ts 的
-        //   buildDataConditions 声明**全部**被引用的表（主表 + 子表 + 选项引用源表），
-        //   两边对齐才能通过（实测剥离子表 tableId 反而仍报「配置数据发生变更」
-        //   → 校验对象是「声明的数据源集合」，不是字符串扫描）。
+        // ★ 子表 tableId 必须保留：插件运行时靠它定位子表（读/写子表记录）。
+        //   注意：应用插件 dataConditions 只授权「主表一条 + baseToken」（官方「仅支持一组条件」），
+        //   子表不进 dataConditions，而是靠主表的关联字段（linkFieldId）连带授权。
         tableId: s.tableId,
         linkFieldId: s.linkFieldId,
         // 区块名称同样保留（用户手填，无法重取）

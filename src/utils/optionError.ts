@@ -112,6 +112,25 @@ export function describeOptionError(
 }
 
 /**
+ * ★ 判断「读不到」后是否还要**吞掉** base 绑定诊断（`explainRefReadFailure` 的结论）。
+ *
+ * 🔴 为什么只有 `field-invalid` 才该吞（2026-10-30 第八轮实测）：
+ * 组件里原本写成 `if (preset)`，即「凡是 errorCode 命中过 describeOptionError
+ * 就跳过 base 绑定诊断」。于是 `scan-failed`（= getRecordsByPage code:12）这一
+ * **最需要诊断**的 case 也被吞掉 —— 用户每一轮截图都只有一句笼统的
+ * 「读取源表记录时出错」，我无法区分「绑错 base / 没登记数据源 / 没权限」，
+ * 只能继续猜。而 `field-invalid`（字段已被删/重建）时源表其实就在正确的
+ * 多维表格里，再报「连错 base / 没登记」会把人引向错误处置。
+ *
+ * @returns true = 跳过 base 绑定诊断（仅字段已失效时）；false = 正常展示
+ */
+export function shouldSuppressRefDiagnosis(
+  code: OptionErrorCodeLike | string | null | undefined
+): boolean {
+  return code === 'field-invalid';
+}
+
+/**
  * ★ 底部状态栏文案（纯函数，供回归测试真实调用）。
  *
  * 🔴 抽出来的原因（本项目铁律：UI 类缺陷必须抽纯函数、测试真实调用它）：

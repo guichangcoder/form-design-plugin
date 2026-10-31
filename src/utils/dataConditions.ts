@@ -82,42 +82,54 @@ export interface DataConditionEntry {
 }
 
 /**
- * 构造完整的 `dataConditions` 声明集。
+ * 构造 `dataConditions`（应用插件的数据源授权声明）。
  *
- * 🔴 2026-10-30 修正：**结构必须与 `b33053f` 实测可用的形态一致**，即
- *   `{ tableId, dataRange: { type: 'ALL' } }`，不要额外塞 `groups` / `series`。
+ * 🔴🔴 2026-10-30 第八轮·彻底修正方向（此前理解反了）：
+ * 官方《App 插件开发指南》明确：
+ *   - 「应用模式会根据插件保存的「多维表格」和「数据表」授权当前应用读取该表格数据，
+ *     若有读取表格数据诉求需要把 baseToken 和 tableId 存到特定路径」
+ *   - 「saveConfig 调用时，若传了非空的 dataConditions，一定要传 baseToken」
+ *   - `dataConditions: IDataCondition | IDataCondition[]; // 数据源配置，**当前版本仅支持一组条件**`
+ *   - `IDataCondition { baseToken: string; tableId: string; ... }`（两者都是「必须传」）
+ *   - 升级指南示例注释：「若需从底表获取数据，一定要在这里传 baseToken」
  *
- * 背景：`b33053f` 注释明确记着那次是**实测跑通**的（多表声明可用）；
- * 而 02c9ac2 我给它加了 `groups: []` 与 `series: 'COUNTA'`，结果三轮修复
- * 全部无效、宿主仍报 `getRecordsByPage error, msg: undefined code: 12`
- * ——`msg` 为 undefined 说明错误对象在宿主侧被降级，这是「宿主不认这个
- * payload」的特征，而不是「表没权限」。多出的字段很可能让整个声明被丢弃。
+ * 也就是说：应用插件靠 dataConditions 里的 **baseToken + tableId** 授权「读取这一张表的数据」，
+ * 而且**当前版本只支持一组（一张表）**。之前这里把 dataConditions 当成「多表授权声明」，
+ * 往里面塞了「主表 + 子表 + 源表」多条 —— 宿主只保留第一条（主表），其余被丢弃
+ * （正是线上诊断「宿主持有 1 张表」的来源），于是引用选项的**源表没被授权**，
+ * 刷新进 View 态读源表就报 `table permission denied`。
  *
- * 所以这里只保留两个必需的键：声明哪张表 + 取全表数据。
- * `baseToken` 仅在明确传入时附加（应用模式 1:N 场景需要它来指明 base）。
+ * 正确做法：dataConditions **只放主表一条**（tableId + baseToken）。子表靠主表的
+ * 关联字段（link）连带授权；其余表（引用选项源表等）若需要直接读，也必须以 link
+ * 关联主表（飞书原生「引用选项」正是 link + lookup 的模型），否则平台不予授权。
  *
- * ⚠️ 若将来确实需要图表聚合语义（`series`），必须先在真机上验证宿主接受度，
- *    不要凭 SDK 类型定义想当然（类型允许 ≠ 宿主接受）。
+ * `dataRange: { type: 'ALL' }` 表示授权「全部数据范围」，保留之（官方 IDataRange 语义）。
  *
- * @param forms     全部表单
- * @param primaryTableId 主表单的主表 id（保留参数以兼容既有调用，当前不参与构造）
- * @param baseToken 配置所属多维表格（非空时附加）
+ * @param forms     全部表单（仅用于推导主表；其余表不进 dataConditions）
+ * @param primaryTableId 主表单的主表 id（唯一要授权的表）
+ * @param baseToken 配置所属多维表格（应用模式必传，否则底表数据读不到）
  */
 export function buildDataConditions(
   forms: (TableRefLike | null | undefined)[] | null | undefined,
   primaryTableId?: string | null,
   baseToken?: string | null
 ): DataConditionEntry[] {
+  const tok = typeof baseToken === 'string' && baseToken ? baseToken : undefined;
   const ids = collectDeclaredTableIds(forms);
   if (ids.length === 0) return [];
-  const tok = typeof baseToken === 'string' && baseToken ? baseToken : undefined;
-  void primaryTableId;
+  // ★ 只授权主表一张表；primaryTableId 必须在收集集里才采用（否则回退第一张，即主表）。
+  const mainId =
+    typeof primaryTableId === 'string' && primaryTableId.trim() && ids.includes(primaryTableId)
+      ? primaryTableId.trim()
+      : ids[0];
 
-  return ids.map((tableId) => ({
-    tableId,
-    ...(tok ? { baseToken: tok } : {}),
-    dataRange: { type: 'ALL' as const },
-  }));
+  return [
+    {
+      tableId: mainId,
+      ...(tok ? { baseToken: tok } : {}),
+      dataRange: { type: 'ALL' as const },
+    },
+  ];
 }
 
 /**
@@ -136,15 +148,11 @@ export function findUndeclaredTables(
  * ★ 构造「重放用的 payload」—— 纯函数，供回归测试真实调用。
  *
  * 🔴 为什么重放不能照抄 localStorage 里存下的 `dataConditions`：
- *
- * 那份 payload 是「上一次保存那一刻」的快照，可能早于声明逻辑的升级。
- * 例如旧版本只声明主表一条，若原样重放，等于把「已扩大的声明集」又缩回去 →
- * 选项引用源表再次不在声明集里 → 刷新后依然整表不可读
- * （2026-10-30 实测：`02c9ac2` 修好了 saveConfig，但 App 的 View 态自动修复
- *   每次加载都重放旧 payload，把修复覆盖掉，用户端表现完全没变）。
- *
- * 正解：声明集一律**按当前 customConfig 重新推导**，只把 customConfig 当数据用。
- * 这样重放天然带上最新的声明逻辑，与真实 saveConfig 的产出一致。
+ * 那份 payload 是「上一次保存那一刻」的快照，可能早于声明逻辑的升级
+ * （例如旧版本带 `groups`、缺 `baseToken`，或曾塞了多表）。若原样重放，
+ * 等于把错误的旧形态重新写回宿主。所以一律**按当前 customConfig 重新推导**
+ * （只把 customConfig 当数据用），让重放天然带上最新、正确的声明形态
+ * （应用插件：只主表一条 + baseToken）。
  *
  * 边界：若当前配置里一张表都推不出来（空配置/异常形态），退回保存时的声明集，
  * 避免把 payload 变成空声明导致宿主报「配置数据发生变更」。
@@ -170,17 +178,27 @@ export function buildReplayPayload(
     };
   }
 
-  const savedIds = saved.map((d) => d?.tableId).filter(Boolean);
-  const newIds = rebuilt.map((d) => d.tableId);
-  const sameSet =
-    savedIds.length === newIds.length && newIds.every((id) => savedIds.includes(id));
+  // 结构是否等价：比较归一化后的完整结构（tableId/baseToken/dataRange/groups/series），
+  // 而不是只看 tableId 集合 —— 旧 payload 若缺 baseToken、或带 groups、或塞了多表，
+  // 都属于「需重建为当前正确形态」，要标记 upgraded 供线上日志确认。
+  const norm = (arr: DataConditionEntry[] | null | undefined) =>
+    (arr ?? [])
+      .map((d) => ({
+        tableId: d?.tableId ?? '',
+        baseToken: d?.baseToken ?? '',
+        dataRangeType: d?.dataRange?.type ?? '',
+        groupsLen: Array.isArray(d?.groups) ? d.groups.length : 0,
+        hasSeries: d?.series != null,
+      }))
+      .sort((a, b) => (a.tableId < b.tableId ? -1 : 1));
+  const sameSet = JSON.stringify(norm(rebuilt)) === JSON.stringify(norm(saved));
   if (sameSet) {
-    // 声明集等价 → 仍用重建结果（补上 baseToken/COUNTA 等最新形态），但不算升级
     return { dataConditions: rebuilt, upgraded: false, reason: 'same-set' };
   }
+  const savedIds = saved.map((d) => d?.tableId).filter(Boolean);
   return {
     dataConditions: rebuilt,
     upgraded: true,
-    reason: savedIds.length === 0 ? 'rebuilt-from-empty' : 'expanded-from-stale-payload',
+    reason: savedIds.length === 0 ? 'rebuilt-from-empty' : 'rebuilt-to-current-form',
   };
 }

@@ -201,8 +201,20 @@ export function explainRefReadFailure(input: {
   if (input?.baseBound === false) {
     return `插件没有连上配置所指定的多维表格（数据源标记 ${token}），当前使用的是宿主默认的多维表格，因此读不到源表 ${src}。这通常是页面刷新后数据源尚未就绪导致的 —— 请先刷新页面重试；若仍失败，请进入配置模式重新选择数据源并保存。`;
   }
-  // ④ base 表清单都拿不到 → 整个 base 不可达
+  /**
+   * 🔴 visible（getTableMetaList）拿不到时，绝不能直接判「base 不可达」——
+   *   应用插件 View 态**只能访问已登记的数据源表、不能列全表**，所以
+   *   getTableMetaList 在 View 态几乎必然失败，它不是「base 是否可达」的可靠判据。
+   *   此时只要 `declared`（宿主持有的 dataConditions）可读，且明确缺这张源表，
+   *   「没登记数据源」才是真正的结论（而 `table permission denied` 正是其典型特征）。
+   *   2026-10-30 第八轮实测：code:12 伴生 table permission denied 时，旧逻辑
+   *   误报「无法读取数据表清单」，把真正的「没登记」结论吞掉了。
+   */
   if (visible === null) {
+    if (declared !== null && !declared.includes(src)) {
+      return `源表 ${src} 没有被登记为插件的数据源（宿主持有 ${declared.length} 张表，不含该表）。应用模式只会加载登记过的数据源表，因此读不到它的记录 —— 请进入配置模式重新保存一次，让插件重新登记数据源。`;
+    }
+    // ④ 连表清单都拿不到、且无从用 declared 定位 → 才报「base 不可达」
     return `无法读取当前多维表格的数据表清单（数据源标记 ${token}）。插件可能没有连上任何多维表格，请刷新页面重试；若持续失败，请重新进入配置模式选择数据源并保存。`;
   }
   // ① base 绑定错位：源表根本不在这张多维表格里

@@ -1,15 +1,15 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Select, Typography } from '@douyinfe/semi-ui';
-import { getBaseToken } from '../../services/appContext';
+import { getBaseToken, onAppChange } from '../../services/appContext';
 import { FieldConfig, FormValues } from '../../types';
 import { hasOptionRef, conditionSpecOf } from '../../utils/optionRef';
 import { stringifyCellValue, extractOptionTexts } from '../../utils/cellText';
 import { classifySdkError, ClassifiedError } from '../../utils/permError';
 import { explainRefReadFailure } from '../../utils/scopeCheck';
-import { describeOptionError, buildRefFooterText, buildRefEmptyContent, resolveFallbackOptions } from '../../utils/optionError';
+import { describeOptionError, shouldSuppressRefDiagnosis, buildRefFooterText, buildRefEmptyContent, resolveFallbackOptions } from '../../utils/optionError';
 import {
   searchAllRows,
-  enumerateRefOptions,
+  enumerateRefOptionsWithRecovery,
   collectRefReadContext,
   OptionEnumResult,
   SearchHandle,
@@ -74,6 +74,11 @@ export function RefOptionSelect({
   const [refDiagnosis, setRefDiagnosis] = useState('');
   const [opened, setOpened] = useState(false);
   const openedRef = useRef(false);
+  /** 手动重试计数：错误框点「重试」后强制重新执行读取 effect */
+  const [retryNonce, setRetryNonce] = useState(0);
+  /** Base 重绑成功计数：展示态自愈后必须重新读源表，不能保留旧错误 */
+  const [appEpoch, setAppEpoch] = useState(0);
+  useEffect(() => onAppChange(() => setAppEpoch((n) => n + 1)), []);
   /** ★ 源表读不到时的降级标记：true = 当前选项来自本字段的静态选项域，不是源表实时值 */
   const [degraded, setDegraded] = useState(false);
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -139,11 +144,16 @@ export function RefOptionSelect({
     setMeta(null);
     setScanProgress(null);
     setDegraded(false);
+    // 🔴 重试/自愈重新读源表前必须清掉上一次的失败态：否则重试成功后
+    //   `error` 仍挂在状态里，错误框会继续占据整块区域、把已恢复的下拉框挡住。
+    setError('');
+    setErrorHelp(null);
+    setRefDiagnosis('');
     if (hasPendingCond) {
       setDone(true);
       return;
     }
-    const h = enumerateRefOptions(ref.tableId, ref.fieldId, condSpecs, {
+    const h = enumerateRefOptionsWithRecovery(ref.tableId, ref.fieldId, condSpecs, {
       valueFieldType: ref.fieldType,
       onOption: (v) => {
         if (!alive) return;
@@ -214,9 +224,18 @@ export function RefOptionSelect({
             collectRefReadContext()
               .then((ctx) => {
                 if (!alive) return;
-                // ★ 已由 errorCode 定性出精确原因时，不再用「连错 base / 没登记数据源」
-                //   那套猜测覆盖它 —— 那些结论在「字段被删」场景下是错的。
-                if (preset) {
+                /**
+                 * 🔴 只在「字段已失效（field-invalid）」时跳过 base 绑定诊断。
+                 *   那种情况下源表其实就在正确的多维表格里，再报「连错 base /
+                 *   没登记数据源」会把人引向错误处置。
+                 *   而 `scan-failed`（= getRecordsByPage code:12）恰恰是**最需要**
+                 *   这份诊断的场景：它既可能是「绑错 base」也可能是「源表没登记
+                 *   数据源」也可能是「没权限」，四者处置完全不同。之前这里写成
+                 *   `if (preset)`，把 scan-failed / meta-failed / records-unreadable
+                 *   的诊断也一并吞掉（2026-10-30 第八轮截图实证：code:12 仍在报，
+                 *   但诊断结论完全缺失）。判定抽成纯函数 `shouldSuppressRefDiagnosis`。
+                 */
+                if (shouldSuppressRefDiagnosis(res.errorCode)) {
                   setRefDiagnosis('');
                   return;
                 }
@@ -260,7 +279,7 @@ export function RefOptionSelect({
       enumP?.cancel();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [preview, refOk, ref?.tableId, ref?.fieldId, opened, condKey, hasPendingCond]);
+  }, [preview, refOk, ref?.tableId, ref?.fieldId, opened, condKey, hasPendingCond, retryNonce, appEpoch]);
 
   /** 关键字输入：逐页查询（按源值字段 contains），命中即时并入（可被下一次输入取消） */
   const handleSearch = useCallback(
@@ -417,6 +436,25 @@ export function RefOptionSelect({
             {refDiagnosis}
           </div>
         )}
+        {/* ★ 手动重试：数据源刚刷新/刚绑定时，读取失败往往只是「宿主尚未就绪」，
+            点一下强制重新读源表即可自愈（自动恢复只在零候选 + 明确读取故障时兜底）。 */}
+        <button
+          type="button"
+          onClick={() => setRetryNonce((n) => n + 1)}
+          style={{
+            marginTop: 8,
+            padding: '3px 14px',
+            fontSize: 12,
+            lineHeight: '20px',
+            color: '#9a3412',
+            background: '#fff',
+            border: '1px solid #fdba74',
+            borderRadius: 6,
+            cursor: 'pointer',
+          }}
+        >
+          重试
+        </button>
       </div>
     );
   }

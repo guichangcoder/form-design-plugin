@@ -1291,6 +1291,17 @@ export type OptionErrorCode =
   | 'filter-ineffective'
   | 'query-empty';
 
+/**
+ * 引用选项的一次失败是否值得自动重试。
+ *
+ * 只重试「源表/字段结构暂时读不到」且没有任何候选值的情形；字段已失效、
+ * 条件无匹配、已有部分结果均不重试，避免无意义请求或覆盖可用选项。
+ */
+export function shouldRetryOptionEnum(r: OptionEnumResult | null | undefined): boolean {
+  if (!r || r.values.length > 0 || !r.error) return false;
+  return r.errorCode === 'scan-failed' || r.errorCode === 'meta-failed';
+}
+
 /** 存在性探测的并发度（过大易触发限流，8 是稳妥值） */
 export const PROBE_CONCURRENCY = 8;
 /** 候选选项上限（防止异常字段配置把请求数拖爆） */
@@ -1894,6 +1905,64 @@ export function enumerateRefOptions(
     // ③ 其它情形（无选项域 / 元信息不可用 / 引擎指定扫描）→ 渐进全量扫描
     //    这是唯一必然可用的路径，保证「永不静默只给 200 条」。
     return await runScan();
+  })();
+
+  return {
+    cancel: () => {
+      cancelled = true;
+      inner?.cancel();
+    },
+    promise,
+  };
+}
+
+type RefEnumerateOptions = NonNullable<Parameters<typeof enumerateRefOptions>[3]>;
+
+/**
+ * 引用选项专用的有界恢复读取。
+ *
+ * 刷新进入 View 态时，Base 实例可能已创建，但宿主尚未把声明源表的记录
+ * 准备完成；此时第一次 getRecordsByPage 会抛 `msg: undefined code: 12`。
+ * 原实现只读一次，且下拉关闭再打开也不会重新执行 effect，导致一次早期
+ * 失败永久留在界面。这里仅在「零候选 + 明确的读取故障」时做短退避重试，
+ * 成功或遇到配置类错误立即停止，不影响其他选择器与提交路径。
+ */
+export function enumerateRefOptionsWithRecovery(
+  tableId: string,
+  valueFieldId: string,
+  conditions: ConditionSpec[],
+  opts?: RefEnumerateOptions,
+  recovery?: {
+    /** 总尝试次数（含首次），默认 3 */
+    maxAttempts?: number;
+    /** 第一次重试前的基准延迟，后续按 2 倍递增；默认 400ms */
+    baseDelayMs?: number;
+    /** 测试可注入假 sleep，生产无需传 */
+    sleep?: (ms: number) => Promise<void>;
+  }
+): { cancel: () => void; promise: Promise<OptionEnumResult> } {
+  let cancelled = false;
+  let inner: { cancel: () => void } | null = null;
+  const maxAttempts = Math.max(1, Math.floor(recovery?.maxAttempts ?? 3));
+  const baseDelayMs = Math.max(0, recovery?.baseDelayMs ?? 400);
+  const sleep = recovery?.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+
+  const promise = (async (): Promise<OptionEnumResult> => {
+    let last: OptionEnumResult | null = null;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const h = enumerateRefOptions(tableId, valueFieldId, conditions, opts);
+      inner = h;
+      last = await h.promise;
+      if (cancelled || !shouldRetryOptionEnum(last) || attempt >= maxAttempts - 1) return last;
+      const delay = baseDelayMs * 2 ** attempt;
+      console.warn(
+        `[tableRecords] 引用选项读取未就绪，${delay}ms 后重试（第 ${attempt + 2}/${maxAttempts} 次）：表=${tableId}`
+      );
+      await sleep(delay);
+      if (cancelled) return last;
+    }
+    // maxAttempts 最小为 1，循环必然至少执行一次；仅作类型兜底。
+    return last!;
   })();
 
   return {

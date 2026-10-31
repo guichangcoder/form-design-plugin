@@ -44,6 +44,7 @@ import {
 import { classifySdkError } from '../src/utils/permError';
 import {
   describeOptionError,
+  shouldSuppressRefDiagnosis,
   buildRefFooterText,
   buildRefEmptyContent,
   resolveFallbackOptions,
@@ -84,6 +85,8 @@ import {
   enumerateOptionsByProbe,
   enumerateFieldValuesByColumn,
   enumerateRefOptions,
+  enumerateRefOptionsWithRecovery,
+  shouldRetryOptionEnum,
   shouldCacheFieldOptions,
   isScanComplete,
   shouldCacheScanResult as shouldCacheScanResultPure,
@@ -5238,46 +5241,41 @@ async function run() {
         ids[0] === MAIN36, { ids });
     }
 
-    // ---------- 2) dataConditions 结构正确 ----------
+    // ---------- 2) dataConditions 结构正确（应用插件：只授权主表一条） ----------
     {
       const dc = buildDataConditions(forms36, MAIN36, TOK36);
-      check('F36 ★★★ dataConditions 条目数 = 声明表数（不多不少）',
-        dc.length === 4, { got: dc.map((d) => d.tableId) });
-      check('F36 ★★★ 每条都带 dataRange:{type:"ALL"} 与 groups:[]（宿主格式要求，缺了会被过滤）',
-        dc.every((d) => d.dataRange?.type === 'ALL'), null);
-      check('F36 ★★ 每条都带 baseToken（非空时必须带，否则宿主拒绝声明）',
-        dc.every((d) => d.baseToken === TOK36), null);
-      // 🔴 2026-10-30 修正：实测通过的形态（b33053f）是极简的
-      //   { tableId, dataRange:{type:'ALL'} }，**不带** groups / series。
-      //   加了这些多余字段后三轮修复全部无效（宿主报 msg:undefined code:12），
-      //   故断言改为「不得出现多余字段」。
-      check('F36 ★★★ 不得带 groups / series 等多余字段（b33053f 实测形态，多了宿主会整体拒绝）',
-        dc.every((d) => d.groups === undefined && d.series === undefined),
-        { sample: dc[0] });
-      check('F36 ★★ 每条只含 tableId + dataRange（+baseToken），不多不少',
-        dc.every((d) => {
-          const keys = Object.keys(d).sort().join(',');
+      check('F36 ★★★ dataConditions 只授权主表一条（应用插件「仅支持一组条件」）',
+        dc.length === 1 && dc[0].tableId === MAIN36, { got: dc.map((d) => d.tableId) });
+      check('F36 ★★★ 主表条目带 dataRange:{type:"ALL"}（授权全部数据范围）',
+        dc[0].dataRange?.type === 'ALL', null);
+      check('F36 ★★ 主表条目带 baseToken（非空时必须带，否则底表读不到）',
+        dc[0].baseToken === TOK36, null);
+      // 🔴 2026-10-30 第八轮修正：应用插件 dataConditions 只放主表一条（tableId + baseToken），
+      //   不得塞子表/源表多条（宿主「仅支持一组条件」，多余的会被丢弃），也不得带 groups/series。
+      check('F36 ★★★ 不得带 groups / series 等多余字段（多了宿主会整体拒绝）',
+        dc[0].groups === undefined && dc[0].series === undefined, { sample: dc[0] });
+      check('F36 ★★ 主表条目只含 tableId + dataRange（+baseToken），不多不少',
+        (() => {
+          const keys = Object.keys(dc[0]).sort().join(',');
           return keys === 'baseToken,dataRange,tableId' || keys === 'dataRange,tableId';
-        }),
-        { sampleKeys: Object.keys(dc[0] ?? {}).sort() });
+        })(), { sampleKeys: Object.keys(dc[0] ?? {}).sort() });
       check('F36 ★ 无 baseToken 时不伪造该字段（旧配置兼容）',
         buildDataConditions(forms36, MAIN36, undefined).every((d) => d.baseToken === undefined), null);
     }
 
-    // ---------- 3) 反向对照：旧实现（只声明主表）必须被判为「漏声明」 ----------
-    // 这一步是「证明断言不是恒真」的关键：用旧行为当输入，必须识别出缺失。
+    // ---------- 3) collectDeclaredTableIds 用于「诊断探测」，覆盖所有被引用表 ----------
+    // 注意：新契约下子表/源表**不进 dataConditions**（应用插件只授权主表一条），
+    //       但诊断仍要逐张探测「是否可读」，所以收集集必须完整（含选项引用源表）。
     {
       const ids = collectDeclaredTableIds(forms36);
-      const legacyDeclared = [MAIN36]; // 旧 saveConfig 的实际产物
-      const missing = findUndeclaredTables(forms36, legacyDeclared);
-      check('F36 ★★★ 反向对照：旧实现（只声明主表）被识别出 3 张漏声明的表',
-        missing.length === 3 &&
-        missing.includes(SUB36) && missing.includes(SRC_A) && missing.includes(SRC_B),
-        { missing });
-      check('F36 ★★★ 反向对照：漏声明集合里必须含「选项引用源表」（否则本次缺陷会重现）',
-        missing.includes(SRC_A), { missing });
-      check('F36 ★★ 正向对照：用新实现构造的声明集，漏声明为空（不多也不少）',
-        findUndeclaredTables(forms36, ids).length === 0, null);
+      check('F36 ★★★ 诊断收集集完整覆盖主表/子表/两个源表（供自检逐表探测）',
+        ids.length === 4 &&
+        [MAIN36, SUB36, SRC_A, SRC_B].every((id) => ids.includes(id)),
+        { ids });
+      // findUndeclaredTables = 纯「集合差」工具：引用集 \ 声明集（诊断用，不再是「漏声明」判定）
+      const diff = findUndeclaredTables(forms36, [MAIN36]);
+      check('F36 ★★ findUndeclaredTables = 引用集 \ 声明集（纯集合差，诊断用）',
+        diff.length === 3 && diff.includes(SRC_A), { diff });
     }
 
     // ---------- 4) 边界 ----------
@@ -5292,21 +5290,21 @@ async function run() {
       check('F36 ★ 纯主表配置 → 仍只声明 1 条（修复不影响简单场景）',
         dcPlain.length === 1 && dcPlain[0].tableId === 'tblOnly36', null);
 
-      // 多表单：所有表单的引用都要合并声明（不同表单可能引不同的源表）
+      // 多表单：只授权 primaryTableId 指向的主表（源表/子表不进 dataConditions，靠 link 连带）
       const multi = [
         { mainTable: { tableId: 'tblM1', fields: [{ optionRef: { tableId: 'tblS1' } }] }, subTables: [] },
         { mainTable: { tableId: 'tblM2', fields: [{ optionRef: { tableId: 'tblS2' } }] }, subTables: [] },
       ];
       const dcMulti = buildDataConditions(multi, 'tblM1', TOK36);
-      check('F36 ★★ 多表单：合并声明全部表单引用的表（含各自的源表）',
-        dcMulti.length === 4 &&
-        ['tblM1', 'tblS1', 'tblM2', 'tblS2'].every((id) => dcMulti.some((d) => d.tableId === id)),
+      check('F36 ★★ 多表单：只授权主表 tblM1（源表不进 dataConditions）',
+        dcMulti.length === 1 && dcMulti[0].tableId === 'tblM1',
         { got: dcMulti.map((d) => d.tableId) });
 
-      // 主表 id 不在声明集里（调用方传错）→ 不丢表、不崩
+      // 主表 id 传错（不在声明集里）→ 回退到收集到的第一张表（主表总是第一个），不崩
       const dcWrong = buildDataConditions(forms36, 'tblNotExist', TOK36);
-      check('F36 ★ 主表 id 传错时仍声明全部表（不丢表、不崩）',
-        dcWrong.length === 4, { got: dcWrong.map((d) => d.tableId) });
+      check('F36 ★ 主表 id 传错时回退到收集集第一张表（不丢主表、不崩）',
+        dcWrong.length === 1 && dcWrong[0].tableId === MAIN36,
+        { got: dcWrong.map((d) => d.tableId) });
     }
 
     // ---------- 5) 结构性保障：saveConfig 必须走纯函数，不得再手写单表数组 ----------
@@ -5501,7 +5499,7 @@ async function run() {
   // ================================================================
   log('\n--- F38 重放旧 payload 不得把 dataConditions 缩回旧版 ---');
   {
-    const { buildDataConditions, findUndeclaredTables, buildReplayPayload } =
+    const { buildDataConditions, findUndeclaredTables, buildReplayPayload, collectDeclaredTableIds } =
       await import('../src/utils/dataConditions');
     // 构造与真实场景同形的 customConfig：主表 + 子表 + 两个选项引用源表
     const forms38 = [{
@@ -5520,19 +5518,22 @@ async function run() {
     // 「上一次保存」的旧 payload：旧版本只声明了主表
     const stalePayload = [{ tableId: 'tblMain38', dataRange: { type: 'ALL' }, groups: [] }];
 
-    // ★ 修复后的重放逻辑：按当前 customConfig 重建
+    // ★ 修复后的重放逻辑：按当前 customConfig 重建（应用插件只授权主表一条）
     const rebuilt38 = buildDataConditions(forms38, 'tblMain38', 'tok38');
     const dcIds38 = rebuilt38.map((d) => d.tableId);
-    check('F38 ★★★ 重放前按当前配置重建声明集 → 覆盖主表/子表/两个源表',
-      dcIds38.length === 4 &&
-      ['tblMain38', 'tblSub38', 'tblSrcA38', 'tblSrcB38'].every((id) => dcIds38.includes(id)),
+    check('F38 ★★★ 重建声明集 = 只主表一条（应用插件「仅支持一组条件」）',
+      dcIds38.length === 1 && dcIds38[0] === 'tblMain38',
       { got: dcIds38 });
 
-    check('F38 ★★★ 反向对照：若沿用旧 payload（只声明主表），漏掉 3 张表',
-      findUndeclaredTables(forms38, stalePayload.map((d) => d.tableId)).length === 3,
-      { missing: findUndeclaredTables(forms38, stalePayload.map((d) => d.tableId)) });
+    // 诊断收集集仍覆盖所有引用表（含源表）—— 供自检逐表探测，与 dataConditions 无关
+    const allRefs38 = collectDeclaredTableIds(forms38);
+    check('F38 ★★ 诊断收集集覆盖主表/子表/两个源表（供自检逐表探测）',
+      allRefs38.length === 4 &&
+      ['tblMain38', 'tblSub38', 'tblSrcA38', 'tblSrcB38'].every((id) => allRefs38.includes(id)),
+      { got: allRefs38 });
 
-    check('F38 ★★★ 重建结果 ≠ 旧 payload（证明本次确有升级，不是空转）',
+    // 重建结果 ≠ 旧 payload（旧 payload 带 groups、缺 baseToken，属错误形态）
+    check('F38 ★★★ 重建结果 ≠ 旧 payload（结构不同，证明确有重建，不是空转）',
       JSON.stringify(rebuilt38) !== JSON.stringify(stalePayload),
       null);
 
@@ -5542,18 +5543,17 @@ async function run() {
       JSON.stringify(rebuilt38) === JSON.stringify(rebuiltAgain38),
       null);
 
-    // ---------- 核心：真实调用 buildReplayPayload，验证「重放时用哪份声明集」 ----------
-    // 这一步才是真正能抓住「重放旧 payload 把声明集缩回」的断言。
-    // 上一版 F38 只测了 buildDataConditions 的返回值 + 源码里出现 buildDataConditions，
-    // 反向注入（把重放改回照抄 savedDc）依然全绿 —— 典型的假绿，已修正。
+    // ---------- 核心：真实调用 buildReplayPayload，验证「重放时用重建后的正确形态」 ----------
+    // 上一版 F38 只测 buildDataConditions 返回值 + 源码出现 buildDataConditions，反向注入全绿（假绿）。
     const replay38 = buildReplayPayload(stalePayload, customConfig38, 'tok38');
-    const replayIds38 = replay38.dataConditions.map((d) => d.tableId);
-    check('F38 ★★★ 真实调用 buildReplayPayload：重放用「重建后的声明集」而非旧 payload',
-      replayIds38.length === 4 &&
-      ['tblMain38', 'tblSub38', 'tblSrcA38', 'tblSrcB38'].every((id) => replayIds38.includes(id)),
-      { got: replayIds38, reason: replay38.reason });
-    check('F38 ★★★ 并明确标记为「已升级」（便于线上用日志确认修复生效）',
-      replay38.upgraded === true && replay38.reason === 'expanded-from-stale-payload',
+    check('F38 ★★★ 真实调用 buildReplayPayload：重放用重建后的「主表+baseToken」形态（无 groups）',
+      replay38.dataConditions.length === 1 &&
+      replay38.dataConditions[0].tableId === 'tblMain38' &&
+      replay38.dataConditions[0].baseToken === 'tok38' &&
+      replay38.dataConditions[0].groups === undefined,
+      { got: replay38.dataConditions, reason: replay38.reason });
+    check('F38 ★★★ 并标记为「已重建到当前形态」（旧 payload 缺 baseToken/带 groups）',
+      replay38.upgraded === true && replay38.reason === 'rebuilt-to-current-form',
       { upgraded: replay38.upgraded, reason: replay38.reason });
 
     // 边界：当前配置推不出表 → 保留原声明集（不能变成「声明 0 张表」）
@@ -5564,11 +5564,11 @@ async function run() {
       replayEmpty38.upgraded === false,
       { got: replayEmpty38.dataConditions.map((d) => d.tableId), reason: replayEmpty38.reason });
 
-    // 边界：声明集已等价 → 不算升级，但仍返回重建形态（补 baseToken/COUNTA）
+    // 边界：声明集已等价（主表 + 正确结构）→ 不算升级，避免每次刷新都刷日志
     const alreadyGood38 = buildDataConditions(forms38, 'tblMain38', 'tok38');
     const replaySame38 = buildReplayPayload(alreadyGood38, customConfig38, 'tok38');
     check('F38 ★★ 边界：声明集已等价 → 不标记升级（避免每次刷新都刷日志）',
-      replaySame38.upgraded === false && replaySame38.dataConditions.length === 4,
+      replaySame38.upgraded === false && replaySame38.dataConditions.length === 1,
       { reason: replaySame38.reason });
 
     // 结构性保障：repair 必须走 buildReplayPayload，不能直接照抄 saved
@@ -5754,6 +5754,20 @@ async function run() {
     check('F40 ★★★ 拿不到 base 表清单 → 判为「整个 base 不可达」，不说成权限',
       m4.includes('无法读取当前多维表格的数据表清单') && !m4.includes('管理员'),
       { msg: m4 });
+
+    // ④' visible 拿不到、但 declared 明确缺这张源表 → 必须优先报「没登记」，
+    //    不能让「拿不到表清单」把真结论吞掉（2026-10-30 第八轮实测：
+    //    View 态 getTableMetaList 常失败，伴生 table permission denied）
+    const m4b = explainRefReadFailure({
+      sourceTableId: SRC,
+      baseToken: 'bascnZZZ999888',
+      baseBound: true,
+      visibleTableIds: null,
+      hostDeclaredIds: ['tblMainOnly'],
+    });
+    check('F40 ★★★ visible 拿不到但 declared 缺源表 → 判为「没登记」，不误报「拿不到表清单」',
+      m4b.includes('没有被登记为插件的数据源') && !m4b.includes('无法读取当前多维表格的数据表清单'),
+      { msg: m4b });
 
     // 边界：无源表 id → 空串（调用方据此不渲染）
     check('F40 ★★ 源表 id 为空 → 返回空串，不渲染误导性结论',
@@ -6548,6 +6562,106 @@ async function run() {
       // 有条件 → 禁止缓存（随数据变化失效）
       check('F42e ★★ 带条件的结果 → 禁止进缓存（极易随数据变化失效）',
         shouldCacheScanResultPure({ values: [], complete: true, scanned: 0 }, 1) === false);
+    }
+
+    /* ---------- ⑥ 引用选项「零候选 + 明确读取故障」的有界自动恢复 ---------- */
+    {
+      // 纯函数：只对「结构暂时读不到」的失败重试，字段失效/已有值一律不重试
+      const failResult = (errorCode) => ({
+        values: [], error: 'x', errorCode, complete: false, truncated: false,
+        probes: 0, scanned: 0, source: 'scan', filterEffective: true,
+      });
+      check('F42f ★★★ 零候选 + scan-failed → 值得重试（刷新后首次读表失败可自愈）',
+        shouldRetryOptionEnum(failResult('scan-failed')) === true);
+      check('F42f ★★★ 零候选 + meta-failed → 值得重试（字段结构暂时读不到）',
+        shouldRetryOptionEnum(failResult('meta-failed')) === true);
+      check('F42f ★★ field-invalid → 不重试（字段已失效，重试无效应重新配置）',
+        shouldRetryOptionEnum(failResult('field-invalid')) === false);
+      check('F42f ★★ records-unreadable → 不重试（疑似权限/视图，短退避重试也读不出）',
+        shouldRetryOptionEnum(failResult('records-unreadable')) === false);
+      check('F42f ★★ 已有部分候选 → 不重试（绝不覆盖已可用的选项）',
+        shouldRetryOptionEnum({ ...failResult('scan-failed'), values: ['浙江省'] }) === false);
+      check('F42f ★★ 无 error / 空结果 → 不重试（没有「失败」事实）',
+        shouldRetryOptionEnum({ ...failResult('scan-failed'), error: '' }) === false &&
+        shouldRetryOptionEnum(null) === false &&
+        shouldRetryOptionEnum(undefined) === false);
+
+      // 诊断展示契约：只有 field-invalid（配置坏了）该吞掉 base 绑定诊断；
+      // scan-failed（code:12）等恰恰是最需要诊断的场景（2026-10-30 第八轮截图实证：
+      // code:12 仍在报、但诊断结论被 `if(preset)` 吞掉 → 无法定位根因）
+      check('F42f ★★★ scan-failed 不吞 base 绑定诊断（code:12 必须露结论）',
+        shouldSuppressRefDiagnosis('scan-failed') === false);
+      check('F42f ★★★ meta-failed / records-unreadable 也不吞（同样需要诊断）',
+        shouldSuppressRefDiagnosis('meta-failed') === false &&
+        shouldSuppressRefDiagnosis('records-unreadable') === false);
+      check('F42f ★★★ field-invalid 吞掉 base 绑定诊断（源表在正确 base，报错会误导）',
+        shouldSuppressRefDiagnosis('field-invalid') === true);
+      check('F42f ★★ 无 code / 未知 code → 不吞（分类器兜底时诊断仍要露）',
+        shouldSuppressRefDiagnosis(null) === false &&
+        shouldSuppressRefDiagnosis(undefined) === false &&
+        shouldSuppressRefDiagnosis('something-else') === false);
+
+      // 行为：首次读字段结构失败 → 短退避后重试成功，最终返回选项（不再一次失败永久卡死）
+      {
+        const T = 'tblRecovery42f';
+        const F = 'fldProv';
+        let metaCalls = 0;
+        const base = {
+          getTableById: async () => ({
+            getFieldMetaList: async () => {
+              metaCalls += 1;
+              if (metaCalls === 1) throw new Error('FieldMetaList error, msg: undefined code: 12');
+              return [{ id: F, name: '省份', type: 3, property: { options: [{ name: '浙江省' }, { name: '江苏省' }] } }];
+            },
+            getRecordsByPage: async () => ({ records: [], total: 0, hasMore: false }),
+          }),
+          getTableMetaList: async () => [{ id: T }],
+        };
+        selectBaseForTest({ base });
+        invalidateTableRecords();
+        const h = enumerateRefOptionsWithRecovery(T, F, [], { valueFieldType: FieldType.SingleSelect }, {
+          maxAttempts: 2,
+          baseDelayMs: 1,
+          sleep: async () => {},
+        });
+        const r = await h.promise;
+        check('F42f ★★★ 首次 meta 失败 → 自动重试后恢复并返回选项（不一次失败永久卡死）',
+          metaCalls >= 2 && r && !r.error && r.complete === true && r.values.length === 2 &&
+            r.values[0] === '浙江省' && r.values[1] === '江苏省',
+          { metaCalls, values: r && r.values });
+        selectBaseForTest(null);
+        invalidateTableRecords();
+      }
+
+      // 行为：字段已失效（field-invalid）→ 绝不重试，立即返回（避免无意义请求）
+      {
+        const T = 'tblNoRetry42f';
+        const F = 'fldGone';
+        let metaCalls = 0;
+        const base = {
+          getTableById: async () => ({
+            getFieldMetaList: async () => {
+              metaCalls += 1;
+              return [{ id: 'fldOTHER', name: '其它', type: 1 }];
+            },
+            getRecordsByPage: async () => ({ records: [], total: 0, hasMore: false }),
+          }),
+          getTableMetaList: async () => [{ id: T }],
+        };
+        selectBaseForTest({ base });
+        invalidateTableRecords();
+        const h = enumerateRefOptionsWithRecovery(T, F, [], { valueFieldType: FieldType.SingleSelect }, {
+          maxAttempts: 3,
+          baseDelayMs: 1,
+          sleep: async () => {},
+        });
+        const r = await h.promise;
+        check('F42f ★★★ 字段已失效 → 不重试（只读一次即返回 field-invalid）',
+          metaCalls === 1 && r && r.errorCode === 'field-invalid',
+          { metaCalls, code: r && r.errorCode });
+        selectBaseForTest(null);
+        invalidateTableRecords();
+      }
     }
   }
 

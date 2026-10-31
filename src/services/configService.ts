@@ -466,30 +466,21 @@ export async function saveConfig(data: PluginData): Promise<SaveResult> {
         }
       }
 
-      // ★ dataConditions = 「主表 + 子表 + 选项引用源表」完整声明集。
+      // ★ dataConditions = 「主表一条 + baseToken」（应用插件授权契约）。
       //
-      // 🔴 只声明主表会让 View 态读不到其他表（2026-10-30 线上缺陷）：
-      //   选项引用的**源表**既不是主表也不是子表 → 不在声明集里 → 刷新进 View 态后
-      //   整表不可访问（meta 与 records 两条链路同时报 permission denied /
-      //   partial_view_api_error / code:12）→ 表现为「第一次保存后选项生效，
-      //   刷新后配置还在但选不到任何选项」。
-      //   实测记录（见 git b33053f 注释）早已给出同一结论：
-      //   「宿主 View 态校验 customConfig 引用的每张表都必须在 dataConditions 里 …
-      //     校验的是声明集，不是字符串扫描」「只传 1 个主表 → 带子表必失败」。
-      //   统计语义（COUNTA）只挂在主表上，其余表仅作数据源声明 —— 由纯函数统一构造，
-      //   避免这里再出现「漏掉某一类引用」的同类缺陷。
+      // 🔴 应用插件官方契约（《App 插件开发指南》）：
+      //   「应用模式会根据插件保存的「多维表格」和「数据表」授权当前应用读取该表格数据」
+      //   「dataConditions ... 当前版本仅支持一组条件」
+      //   即：dataConditions 只放主表一条（tableId + baseToken）授权「读这一张表的数据」。
+      //   子表靠主表的关联字段（link）连带授权；引用选项源表若需直读，也必须以 link
+      //   关联主表（飞书原生「引用选项」正是 link + lookup 的模型）。
+      //   之前把 dataConditions 当「多表声明」，塞主表+子表+源表多条，宿主只留主表一条
+      //   （线上诊断「宿主持有 1 张表」），源表未授权 → 刷新进 View 态读源表 permission denied。
       const dataConditions = buildDataConditions(
         data?.forms ?? [],
         mainTableId,
         baseToken
       );
-      const declaredTableIds = dataConditions.map((d) => d.tableId);
-      const refSourceIds = declaredTableIds.filter(
-        (id) => id !== mainTableId && !(firstForm?.subTables ?? []).some((s) => s?.tableId === id)
-      );
-      if (refSourceIds.length > 0) {
-        console.log('[config] dataConditions 额外声明选项引用源表:', refSourceIds);
-      }
 
       let saveState = 'unknown';
       try {

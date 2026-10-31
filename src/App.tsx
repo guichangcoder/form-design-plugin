@@ -531,45 +531,35 @@ export default function App() {
       }
 
       // ★ 第二步：打印**宿主侧实际持有的 dataConditions**。
-      //   这是区分两种根因的决定性证据：
-      //   - 宿主里的声明集 ⊇ 这些 tableId → 声明没问题，问题在权限/base 绑定；
-      //   - 宿主里的声明集只有主表 → 声明没生效（保存/重放链路仍有问题）。
+      //   应用插件 dataConditions 只授权「主表一条 + baseToken」（官方契约「仅支持一组条件」），
+      //   所以这里只核对主表与 baseToken 是否就位，不再要求子表/源表也进 dataConditions
+      //   （子表靠主表 link 连带授权；源表若需直读也须 link 关联，否则平台不予授权）。
       try {
         const cfg: any = await (getDashboard() as any).getConfig();
         const hostDc: any[] = cfg?.dataConditions ?? [];
         const hostIds = hostDc.map((d) => d?.tableId).filter(Boolean);
-        const missing = tableIds.filter((id) => !hostIds.includes(id));
+        const mainTableId = data.forms?.find((f) => f?.mainTable?.tableId)?.mainTable?.tableId;
+        const curTok = getBaseToken();
+        const hostTokenOk = !curTok || hostDc.some((d) => d?.baseToken === curTok);
+        const mainMissing = !!mainTableId && !hostIds.includes(mainTableId);
         console.log(
-          '[scopeCheck] 宿主持有 dataConditions =', hostIds,
-          missing.length ? `｜🔴 宿主缺少: ${missing.join(', ')}` : '｜✅ 声明齐全'
+          '[scopeCheck] 宿主持有 dataConditions =', hostDc,
+          mainMissing ? '｜🔴 主表未声明' : (hostTokenOk ? '｜✅ 主表+baseToken 就位' : '｜🔴 缺 baseToken')
         );
-        if (missing.length > 0 && !autoDeclareDone.current) {
+        if ((mainMissing || !hostTokenOk) && !autoDeclareDone.current) {
           autoDeclareDone.current = true;
-          // ★ 自动修正：宿主里的声明集不完整时，用当前配置重新声明并写回。
-          //   这是「展示态自愈」——不要求用户回到配置态重新保存（那样体验很差，
-          //   而且用户根本不知道该这么做）。与 repiarDashboardConfigFromLastSave
-          //   的区别：这里重新推导声明集，而不是重放旧快照。
-          console.warn('[scopeCheck] 声明集不完整，尝试自动补声明…');
+          console.warn('[scopeCheck] dataConditions 不是「主表+baseToken」正确形态，自动重建…');
           try {
-            const rebuilt = buildDataConditions(
-              data.forms ?? [],
-              data.forms?.find((f) => f?.mainTable?.tableId)?.mainTable?.tableId,
-              getBaseToken()
-            );
+            const rebuilt = buildDataConditions(data.forms ?? [], mainTableId, curTok);
             const thin = serializeConfig(data);
             await (getDashboard() as any).saveConfig({ dataConditions: rebuilt, customConfig: thin });
-            console.log('[scopeCheck] 已按当前配置重新声明 dataConditions =', rebuilt.map((d) => d.tableId));
+            console.log('[scopeCheck] 已重写 dataConditions =', rebuilt);
             setScopeIssue('');
-            // ★ 等宿主消化这次声明写入，再做可访问性探测。
-            //   否则紧接着探测读到的还是「写入前」的权限快照，会把刚修好的
-            //   状态误报成不可读（本项目已多次栽在「写完立刻读」上）。
+            // ★ 等宿主消化这次声明写入，再做可访问性探测（写完立刻读会读到旧快照）。
             await new Promise((r) => setTimeout(r, 800));
           } catch (se) {
-            console.warn('[scopeCheck] 自动补声明失败:', se);
-            setScopeIssue(
-              `宿主持有的数据源声明缺少 ${missing.length} 张表（${missing.join('、')}），` +
-                `且自动补声明失败。请在配置态重新保存一次。`
-            );
+            console.warn('[scopeCheck] 自动重建 dataConditions 失败:', se);
+            setScopeIssue('插件数据源声明不完整且自动修复失败，请在配置态重新保存一次。');
           }
         }
       } catch (e) {
